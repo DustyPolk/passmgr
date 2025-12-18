@@ -47,6 +47,12 @@ Add a new service. You will be securely prompted for the Master Password (to unl
 ./passmgr add google.com myemail@gmail.com
 ```
 
+You can also auto-generate a secure password during addition:
+```bash
+./passmgr add --generate google.com myemail@gmail.com
+./passmgr add --generate --simple --length 24 google.com myemail@gmail.com
+```
+
 ### 2. Get a Credential
 Retrieve a password.
 
@@ -72,7 +78,16 @@ Remove an entry permanently.
 ./passmgr delete google.com
 ```
 
-### 5. Help
+### 5. Generate a Password
+Generate a secure password without storing it.
+
+```bash
+./passmgr generate                      # Default: Strong, 20 chars
+./passmgr generate --simple             # Alphanumeric only
+./passmgr generate --pin --length 6     # 6-digit PIN
+```
+
+### 6. Help
 View all commands and options.
 
 ```bash
