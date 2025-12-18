@@ -1,0 +1,22 @@
+# Compiled objects
+*.o
+
+# Binary
+passmgr
+
+# Password database (SENSITIVE - never commit!)
+passwords.dat
+
+# Editor/IDE
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Debug
+*.dSYM/
+
+passwords.dat
+
+passmgr
