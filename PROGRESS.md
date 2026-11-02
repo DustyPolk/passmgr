@@ -2,6 +2,64 @@
 
 Newest entries first. Date, what was done, what the next iteration must know.
 
+## 2026-11-02 — TODO 1.2a: `list --json` and `show <ref>`
+
+- TODO 1.2 was split: this iteration did the JSON/reference half with the
+  metadata that exists today. **1.2b** (adding `tags`, `created`,
+  `last_rotated` to the JSON entry) stays unchecked until 1.3 and 1.4 land;
+  adding keys later is backward compatible, so the schema is stable in the
+  "agents must tolerate unknown keys" sense.
+- New command `show [--json] <ref>`: accepts **only** a full `pm://<32 hex>`
+  reference (parsed with `store::EntryId::parse_ref` *before* unlocking, so a
+  bad reference is exit 2 and costs no password prompt). A well-formed but
+  unknown reference returns the new `Error::EntryNotFound` (exit 3,
+  "no credential found for reference '<ref>'"). Text output is `Ref`,
+  `Service`, `Username` — no password line at all. A service name passed to
+  `show` is a usage error (exit 2); references are the unambiguous handle.
+- `list --json` prints exactly one JSON document, `{"entries":[{"ref":...,
+  "service":...,"username":...}]}`, plus a newline, and nothing else on stdout
+  (no "Stored Services:" header; the empty-vault "No credentials stored." prose
+  goes to stderr only in text mode, so an empty vault is `{"entries":[]}`).
+  `show --json` prints the entry object directly. The flag may appear before or
+  after the positional argument.
+- No-value guarantee is structural: `entry_metadata(&Credential)` in
+  `src/main.rs` only ever reads `reference()`, `service()` and `username()`;
+  `Credential::password()` is never called there. Do not "tidy" it into a
+  serde-derived struct on `Credential`, which could add a password field by
+  accident.
+- **Dependency added:** `serde_json = "1"` (pulls `serde`, `serde_core`,
+  `itoa`, `memchr`, `zmij`; no derive feature). Justification: correct JSON
+  escaping of arbitrary UTF-8 metadata (quotes, backslashes, non-ASCII) is
+  security-relevant output encoding; hand-rolling it risks malformed or
+  ambiguous documents for agents to parse. It makes no network calls. No
+  `serde` derive is enabled, so there is no `Serialize` impl on `Credential`.
+- Library additions: `Vault::get_by_ref(&self, EntryId) -> Option<&Credential>`
+  and `Error::EntryNotFound(String)` (mapped to `EXIT_NOT_FOUND`); unrelated
+  error variants untouched. No store-format or crypto change.
+- CLI parsing: `Command::List { json }` and `Command::Show { reference, json }`;
+  `parse_list` rejects any argument other than `--json`; `parse_show` mirrors
+  `parse_get` (supports `--`, rejects `--reveal` with exit 2).
+- Docs: `--help` lists both commands and the JSON keys, README gains a
+  "Machine-readable metadata" section.
+- Tests: 2 new `src/main.rs` parser tests (`parses_list_and_show_json` and
+  updated `Command::List` patterns), 1 new `src/vault.rs` test
+  (`lookup_by_reference_is_stable_across_renames`), 1 new error-code case,
+  3 new e2e tests in `tests/cli.rs`:
+  `show_and_list_json_expose_metadata_only`,
+  `json_output_escapes_metadata` (service `quote"back\slashé` round-trips),
+  `show_rejects_bad_and_unknown_references` (exit 2 without prompting, exit 3
+  for unknown, empty vault JSON, `--help` mentions both commands). All e2e
+  assertions check the stored password is absent from stdout and stderr.
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
+  clean, `cargo test` 84 passed (42 lib unit + 16 main unit + 26 e2e, ~125 s;
+  e2e serialized on Argon2 memory). `cargo audit` still not installed
+  (`error: no such command: audit`).
+- **Next iteration must know:** next unchecked item is **1.3 tags**
+  (`--tag`, `list --tag`). Tags will also need a store-format bump (version 3)
+  with a v2 migration reader, reusing the 1.1 pattern; keep `Credential::new`'s
+  signature stable or add `with_tags`. Add tag filtering to `list` and a
+  `--tag` field in `entry_metadata` only in 1.2b.
+
 ## 2026-11-02 — TODO 1.1: stable entry references (`pm://<id>`)
 
 - `src/store.rs` store version 2: each credential now begins with a 16-byte

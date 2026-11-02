@@ -51,7 +51,12 @@ Commands:
                                               of prompting (implies rotation).
                                --strong, --simple, --pin, --length N
                                               Generation options for --generate.
-  list                       List stored services, usernames and references.
+  list [--json]             List stored services, usernames and references.
+                             With --json, print {"entries":[...]} where each
+                             entry has only "ref", "service" and "username".
+  show [--json] <ref>        Show one credential by its pm:// reference.
+                             Metadata only, no password. --json prints the
+                             entry object directly.
   generate [options]         Generate a secure random password.
   help                       Show this help.
   version                    Show version information.
@@ -79,6 +84,8 @@ Examples:
   passmgr generate --pin --length 8
   passmgr get github.com
   passmgr list
+  passmgr list --json
+  passmgr show pm://0123456789abcdef0123456789abcdef
   passmgr --db ~/.secrets/work.dat list
 
 Notes:
@@ -88,7 +95,10 @@ Notes:
     the TTY-gated 'get --reveal'.
   - Every credential has a stable reference 'pm://<32 hex characters>', shown
     by 'list' and 'get'. A reference identifies an entry for agents and tools
-    without revealing any secret, and survives renames.
+    without revealing any secret, and survives renames. 'show' accepts only a
+    full reference, never a service name.
+  - 'list --json' and 'show --json' emit references and metadata only; there
+    is no JSON field that carries a password.
   - 'edit' never prints the new password either; rotating prompts for it
     twice, and a generated one is only confirmed by name.
   - Creating a new vault asks for the master password twice.
@@ -144,7 +154,8 @@ fn run() -> Result<(), CliError> {
         Command::Get { service, reveal } => command_get(&service, reveal, agent_mode, &path)?,
         Command::Delete(service) => command_delete(&service, &path)?,
         Command::Edit(options) => command_edit(options, &path)?,
-        Command::List => command_list(&path)?,
+        Command::List { json } => command_list(json, &path)?,
+        Command::Show { reference, json } => command_show(&reference, json, &path)?,
     }
     Ok(())
 }
@@ -163,7 +174,8 @@ enum Command {
     Get { service: String, reveal: bool },
     Delete(String),
     Edit(EditOptions),
-    List,
+    List { json: bool },
+    Show { reference: String, json: bool },
     Generate(GenerateOptions),
     Help,
     Version,
@@ -288,10 +300,8 @@ fn parse_command(command: OsString, rest: Vec<OsString>) -> Result<Command, Stri
         "get" => parse_get(rest),
         "delete" | "rm" => parse_single_argument(&command, rest).map(Command::Delete),
         "edit" => parse_edit(rest),
-        "list" => {
-            require_no_arguments("list", &rest)?;
-            Ok(Command::List)
-        }
+        "list" => parse_list(rest),
+        "show" => parse_show(rest),
         "generate" => parse_generate(rest),
         "help" => {
             require_no_arguments("help", &rest)?;
@@ -324,6 +334,58 @@ fn require_no_arguments(command: &str, args: &[OsString]) -> Result<(), String> 
     } else {
         Err(format!("'{command}' takes no arguments"))
     }
+}
+
+fn parse_list(args: Vec<OsString>) -> Result<Command, String> {
+    let mut json = false;
+    for argument in args {
+        let text = argument
+            .to_str()
+            .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
+        match text {
+            "--json" => json = true,
+            other => {
+                return Err(format!(
+                    "unexpected argument '{other}' for 'list' (only --json is accepted)"
+                ));
+            }
+        }
+    }
+    Ok(Command::List { json })
+}
+
+fn parse_show(args: Vec<OsString>) -> Result<Command, String> {
+    let mut json = false;
+    let mut reference = None;
+    let mut only_positional = false;
+
+    for argument in args {
+        let text = argument
+            .to_str()
+            .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
+
+        if !only_positional && text.starts_with('-') && text != "-" {
+            match text {
+                "--" => only_positional = true,
+                "-h" | "--help" => return Ok(Command::Help),
+                "--json" => json = true,
+                other => {
+                    return Err(format!(
+                        "unknown flag '{other}' (use '--' before values beginning with '-')"
+                    ));
+                }
+            }
+            continue;
+        }
+
+        if reference.replace(text.to_owned()).is_some() {
+            return Err("'show' requires exactly one <ref> argument".to_owned());
+        }
+    }
+
+    let reference =
+        reference.ok_or_else(|| "'show' requires exactly one <ref> argument".to_owned())?;
+    Ok(Command::Show { reference, json })
 }
 
 fn parse_get(args: Vec<OsString>) -> Result<Command, String> {
@@ -721,8 +783,12 @@ fn command_delete(service: &str, path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn command_list(path: &Path) -> Result<(), Error> {
+fn command_list(json: bool, path: &Path) -> Result<(), Error> {
     let (vault, _) = unlock(path)?;
+    if json {
+        let entries: Vec<_> = vault.list().iter().map(entry_metadata).collect();
+        return write_json(&serde_json::json!({ "entries": entries }));
+    }
     if vault.is_empty() {
         eprintln!("No credentials stored.");
         return Ok(());
@@ -742,6 +808,43 @@ fn command_list(path: &Path) -> Result<(), Error> {
         .expect("writing to a String cannot fail");
     }
     stdout_write(format_args!("{}", output))
+}
+
+/// The JSON form of an entry: references and metadata only. A credential's
+/// password has no accessor here, so serializing an entry cannot leak it.
+fn entry_metadata(credential: &Credential) -> serde_json::Value {
+    serde_json::json!({
+        "ref": credential.reference(),
+        "service": credential.service(),
+        "username": credential.username(),
+    })
+}
+
+fn write_json(value: &serde_json::Value) -> Result<(), Error> {
+    let mut text = serde_json::to_string(value)
+        .map_err(|error| Error::InvalidInput(format!("cannot encode JSON: {error}")))?;
+    text.push('\n');
+    stdout_write(format_args!("{text}"))
+}
+
+fn command_show(reference: &str, json: bool, path: &Path) -> Result<(), Error> {
+    // Parse the reference before unlocking: a malformed reference is a usage
+    // error and must not cost the user a master-password prompt.
+    let id = store::EntryId::parse_ref(reference)?;
+    let (vault, _) = unlock(path)?;
+    let credential = vault
+        .get_by_ref(id)
+        .ok_or_else(|| Error::EntryNotFound(reference.to_owned()))?;
+    if json {
+        write_json(&entry_metadata(credential))
+    } else {
+        stdout_write(format_args!(
+            "Ref: {}\nService: {}\nUsername: {}\n",
+            credential.reference(),
+            credential.service(),
+            credential.username()
+        ))
+    }
 }
 
 fn unlock(path: &Path) -> Result<(Vault, Zeroizing<String>), Error> {
@@ -908,7 +1011,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.db_path, PathBuf::from("/tmp/example.dat"));
-        assert!(matches!(parsed.command, Command::List));
+        assert!(matches!(parsed.command, Command::List { json: false }));
 
         let parsed = parse_args(vec![
             OsString::from("--db=/tmp/other.dat"),
@@ -947,12 +1050,43 @@ mod tests {
         ])
         .unwrap();
         assert!(parsed.agent);
-        assert!(matches!(parsed.command, Command::List));
+        assert!(matches!(parsed.command, Command::List { json: false }));
         assert!(
             parse_args(vec![OsString::from("--agent"), OsString::from("--help")])
                 .unwrap()
                 .agent
         );
+    }
+
+    #[test]
+    fn parses_list_and_show_json() {
+        assert!(matches!(
+            parse(&["list", "--json"]).unwrap(),
+            Command::List { json: true }
+        ));
+        assert!(parse(&["list", "svc"]).is_err());
+        assert!(parse(&["list", "--bogus"]).is_err());
+
+        let reference = "pm://0123456789abcdef0123456789abcdef";
+        assert_eq!(
+            reference,
+            store::EntryId::parse_ref(reference).unwrap().to_ref()
+        );
+        assert!(matches!(
+            parse(&["show", reference]).unwrap(),
+            Command::Show { reference: r, json: false } if r == reference
+        ));
+        assert!(matches!(
+            parse(&["show", "--json", reference]).unwrap(),
+            Command::Show { json: true, .. }
+        ));
+        assert!(matches!(
+            parse(&["show", reference, "--json"]).unwrap(),
+            Command::Show { json: true, .. }
+        ));
+        assert!(parse(&["show"]).is_err());
+        assert!(parse(&["show", reference, reference]).is_err());
+        assert!(parse(&["show", "--reveal", reference]).is_err());
     }
 
     #[test]

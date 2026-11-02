@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::crypto::{self, KdfParams};
 use crate::error::{Error, Result};
-use crate::store::{self, Credential};
+use crate::store::{self, Credential, EntryId};
 
 /// An open vault. Changes are kept in memory until [`Vault::save`] is called.
 pub struct Vault {
@@ -70,6 +70,14 @@ impl Vault {
         self.credentials
             .iter_mut()
             .find(|credential| credential.service() == service)
+    }
+
+    /// Look a credential up by its stable id. Unlike service names, a
+    /// reference is unambiguous and survives renames.
+    pub fn get_by_ref(&self, id: EntryId) -> Option<&Credential> {
+        self.credentials
+            .iter()
+            .find(|credential| credential.id() == id)
     }
 
     /// Give an existing credential a new service name. The new name must not
@@ -356,6 +364,34 @@ mod tests {
         let credential = loaded.get("renamed").unwrap();
         assert_eq!(credential.username(), "carol");
         assert_eq!(credential.password(), "new-secret");
+    }
+
+    #[test]
+    fn lookup_by_reference_is_stable_across_renames() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "test master password";
+
+        let mut vault = Vault::open_for_add(&path, master).unwrap();
+        vault
+            .add(credential("one.example", "alice", "first"))
+            .unwrap();
+        vault
+            .add(credential("two.example", "bob", "second"))
+            .unwrap();
+        let id = vault.get("one.example").unwrap().id();
+
+        assert_eq!(
+            vault.get_by_ref(id).map(Credential::service),
+            Some("one.example")
+        );
+        assert!(vault.get_by_ref(EntryId::generate().unwrap()).is_none());
+
+        vault.rename("one.example", "renamed.example").unwrap();
+        assert_eq!(
+            vault.get_by_ref(id).map(Credential::service),
+            Some("renamed.example")
+        );
     }
 
     #[test]

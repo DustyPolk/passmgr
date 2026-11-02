@@ -970,3 +970,163 @@ fn rm_is_an_alias_for_delete() {
     assert_eq!(output.status.code(), Some(3));
     assert!(stderr(&output).contains("no credential found"));
 }
+
+/// `show` resolves a `pm://` reference and `list --json`/`show --json` emit
+/// references and metadata only. No output may contain the stored password.
+#[test]
+fn show_and_list_json_expose_metadata_only() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    let output = run(&["--db", &vault, "get", "example.com"], "master\n");
+    assert_success(&output);
+    let reference = get_reference(&output);
+    assert_canonical_reference(&reference);
+
+    // Text mode shows the same metadata as `get`, but never a password field.
+    let output = run(&["--db", &vault, "show", &reference], "master\n");
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("Ref: {reference}\nService: example.com\nUsername: alice\n")
+    );
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+
+    // The reference lookup survives a rename.
+    let output = run(
+        &[
+            "--db",
+            &vault,
+            "edit",
+            "example.com",
+            "--rename",
+            "renamed.example",
+        ],
+        "master\n",
+    );
+    assert_success(&output);
+    let output = run(&["--db", &vault, "show", &reference], "master\n");
+    assert_success(&output);
+    assert!(stdout(&output).contains("Service: renamed.example"));
+
+    // JSON mode: the flag may appear before or after the reference.
+    let output = run(&["--db", &vault, "show", "--json", &reference], "master\n");
+    assert_success(&output);
+    let shown: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid JSON");
+    assert_eq!(shown["ref"], serde_json::json!(reference));
+    assert_eq!(shown["service"], serde_json::json!("renamed.example"));
+    assert_eq!(shown["username"], serde_json::json!("alice"));
+    assert!(shown.get("password").is_none());
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+
+    let output = run(&["--db", &vault, "show", &reference, "--json"], "master\n");
+    assert_success(&output);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&stdout(&output)).unwrap(),
+        shown
+    );
+
+    let output = run(&["--db", &vault, "list", "--json"], "master\n");
+    assert_success(&output);
+    assert!(!stderr(&output).contains("No credentials stored"));
+    let listed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid JSON");
+    assert_eq!(listed["entries"], serde_json::json!([shown]));
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+
+    let output = run(&["--help"], "");
+    assert_success(&output);
+    assert!(stdout(&output).contains("list [--json]"));
+    assert!(stdout(&output).contains("show [--json] <ref>"));
+}
+
+/// Metadata that needs JSON escaping round-trips exactly; the encoder must not
+/// be able to produce a document that hides a field or leaks a value.
+#[test]
+fn json_output_escapes_metadata() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    // The vault already exists, so only the master password, then the new
+    // credential password and its confirmation are prompted for.
+    let service = "quote\"back\\slash\u{00e9}";
+    let input = format!("master\n{EXAMPLE_SECRET}\n{EXAMPLE_SECRET}\n");
+    let output = run(&["--db", &vault, "add", service, "bob"], &input);
+    assert_success(&output);
+
+    let output = run(&["--db", &vault, "list", "--json"], "master\n");
+    assert_success(&output);
+    let listed: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("valid JSON");
+    let entries = listed["entries"].as_array().expect("entries array");
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["service"] == serde_json::json!(service))
+    );
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+}
+
+/// Bad and unknown references are rejected without unlocking or printing data.
+#[test]
+fn show_rejects_bad_and_unknown_references() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    // Malformed reference: usage error, and no master-password prompt.
+    for bad in [
+        "pm://abc",
+        "pm://zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "example.com",
+    ] {
+        let output = run(&["--db", &vault, "show", bad], "");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "'{bad}' must be a usage error"
+        );
+        assert_eq!(stdout(&output), "");
+        assert!(!stderr(&output).contains("Enter Master Password"));
+        assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+        assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+    }
+
+    // A well-formed reference that matches nothing: not found.
+    let missing = "pm://ffffffffffffffffffffffffffffffff";
+    let output = run(&["--db", &vault, "show", missing], "master\n");
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("no credential found for reference"));
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+
+    let output = run(&["--db", &vault, "show", "--json", missing], "master\n");
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(stdout(&output), "");
+
+    // An empty vault still produces a valid, empty JSON document.
+    let empty = TempDir::new().unwrap();
+    let empty_vault = vault_path(&empty);
+    let output = run(
+        &["--db", &empty_vault, "add", "example.com", "alice"],
+        &format!("master\nmaster\n{EXAMPLE_SECRET}\n{EXAMPLE_SECRET}\n"),
+    );
+    assert_success(&output);
+    let output = run(&["--db", &empty_vault, "delete", "example.com"], "master\n");
+    assert_success(&output);
+    let output = run(&["--db", &empty_vault, "list", "--json"], "master\n");
+    assert_success(&output);
+    assert_eq!(stdout(&output), "{\"entries\":[]}\n");
+    assert!(
+        !stderr(&output).contains("No credentials stored"),
+        "JSON mode must not mix prose into the document"
+    );
+}

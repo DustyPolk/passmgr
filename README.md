@@ -142,6 +142,23 @@ Stored Services:
 Only the service name, username, and reference are printed; passwords are never
 written to stdout by `list`.
 
+### Machine-readable metadata
+
+```bash
+passmgr list --json
+passmgr show pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5
+passmgr show --json pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5
+```
+
+`list --json` prints one JSON document, `{"entries":[...]}`, and nothing else
+on stdout. `show <ref>` looks a credential up by its full `pm://` reference and
+prints `Ref`, `Service`, and `Username`; `show --json` prints the entry object
+directly. The only keys in an entry are `ref`, `service`, and `username`:
+there is no password field in any JSON output, by construction. `show` accepts
+references only (a service name is a usage error, exit 2), and an unknown
+reference exits 3. References survive renames, so they are the stable handle
+for scripts and agents.
+
 ### Edit a credential
 
 ```bash

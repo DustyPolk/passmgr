@@ -54,9 +54,17 @@ come first.
       unique and stable across saves. (Implemented as `pm://<32 hex>` with full ids
       only: no prefix form, so a reference is never ambiguous. `list` and `get`
       print the reference; renaming preserves it.)
-- [ ] **1.2 `list --json` and `show <ref>`.** Metadata only: ref, service,
-      username, tags, created/rotated timestamps. No values. Test asserts no
-      value substring appears.
+- [x] **1.2a `list --json` and `show <ref>`** with the metadata that exists
+      today: `ref`, `service`, `username`. `list --json` prints
+      `{"entries":[...]}`; `show [--json] <ref>` resolves a full `pm://`
+      reference (references only; bad ref = exit 2, unknown ref = exit 3) and
+      prints no password field. New `Error::EntryNotFound` (exit 3),
+      `Vault::get_by_ref`, `serde_json` dependency. Tests: JSON parses, values
+      round-trip through escaping, reference survives a rename, and the secret
+      is absent from stdout/stderr in both text and JSON modes.
+- [ ] **1.2b Extend the JSON entry with `tags`, `created` and `last_rotated`.**
+      Schema addition only (agents must tolerate new keys). Blocked on 1.3 and
+      1.4; do not invent fields before the store carries them.
 - [ ] **1.3 Tags** on credentials (`--tag`), used later for grant scope. Test:
       filter by tag, reject unknown/empty tags, `list --tag`.
 - [ ] **1.4 `last_rotated` timestamp** per credential, updated by `edit`.

@@ -37,6 +37,8 @@ pub enum Error {
     Refused(String),
     DuplicateService(String),
     ServiceNotFound(String),
+    /// No credential matches the given `pm://` reference. Maps to exit code 3.
+    EntryNotFound(String),
     InvalidInput(String),
 }
 
@@ -44,7 +46,9 @@ impl Error {
     /// The stable exit code for this error. See the `EXIT_*` constants.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::VaultNotFound(_) | Self::ServiceNotFound(_) => EXIT_NOT_FOUND,
+            Self::VaultNotFound(_) | Self::ServiceNotFound(_) | Self::EntryNotFound(_) => {
+                EXIT_NOT_FOUND
+            }
             Self::AuthenticationFailed => EXIT_AUTH_FAILED,
             Self::Refused(_) => EXIT_REFUSED,
             Self::NotAVault
@@ -91,6 +95,9 @@ impl fmt::Display for Error {
             Self::ServiceNotFound(service) => {
                 write!(f, "no credential found for '{service}'")
             }
+            Self::EntryNotFound(reference) => {
+                write!(f, "no credential found for reference '{reference}'")
+            }
             Self::InvalidInput(detail) => f.write_str(detail),
         }
     }
@@ -120,6 +127,7 @@ mod tests {
         let cases: Vec<(Error, u8)> = vec![
             (Error::VaultNotFound(PathBuf::from("v.dat")), EXIT_NOT_FOUND),
             (Error::ServiceNotFound("svc".into()), EXIT_NOT_FOUND),
+            (Error::EntryNotFound("pm://00".into()), EXIT_NOT_FOUND),
             (Error::AuthenticationFailed, EXIT_AUTH_FAILED),
             (Error::Refused("no".into()), EXIT_REFUSED),
             (Error::NotAVault, EXIT_MALFORMED_VAULT),
