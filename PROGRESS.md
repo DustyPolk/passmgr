@@ -2,6 +2,29 @@
 
 Newest entries first. Date, what was done, what the next iteration must know.
 
+## 2026-11-02 — TODO 0.1: `get` is metadata-only, `--reveal` added
+
+- `passmgr get <service>` now prints `Password: <redacted>` and never the stored
+  value. Plaintext requires `get --reveal <service>`; `--reveal` is parsed before
+  or after the service name. This is the only plaintext path from `get`.
+- `src/main.rs`: `Command::Get` became `Command::Get { service, reveal }`, added
+  `parse_get` (mirrors `parse_add` arg handling: `--`, `-h/--help`, rejects
+  unknown flags and more than one positional). Unit tests
+  `get_reveals_only_with_the_flag` / `get_rejects_bad_arguments` assert the
+  default is not-reveal.
+- `tests/cli.rs`: `EXAMPLE_SECRET` fixture replaced plain `secret`; new assertions
+  prove plain `get` contains no secret bytes on stdout or stderr, and that
+  `--reveal` still returns the value. Tests still use the piped CLI for
+  `--reveal` — TODO 0.2 must change that to an in-process read once the TTY gate
+  lands (a piped `--reveal` will then be refused).
+- Gate: `cargo fmt --check` clean, clippy clean, `cargo test` 17 passed (10 unit
+  + 7 e2e). `cargo audit` still not installed (see previous entry).
+- **Next iteration must know:** `add --generate` still prints
+  `Generated password: <value>` to stdout — that is TODO 0.3, untouched here.
+  `--reveal` currently has **no TTY/agent check** (TODO 0.2); do not ship before
+  0.2.
+- README updated in the same commit (the `get` section and the flag semantics).
+
 ## 2026-11-02 — Bootstrap plan (no feature work)
 
 - Repo state: existing Rust CLI (commit `f93b765` "rust rewrite") with Argon2id +

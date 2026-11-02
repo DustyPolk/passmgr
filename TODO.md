@@ -15,7 +15,7 @@ The current Rust CLI (commit f93b765) prints plaintext unconditionally in `get` 
 prints a generated password in `add --generate`. Those are invariant violations and
 come first.
 
-- [ ] **0.1 `get` becomes metadata-only by default.** `get <service>` prints
+- [x] **0.1 `get` becomes metadata-only by default.** `get <service>` prints
       service, username, and a `password: <redacted>` marker (no value). Add
       `--reveal` as the only path to plaintext; for now `--reveal` may still work
       on a TTY. Test: `get` over a pipe prints no password bytes.

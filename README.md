@@ -95,8 +95,20 @@ Output:
 ```text
 Service: example.com
 Username: alice
-Password: <decrypted password>
+Password: <redacted>
 ```
+
+`get` is metadata-only by default: it never writes the stored password to
+stdout, so it is safe to run from a script or an agent. Printing the password
+requires the explicit `--reveal` flag:
+
+```bash
+passmgr get --reveal example.com
+```
+
+`--reveal` is meant for a human at a terminal; do not use it to feed secrets to
+another program. Injection commands (planned `run --env`) are the supported way
+to use a secret without reading it.
 
 ### List services
 

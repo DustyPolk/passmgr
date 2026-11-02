@@ -63,11 +63,11 @@ fn assert_success(output: &Output) {
     );
 }
 
+const EXAMPLE_SECRET: &str = "s3cret-value-should-never-leak";
+
 fn add_example(vault: &str) {
-    let output = run(
-        &["--db", vault, "add", "example.com", "alice"],
-        "master\nmaster\nsecret\nsecret\n",
-    );
+    let input = format!("master\nmaster\n{EXAMPLE_SECRET}\n{EXAMPLE_SECRET}\n");
+    let output = run(&["--db", vault, "add", "example.com", "alice"], &input);
     assert_success(&output);
     assert!(stderr(&output).contains("Credential added successfully."));
 }
@@ -91,7 +91,21 @@ fn add_get_list_and_delete() {
     assert_success(&output);
     assert_eq!(
         stdout(&output),
-        "Service: example.com\nUsername: alice\nPassword: secret\n"
+        "Service: example.com\nUsername: alice\nPassword: <redacted>\n"
+    );
+    assert!(
+        !stdout(&output).contains(EXAMPLE_SECRET) && !stderr(&output).contains(EXAMPLE_SECRET),
+        "plain get must never print the stored password"
+    );
+
+    let output = run(
+        &["--db", &vault, "get", "--reveal", "example.com"],
+        "master\n",
+    );
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("Service: example.com\nUsername: alice\nPassword: {EXAMPLE_SECRET}\n")
     );
 
     let output = run(&["--db", &vault, "list"], "master\n");
@@ -138,6 +152,13 @@ fn generated_add_then_get_returns_same_password() {
     assert!(generated.chars().all(|c| c.is_ascii_alphanumeric()));
 
     let output = run(&["--db", &vault, "get", "svc"], "master\n");
+    assert_success(&output);
+    assert!(
+        !stdout(&output).contains(&generated) && !stderr(&output).contains(&generated),
+        "plain get must not print a generated password"
+    );
+
+    let output = run(&["--db", &vault, "get", "--reveal", "svc"], "master\n");
     assert_success(&output);
     assert!(stdout(&output).contains(&format!("Password: {generated}\n")));
 }

@@ -25,7 +25,9 @@ Commands:
   add [options] <service> <username>
                              Add a credential. The credential password is
                              prompted (and confirmed) unless --generate is used.
-  get <service>              Retrieve a credential.
+  get [--reveal] <service>   Show credential metadata. Allowed flags:
+                               --reveal   Print the password (human use only;
+                                          requires a terminal).
   delete <service>           Remove a credential permanently.
   list                       List stored services and usernames.
   generate [options]         Generate a secure random password.
@@ -99,7 +101,7 @@ fn run() -> Result<(), CliError> {
         Command::Version => stdout_write(format_args!("passmgr {}\n", env!("CARGO_PKG_VERSION")))?,
         Command::Generate(options) => command_generate(options)?,
         Command::Add(options) => command_add(options, &path)?,
-        Command::Get(service) => command_get(&service, &path)?,
+        Command::Get { service, reveal } => command_get(&service, reveal, &path)?,
         Command::Delete(service) => command_delete(&service, &path)?,
         Command::List => command_list(&path)?,
     }
@@ -115,7 +117,7 @@ struct Parsed {
 #[derive(Debug)]
 enum Command {
     Add(AddOptions),
-    Get(String),
+    Get { service: String, reveal: bool },
     Delete(String),
     List,
     Generate(GenerateOptions),
@@ -218,7 +220,7 @@ fn parse_command(command: OsString, rest: Vec<OsString>) -> Result<Command, Stri
 
     match command.as_str() {
         "add" => parse_add(rest),
-        "get" => parse_single_argument("get", rest).map(Command::Get),
+        "get" => parse_get(rest),
         "delete" => parse_single_argument("delete", rest).map(Command::Delete),
         "list" => {
             require_no_arguments("list", &rest)?;
@@ -256,6 +258,40 @@ fn require_no_arguments(command: &str, args: &[OsString]) -> Result<(), String> 
     } else {
         Err(format!("'{command}' takes no arguments"))
     }
+}
+
+fn parse_get(args: Vec<OsString>) -> Result<Command, String> {
+    let mut reveal = false;
+    let mut service = None;
+    let mut only_positional = false;
+
+    for argument in args {
+        let text = argument
+            .to_str()
+            .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
+
+        if !only_positional && text.starts_with('-') && text != "-" {
+            match text {
+                "--" => only_positional = true,
+                "-h" | "--help" => return Ok(Command::Help),
+                "--reveal" => reveal = true,
+                other => {
+                    return Err(format!(
+                        "unknown flag '{other}' (use '--' before values beginning with '-')"
+                    ));
+                }
+            }
+            continue;
+        }
+
+        if service.replace(text.to_owned()).is_some() {
+            return Err("'get' requires exactly one <service> argument".to_owned());
+        }
+    }
+
+    let service =
+        service.ok_or_else(|| "'get' requires exactly one <service> argument".to_owned())?;
+    Ok(Command::Get { service, reveal })
 }
 
 fn parse_add(args: Vec<OsString>) -> Result<Command, String> {
@@ -432,17 +468,23 @@ fn command_add(options: AddOptions, path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn command_get(service: &str, path: &Path) -> Result<(), Error> {
+fn command_get(service: &str, reveal: bool, path: &Path) -> Result<(), Error> {
     let (vault, _) = unlock(path)?;
     let credential = vault
         .get(service)
         .ok_or_else(|| Error::ServiceNotFound(service.to_owned()))?;
-    stdout_write(format_args!(
-        "Service: {}\nUsername: {}\nPassword: {}\n",
-        credential.service(),
-        credential.username(),
-        credential.password()
-    ))
+    let name = credential.service();
+    let username = credential.username();
+    if reveal {
+        stdout_write(format_args!(
+            "Service: {name}\nUsername: {username}\nPassword: {}\n",
+            credential.password()
+        ))
+    } else {
+        stdout_write(format_args!(
+            "Service: {name}\nUsername: {username}\nPassword: <redacted>\n"
+        ))
+    }
 }
 
 fn command_delete(service: &str, path: &Path) -> Result<(), Error> {
@@ -648,7 +690,9 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.db_path, PathBuf::from("/tmp/other.dat"));
-        assert!(matches!(parsed.command, Command::Get(service) if service == "svc"));
+        assert!(
+            matches!(parsed.command, Command::Get { service, reveal } if service == "svc" && !reveal)
+        );
     }
 
     #[test]
@@ -663,12 +707,38 @@ mod tests {
 
     #[test]
     fn service_commands_require_one_argument() {
-        assert!(matches!(
-            parse(&["get", "svc"]).unwrap(),
-            Command::Get(service) if service == "svc"
-        ));
+        assert!(
+            matches!(parse(&["get", "svc"]).unwrap(), Command::Get { service, .. } if service == "svc")
+        );
         assert!(parse(&["get"]).is_err());
         assert!(parse(&["get", "a", "b"]).is_err());
         assert!(parse(&["list", "extra"]).is_err());
+    }
+
+    #[test]
+    fn get_reveals_only_with_the_flag() {
+        let Command::Get { reveal, .. } = parse(&["get", "svc"]).unwrap() else {
+            panic!("expected get command");
+        };
+        assert!(!reveal, "plain get must never reveal the password");
+
+        let Command::Get { service, reveal } = parse(&["get", "--reveal", "svc"]).unwrap() else {
+            panic!("expected get command");
+        };
+        assert!(reveal);
+        assert_eq!(service, "svc");
+
+        let Command::Get { service, reveal } = parse(&["get", "svc", "--reveal"]).unwrap() else {
+            panic!("expected get command");
+        };
+        assert!(reveal);
+        assert_eq!(service, "svc");
+    }
+
+    #[test]
+    fn get_rejects_bad_arguments() {
+        assert!(parse(&["get", "--bogus", "svc"]).is_err());
+        assert!(parse(&["get", "--reveal"]).is_err());
+        assert!(parse(&["get", "a", "b"]).is_err());
     }
 }
