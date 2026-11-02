@@ -1,3 +1,42 @@
+## 2026-11-02 — Tags on credentials (TODO 1.3)
+
+- Implemented per-credential tags and store **version 3**. Payload gains
+  `u32 tag count` plus `u32 length + UTF-8 bytes` per tag, sorted and
+  duplicate-free. Versions 1 (no ids) and 2 (no tags) are still read and are
+  rewritten as version 3 on save; the container stays v2 and the crypto
+  parameters are unchanged.
+- Tag rules (enforced on write **and** read, so a hand-crafted payload fails
+  closed): 1-32 bytes, first byte ASCII lowercase letter or digit, remaining
+  bytes `[a-z0-9._-]`, max 32 tags per credential. Invalid tags map to
+  `InvalidInput`/exit 2 at the CLI, before any password prompt; malformed
+  payload tags map to `MalformedVault`.
+- CLI: `add --tag TAG` and `edit --tag TAG` (repeatable; `edit` replaces the
+  whole set), `edit --clear-tags`, `list [--json] [--tag TAG]`. `list --tag` is
+  an AND filter. Text output adds a `tags: a, b` line under each listing entry
+  and a `Tags: a, b` line in `get`/`show`; both are omitted when untagged.
+  Tags are metadata only and are deliberately **not** in JSON output yet:
+  TODO 1.2b adds `tags`/`created`/`last_rotated` together in one schema change.
+- `edit` now treats `--tag`/`--clear-tags` (without `--generate`) as
+  metadata-only: it does not rotate the password and does not prompt for a new
+  one. `--clear-tags` combined with `--tag` is a usage error.
+- No new dependencies. `serde_json` was already present.
+- Tests: store round-trip, v1→v3 and v2→v3 migration, tag validation (case,
+  whitespace, control chars, non-ASCII, leading `-`/`_`/`.`, length, count),
+  malformed payload duplicate/excess tags, vault filtering + persistence,
+  CLI parser tests, and an e2e test covering add/list/filter/edit/clear,
+  invalid-tag exit code 2, JSON omitting tags, and the secret never appearing
+  on stdout/stderr.
+- Gate: `cargo fmt --check` clean, clippy clean, `cargo test` 64 unit (47 lib + 17 bin) + 27 e2e
+  passed (~141 s; e2e is Argon2id-bound and serialized). `cargo audit` is still
+  not installed (`error: no such command: audit`), so that gate step remains
+  skipped; no dependency changed this iteration.
+- README (`Tags` section, `get`/`list`/`edit` examples) and `FORMAT.md`
+  (payload v3, migration, tag validation) updated.
+- **Next iteration must know:** 1.2b is still blocked on 1.4 but tags are now
+  available to add to the JSON schema. Nothing about the daemon/grant work has
+  started. `Vault::list_tagged` returns `&Credential` references; grant scope
+  can reuse `Credential::has_all_tags`.
+
 # Progress log
 
 Newest entries first. Date, what was done, what the next iteration must know.

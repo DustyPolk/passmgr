@@ -63,10 +63,15 @@ come first.
       round-trip through escaping, reference survives a rename, and the secret
       is absent from stdout/stderr in both text and JSON modes.
 - [ ] **1.2b Extend the JSON entry with `tags`, `created` and `last_rotated`.**
-      Schema addition only (agents must tolerate new keys). Blocked on 1.3 and
-      1.4; do not invent fields before the store carries them.
-- [ ] **1.3 Tags** on credentials (`--tag`), used later for grant scope. Test:
-      filter by tag, reject unknown/empty tags, `list --tag`.
+      Schema addition only (agents must tolerate new keys). Tags now exist
+      (1.3), so this is blocked only on 1.4 (`created`/`last_rotated`); add all
+      three keys together to avoid two schema migrations.
+- [x] **1.3 Tags** on credentials (`--tag`), used later for grant scope. Test:
+      filter by tag, reject unknown/empty tags, `list --tag`. (Store version 3;
+      `--tag` on `add`/`edit`, `--clear-tags`, `list --tag` with AND semantics,
+      sorted/deduped tags, 1-32 bytes `[a-z0-9._-]`, max 32 per credential.
+      Tags are printed as metadata in text output and deliberately kept out of
+      JSON until 1.2b.)
 - [ ] **1.4 `last_rotated` timestamp** per credential, updated by `edit`.
       Store version bump handled in 1.1's migration.
 

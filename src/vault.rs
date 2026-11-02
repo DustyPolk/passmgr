@@ -111,6 +111,14 @@ impl Vault {
         &self.credentials
     }
 
+    /// Credentials carrying every tag in `tags`, in vault order. An empty
+    /// filter matches everything.
+    pub fn list_tagged<'a>(&'a self, tags: &'a [String]) -> impl Iterator<Item = &'a Credential> {
+        self.credentials
+            .iter()
+            .filter(move |credential| credential.has_all_tags(tags))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.credentials.is_empty()
     }
@@ -391,6 +399,65 @@ mod tests {
         assert_eq!(
             vault.get_by_ref(id).map(Credential::service),
             Some("renamed.example")
+        );
+    }
+
+    #[test]
+    fn tags_persist_and_filter() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "master";
+
+        let mut vault = Vault::open_for_add(&path, master).unwrap();
+        vault
+            .add(
+                credential("work.example", "alice", "secret")
+                    .with_tags(vec!["prod".to_owned(), "work".to_owned()])
+                    .expect("valid tags"),
+            )
+            .unwrap();
+        vault
+            .add(
+                credential("home.example", "bob", "other")
+                    .with_tags(vec!["home".to_owned()])
+                    .expect("valid tags"),
+            )
+            .unwrap();
+        vault
+            .add(credential("plain.example", "carol", "third"))
+            .unwrap();
+        vault.save(master).unwrap();
+
+        let reopened = Vault::open(&path, master).unwrap();
+        let prod_filter = ["prod".to_owned()];
+        let prod: Vec<_> = reopened
+            .list_tagged(&prod_filter)
+            .map(Credential::service)
+            .collect();
+        assert_eq!(prod, ["work.example"]);
+        let both_filter = ["prod".to_owned(), "home".to_owned()];
+        let none: Vec<_> = reopened
+            .list_tagged(&both_filter)
+            .map(Credential::service)
+            .collect();
+        assert!(none.is_empty(), "filters are ANDed");
+        assert_eq!(reopened.list_tagged(&[]).count(), 3);
+
+        // Tags are editable and survive another save; the password is not
+        // touched by set_tags.
+        let mut reopened = reopened;
+        let credential = reopened.get_mut("plain.example").unwrap();
+        let before = credential.password().to_owned();
+        credential
+            .set_tags(vec!["prod".to_owned(), "late".to_owned()])
+            .unwrap();
+        assert_eq!(credential.password(), before);
+        reopened.save(master).unwrap();
+
+        let reopened = Vault::open(&path, master).unwrap();
+        assert_eq!(
+            reopened.get("plain.example").unwrap().tags(),
+            ["late", "prod"]
         );
     }
 

@@ -29,6 +29,8 @@ Commands:
                              prompted (and confirmed) unless --generate is used.
                              With --generate the password is stored but never
                              printed; only the entry name is confirmed.
+                             --tag TAG (repeatable) attaches a label for
+                             filtering and future grant scopes.
   get [--reveal] <service>   Show credential metadata. Allowed flags:
                                --reveal   Print the password. Human use only:
                                           stdin and stdout must both be a
@@ -41,19 +43,25 @@ Commands:
                                           bypass flag.
   delete <service>           Remove a credential permanently.
   rm <service>               Alias for delete.
-  edit [options] <service>   Update a credential. Without --username or
-                             --rename the password is rotated: the new value
-                             is prompted twice and never printed. Allowed
-                             flags:
+  edit [options] <service>   Update a credential. Without a metadata flag
+                             (--username, --rename, --tag, --clear-tags) the
+                             password is rotated: the new value is prompted
+                             twice and never printed.
+                             Allowed flags:
                                --username U   Set the username.
                                --rename NAME  Rename the service.
+                               --tag TAG      Replace the tag set
+                                              (repeatable).
+                               --clear-tags   Remove all tags.
                                --generate     Generate a new password instead
                                               of prompting (implies rotation).
                                --strong, --simple, --pin, --length N
                                               Generation options for --generate.
-  list [--json]             List stored services, usernames and references.
-                             With --json, print {"entries":[...]} where each
-                             entry has only "ref", "service" and "username".
+  list [--json] [--tag TAG] List stored services, usernames, references and
+                             tags. --tag filters to entries that carry every
+                             given tag and is repeatable. With --json, print
+                             {"entries":[...]} where each entry has only
+                             "ref", "service" and "username".
   show [--json] <ref>        Show one credential by its pm:// reference.
                              Metadata only, no password. --json prints the
                              entry object directly.
@@ -78,12 +86,15 @@ Password generation options (add/edit/generate):
 
 Examples:
   passmgr add github.com octocat
+  passmgr add --tag work --tag prod github.com octocat
   passmgr add --generate --simple --length 24 github.com octocat
   passmgr edit --generate github.com
   passmgr edit --rename github.example github.com
+  passmgr edit --tag work github.com
   passmgr generate --pin --length 8
   passmgr get github.com
   passmgr list
+  passmgr list --tag prod
   passmgr list --json
   passmgr show pm://0123456789abcdef0123456789abcdef
   passmgr --db ~/.secrets/work.dat list
@@ -99,6 +110,11 @@ Notes:
     full reference, never a service name.
   - 'list --json' and 'show --json' emit references and metadata only; there
     is no JSON field that carries a password.
+  - Tags are lowercase labels: 1-32 bytes starting with a letter or digit, then
+    [a-z0-9._-]; at most 32 per credential. They are metadata, never secrets.
+  - Tags are metadata, not secrets. They are lowercase letters, digits, '-',
+    '_' and '.', at most 32 bytes, and at most 32 per credential. Tags are
+    stored sorted; 'list --tag' requires every given tag to match.
   - 'edit' never prints the new password either; rotating prompts for it
     twice, and a generated one is only confirmed by name.
   - Creating a new vault asks for the master password twice.
@@ -154,7 +170,7 @@ fn run() -> Result<(), CliError> {
         Command::Get { service, reveal } => command_get(&service, reveal, agent_mode, &path)?,
         Command::Delete(service) => command_delete(&service, &path)?,
         Command::Edit(options) => command_edit(options, &path)?,
-        Command::List { json } => command_list(json, &path)?,
+        Command::List { json, tags } => command_list(json, &tags, &path)?,
         Command::Show { reference, json } => command_show(&reference, json, &path)?,
     }
     Ok(())
@@ -174,7 +190,7 @@ enum Command {
     Get { service: String, reveal: bool },
     Delete(String),
     Edit(EditOptions),
-    List { json: bool },
+    List { json: bool, tags: Vec<String> },
     Show { reference: String, json: bool },
     Generate(GenerateOptions),
     Help,
@@ -188,6 +204,7 @@ struct AddOptions {
     generate: bool,
     preset: Preset,
     length: usize,
+    tags: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -204,6 +221,8 @@ struct EditOptions {
     generate: bool,
     preset: Preset,
     length: usize,
+    tags: Option<Vec<String>>,
+    clear_tags: bool,
 }
 
 fn parse_args(args: Vec<OsString>) -> Result<Parsed, String> {
@@ -338,20 +357,34 @@ fn require_no_arguments(command: &str, args: &[OsString]) -> Result<(), String> 
 
 fn parse_list(args: Vec<OsString>) -> Result<Command, String> {
     let mut json = false;
-    for argument in args {
-        let text = argument
+    let mut tags = Vec::new();
+    let mut index = 0;
+
+    while index < args.len() {
+        let text = args[index]
             .to_str()
             .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
         match text {
             "--json" => json = true,
+            "--tag" => {
+                tags.push(flag_value(&args, index, "--tag")?);
+                index += 2;
+                continue;
+            }
+            other if other.starts_with("--tag=") => {
+                tags.push(other["--tag=".len()..].to_owned());
+            }
             other => {
                 return Err(format!(
-                    "unexpected argument '{other}' for 'list' (only --json is accepted)"
+                    "unexpected argument '{other}' for 'list' (only --json and --tag are accepted)"
                 ));
             }
         }
+        index += 1;
     }
-    Ok(Command::List { json })
+
+    let tags = store::normalize_tags(tags).map_err(|err| err.to_string())?;
+    Ok(Command::List { json, tags })
 }
 
 fn parse_show(args: Vec<OsString>) -> Result<Command, String> {
@@ -426,6 +459,7 @@ fn parse_add(args: Vec<OsString>) -> Result<Command, String> {
     let mut generate = false;
     let mut preset = Preset::Strong;
     let mut length = None;
+    let mut tags = Vec::new();
     let mut positional = Vec::new();
     let mut only_positional = false;
     let mut index = 0;
@@ -447,6 +481,11 @@ fn parse_add(args: Vec<OsString>) -> Result<Command, String> {
                 "--strong" => preset = Preset::Strong,
                 "--simple" => preset = Preset::Simple,
                 "--pin" => preset = Preset::Pin,
+                "--tag" => {
+                    tags.push(flag_value(&args, index, "--tag")?);
+                    index += 2;
+                    continue;
+                }
                 "--length" => {
                     let value = args
                         .get(index + 1)
@@ -460,6 +499,9 @@ fn parse_add(args: Vec<OsString>) -> Result<Command, String> {
                 }
                 other if other.starts_with("--length=") => {
                     length = Some(parse_length(&other["--length=".len()..])?);
+                }
+                other if other.starts_with("--tag=") => {
+                    tags.push(other["--tag=".len()..].to_owned());
                 }
                 other => {
                     return Err(format!(
@@ -487,6 +529,7 @@ fn parse_add(args: Vec<OsString>) -> Result<Command, String> {
         generate,
         preset,
         length: length.unwrap_or_else(|| preset.default_length()),
+        tags: store::normalize_tags(tags).map_err(|err| err.to_string())?,
     }))
 }
 
@@ -506,6 +549,8 @@ fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
     let mut length = None;
     let mut username = None;
     let mut rename = None;
+    let mut tags = Vec::new();
+    let mut clear_tags = false;
     let mut service = None;
     let mut only_positional = false;
     let mut index = 0;
@@ -527,6 +572,12 @@ fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
                 "--strong" => preset = Preset::Strong,
                 "--simple" => preset = Preset::Simple,
                 "--pin" => preset = Preset::Pin,
+                "--clear-tags" => clear_tags = true,
+                "--tag" => {
+                    tags.push(flag_value(&args, index, "--tag")?);
+                    index += 2;
+                    continue;
+                }
                 "--length" => {
                     let value = flag_value(&args, index, "--length")?;
                     length = Some(parse_length(&value)?);
@@ -545,6 +596,9 @@ fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
                 }
                 other if other.starts_with("--length=") => {
                     length = Some(parse_length(&other["--length=".len()..])?);
+                }
+                other if other.starts_with("--tag=") => {
+                    tags.push(other["--tag=".len()..].to_owned());
                 }
                 other if other.starts_with("--username=") => {
                     username = Some(other["--username=".len()..].to_owned());
@@ -570,6 +624,14 @@ fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
 
     let service =
         service.ok_or_else(|| "'edit' requires exactly one <service> argument".to_owned())?;
+    if clear_tags && !tags.is_empty() {
+        return Err("'--clear-tags' cannot be combined with '--tag'".to_owned());
+    }
+    let tags = if tags.is_empty() {
+        None
+    } else {
+        Some(store::normalize_tags(tags).map_err(|err| err.to_string())?)
+    };
     Ok(Command::Edit(EditOptions {
         service,
         username,
@@ -577,6 +639,8 @@ fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
         generate,
         preset,
         length: length.unwrap_or_else(|| preset.default_length()),
+        tags,
+        clear_tags,
     }))
 }
 
@@ -672,11 +736,9 @@ fn command_add(options: AddOptions, path: &Path) -> Result<(), Error> {
     };
 
     let service = options.service;
-    vault.add(Credential::new(
-        service.clone(),
-        options.username,
-        credential_password,
-    )?)?;
+    let credential = Credential::new(service.clone(), options.username, credential_password)?
+        .with_tags(options.tags)?;
+    vault.add(credential)?;
     vault.save(&master)?;
 
     if options.generate {
@@ -704,23 +766,39 @@ fn command_get(service: &str, reveal: bool, agent_mode: bool, path: &Path) -> Re
     let username = credential.username();
     let reference = credential.reference();
     // The reference is metadata (an id, not a secret) and is safe to print in
-    // both modes: agents need it to name the entry.
+    // both modes: agents need it to name the entry. Tags are metadata too.
+    let tags_line = tags_line(credential.tags());
     if reveal {
         stdout_write(format_args!(
-            "Ref: {reference}\nService: {name}\nUsername: {username}\nPassword: {}\n",
+            "Ref: {reference}\nService: {name}\nUsername: {username}\n{tags_line}Password: {}\n",
             credential.password()
         ))
     } else {
         stdout_write(format_args!(
-            "Ref: {reference}\nService: {name}\nUsername: {username}\nPassword: <redacted>\n"
+            "Ref: {reference}\nService: {name}\nUsername: {username}\n{tags_line}Password: <redacted>\n"
         ))
     }
 }
 
+/// A `Tags:` line for human-readable output, or an empty string when the
+/// credential has no tags. Tags are metadata, never secrets.
+fn tags_line(tags: &[String]) -> String {
+    if tags.is_empty() {
+        String::new()
+    } else {
+        format!("Tags: {}\n", tags.join(", "))
+    }
+}
+
 /// An edit rotates the password unless it is a metadata-only change
-/// (`--username` and/or `--rename` without `--generate`).
+/// (`--username`, `--rename`, `--tag` or `--clear-tags` without
+/// `--generate`).
 fn edit_rotates_password(options: &EditOptions) -> bool {
-    options.generate || (options.username.is_none() && options.rename.is_none())
+    options.generate
+        || (options.username.is_none()
+            && options.rename.is_none()
+            && options.tags.is_none()
+            && !options.clear_tags)
 }
 
 fn command_edit(options: EditOptions, path: &Path) -> Result<(), Error> {
@@ -749,6 +827,13 @@ fn command_edit(options: EditOptions, path: &Path) -> Result<(), Error> {
             .get_mut(service)
             .expect("the credential was just found or renamed")
             .set_username(username)?;
+    }
+
+    if options.tags.is_some() || options.clear_tags {
+        vault
+            .get_mut(service)
+            .expect("the credential was just found or renamed")
+            .set_tags(options.tags.unwrap_or_default())?;
     }
 
     if rotate {
@@ -783,21 +868,27 @@ fn command_delete(service: &str, path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn command_list(json: bool, path: &Path) -> Result<(), Error> {
+fn command_list(json: bool, tags: &[String], path: &Path) -> Result<(), Error> {
     let (vault, _) = unlock(path)?;
+    let entries: Vec<&Credential> = vault.list_tagged(tags).collect();
+
     if json {
-        let entries: Vec<_> = vault.list().iter().map(entry_metadata).collect();
+        let entries: Vec<_> = entries.iter().map(|entry| entry_metadata(entry)).collect();
         return write_json(&serde_json::json!({ "entries": entries }));
     }
-    if vault.is_empty() {
-        eprintln!("No credentials stored.");
+    if entries.is_empty() {
+        if tags.is_empty() {
+            eprintln!("No credentials stored.");
+        } else {
+            eprintln!("No credentials match tags: {}.", tags.join(", "));
+        }
         return Ok(());
     }
 
     use std::fmt::Write as _;
 
     let mut output = String::from("Stored Services:\n");
-    for credential in vault.list() {
+    for credential in entries {
         writeln!(
             output,
             "- {} ({}) [{}]",
@@ -806,6 +897,10 @@ fn command_list(json: bool, path: &Path) -> Result<(), Error> {
             credential.reference()
         )
         .expect("writing to a String cannot fail");
+        if !credential.tags().is_empty() {
+            writeln!(output, "  tags: {}", credential.tags().join(", "))
+                .expect("writing to a String cannot fail");
+        }
     }
     stdout_write(format_args!("{}", output))
 }
@@ -839,10 +934,11 @@ fn command_show(reference: &str, json: bool, path: &Path) -> Result<(), Error> {
         write_json(&entry_metadata(credential))
     } else {
         stdout_write(format_args!(
-            "Ref: {}\nService: {}\nUsername: {}\n",
+            "Ref: {}\nService: {}\nUsername: {}\n{}",
             credential.reference(),
             credential.service(),
-            credential.username()
+            credential.username(),
+            tags_line(credential.tags())
         ))
     }
 }
@@ -1011,7 +1107,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.db_path, PathBuf::from("/tmp/example.dat"));
-        assert!(matches!(parsed.command, Command::List { json: false }));
+        assert!(matches!(parsed.command, Command::List { json: false, .. }));
 
         let parsed = parse_args(vec![
             OsString::from("--db=/tmp/other.dat"),
@@ -1050,7 +1146,7 @@ mod tests {
         ])
         .unwrap();
         assert!(parsed.agent);
-        assert!(matches!(parsed.command, Command::List { json: false }));
+        assert!(matches!(parsed.command, Command::List { json: false, .. }));
         assert!(
             parse_args(vec![OsString::from("--agent"), OsString::from("--help")])
                 .unwrap()
@@ -1062,7 +1158,7 @@ mod tests {
     fn parses_list_and_show_json() {
         assert!(matches!(
             parse(&["list", "--json"]).unwrap(),
-            Command::List { json: true }
+            Command::List { json: true, .. }
         ));
         assert!(parse(&["list", "svc"]).is_err());
         assert!(parse(&["list", "--bogus"]).is_err());
@@ -1097,6 +1193,41 @@ mod tests {
             parse(&["get", "--agent", "svc"]).is_err(),
             "--agent is global and must precede the command"
         );
+    }
+
+    #[test]
+    fn parses_and_validates_tags() {
+        let Command::Add(options) =
+            parse(&["add", "--tag", "work", "--tag=prod", "github.com", "alice"]).unwrap()
+        else {
+            panic!("expected add command");
+        };
+        assert_eq!(options.tags, ["prod", "work"]);
+
+        let Command::Edit(options) = parse(&["edit", "--tag", "work", "github.com"]).unwrap()
+        else {
+            panic!("expected edit command");
+        };
+        assert_eq!(options.tags, Some(vec!["work".to_owned()]));
+        assert!(!options.clear_tags);
+
+        let Command::Edit(options) = parse(&["edit", "--clear-tags", "github.com"]).unwrap() else {
+            panic!("expected edit command");
+        };
+        assert_eq!(options.tags, None);
+        assert!(options.clear_tags);
+
+        let Command::List { json, tags } = parse(&["list", "--tag=prod", "--tag", "work"]).unwrap()
+        else {
+            panic!("expected list command");
+        };
+        assert!(!json);
+        assert_eq!(tags, ["prod", "work"]);
+
+        assert!(parse(&["list", "--tag"]).is_err());
+        assert!(parse(&["add", "--tag", "", "svc", "user"]).is_err());
+        assert!(parse(&["add", "--tag", "Prod", "svc", "user"]).is_err());
+        assert!(parse(&["edit", "--clear-tags", "--tag", "work", "svc"]).is_err());
     }
 
     #[test]

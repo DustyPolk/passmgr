@@ -87,6 +87,27 @@ want to replace it. With `--generate`, the generated password is stored but
 never printed: stdout stays empty and only a confirmation naming the entry is
 written to stderr. Read the value back with the TTY-gated `get --reveal`.
 
+### Tags
+
+Tags are lowercase metadata labels for grouping entries, for example by
+environment or purpose. They are never secrets and never appear in JSON
+output; they are stored inside the encrypted payload.
+
+```bash
+passmgr add --tag work --tag prod example.com alice
+passmgr list --tag prod              # entries tagged prod
+passmgr list --tag prod --tag work   # entries tagged prod AND work
+passmgr edit --tag prod example.com  # replace the tag set
+passmgr edit --clear-tags example.com
+```
+
+Repeating `--tag` adds several tags. `list --tag` filters with AND semantics
+and no `--tag` lists everything. Tags are normalized to a sorted,
+duplicate-free list. A tag must be 1-32 bytes: an ASCII lowercase letter or
+digit followed by lowercase letters, digits, `.`, `_`, or `-` (no spaces,
+uppercase, or slashes). Each credential may carry at most 32 tags. Invalid
+tags are rejected with exit code 2 before any password prompt.
+
 ### Get a credential
 
 ```bash
@@ -99,8 +120,12 @@ Output:
 Ref: pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5
 Service: example.com
 Username: alice
+Tags: prod, work
 Password: <redacted>
 ```
+
+The `Tags:` line is omitted when the entry has no tags. It lists only
+metadata, and is printed by both `get` modes.
 
 `Ref` is the entry's stable reference: `pm://` followed by 32 lowercase hex
 characters (a 16-byte random id). It identifies the entry without exposing any
@@ -137,10 +162,13 @@ Output:
 ```text
 Stored Services:
 - example.com (alice) [pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5]
+  tags: prod, work
 ```
 
-Only the service name, username, and reference are printed; passwords are never
-written to stdout by `list`.
+Only the service name, username, reference, and tags are printed; a `tags:`
+line appears only when the entry has tags. Passwords are never written to
+stdout by `list`. `list --tag <tag>` (repeatable) filters to entries carrying
+all of the named tags.
 
 ### Machine-readable metadata
 
@@ -165,12 +193,16 @@ for scripts and agents.
 passmgr edit example.com                      # rotate the password
 passmgr edit example.com --username bob       # metadata only
 passmgr edit example.com --rename github.example
+passmgr edit --tag prod --tag work example.com
+passmgr edit --clear-tags example.com
 passmgr edit --generate --simple example.com
 ```
 
 A bare `edit` rotates the credential password: you are prompted for the new
-value twice. Metadata-only changes (`--username` and/or `--rename` without
-`--generate`) do not touch the password and do not prompt for it. `--generate`
+value twice. Metadata-only changes (`--username`, `--rename`, `--tag`, and/or
+`--clear-tags` without `--generate`) do not touch the password and do not
+prompt for it. `--tag` replaces the whole tag set, and `--clear-tags` removes
+all tags; combining them is a usage error. `--generate`
 replaces the password with a generated value without prompting; the generated
 value is never printed, only a confirmation naming the entry is written to
 stderr. Read it back with the TTY-gated `get --reveal`. Renaming onto an
@@ -225,6 +257,10 @@ passmgr --version
   the encrypted payload. Store version 2 added the id; version 1 payloads are
   read and migrated on the next save by generating ids (no data loss, no crypto
   change).
+- **Tags:** tags are metadata stored in the same encrypted payload. Store
+  version 3 added per-credential tags; version 2 and version 1 payloads read
+  as untagged and are rewritten as version 3 on the next save. Tag names are
+  validated on both write and read, so a malformed payload fails closed.
 - **Memory handling:** decrypted payloads, master passwords, generated
   passwords, keys, and credential fields use `zeroize` containers. Credential
   `Debug` output redacts the password.

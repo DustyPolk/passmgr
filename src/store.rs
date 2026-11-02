@@ -3,18 +3,21 @@
 //! The payload is versioned binary data (integers little-endian):
 //!
 //! ```text
-//! u8                     store version (2)
+//! u8                     store version (3)
 //! u32                    credential count
 //! for each credential:
 //!     byte[16]           entry id
 //!     u32 + bytes        service  (UTF-8)
 //!     u32 + bytes        username (UTF-8)
 //!     u32 + bytes        password (UTF-8)
+//!     u32                tag count
+//!     for each tag:
+//!         u32 + bytes    tag      (UTF-8)
 //! ```
 //!
-//! Store version 1 had no entry ids. It is still read for migration; ids are
-//! generated in memory and written out on the next save (no data loss, no
-//! crypto change).
+//! Store version 1 had no entry ids and version 2 had no tags. Both are still
+//! read for migration; missing ids are generated in memory and written out on
+//! the next save (no data loss, no crypto change).
 //!
 //! Length-prefixing means services, usernames, and passwords may contain any
 //! characters (including `:` and newlines) without escaping.
@@ -30,13 +33,17 @@ use crate::error::{Error, Result};
 
 pub const MAX_CREDENTIALS: usize = 10_000;
 pub const MAX_FIELD_BYTES: usize = 4096;
+pub const MAX_TAGS_PER_CREDENTIAL: usize = 32;
+pub const MAX_TAG_BYTES: usize = 32;
 
 pub const ENTRY_ID_BYTES: usize = 16;
 const ENTRY_ID_HEX_CHARS: usize = ENTRY_ID_BYTES * 2;
 const ENTRY_REF_PREFIX: &str = "pm://";
 
-const STORE_VERSION: u8 = 2;
-/// Version 1 is read-only for migration: it has the same fields but no ids.
+const STORE_VERSION: u8 = 3;
+/// Version 2 is read-only for migration: it has ids but no tags.
+const STORE_VERSION_WITHOUT_TAGS: u8 = 2;
+/// Version 1 is read-only for migration: it has no ids and no tags.
 const STORE_VERSION_WITHOUT_IDS: u8 = 1;
 
 /// A stable random identifier for a credential (16 bytes, rendered as 32
@@ -133,12 +140,20 @@ pub struct Credential {
     service: Zeroizing<String>,
     username: Zeroizing<String>,
     password: Zeroizing<String>,
+    /// Non-secret labels. Kept sorted and duplicate-free.
+    tags: Vec<String>,
 }
 
 impl Credential {
-    /// Create a credential with a freshly generated id.
+    /// Create a credential with a freshly generated id and no tags.
     pub fn new(service: String, username: String, password: Zeroizing<String>) -> Result<Self> {
-        Self::with_id(EntryId::generate()?, service, username, password)
+        Self::with_id(
+            EntryId::generate()?,
+            service,
+            username,
+            password,
+            Vec::new(),
+        )
     }
 
     fn with_id(
@@ -146,15 +161,24 @@ impl Credential {
         service: String,
         username: String,
         password: Zeroizing<String>,
+        tags: Vec<String>,
     ) -> Result<Self> {
         validate_identity(&service, &username)?;
         validate_password(&password)?;
+        let tags = normalize_tags(tags)?;
         Ok(Self {
             id,
             service: Zeroizing::new(service),
             username: Zeroizing::new(username),
             password,
+            tags,
         })
+    }
+
+    /// Attach a set of tags while constructing a credential.
+    pub fn with_tags(mut self, tags: Vec<String>) -> Result<Self> {
+        self.set_tags(tags)?;
+        Ok(self)
     }
 
     /// The stable id, independent of the service name.
@@ -198,6 +222,28 @@ impl Credential {
         self.password = password;
         Ok(())
     }
+
+    /// The credential's tags, sorted and duplicate-free. Tags are metadata, not
+    /// secrets, so they are returned as ordinary strings.
+    pub fn tags(&self) -> &[String] {
+        &self.tags
+    }
+
+    pub fn has_tag(&self, tag: &str) -> bool {
+        self.tags.iter().any(|stored| stored == tag)
+    }
+
+    /// True when the credential carries every tag in `tags`.
+    pub fn has_all_tags(&self, tags: &[String]) -> bool {
+        tags.iter().all(|tag| self.has_tag(tag))
+    }
+
+    /// Replace the tag set. Existing tags are left untouched on error.
+    pub fn set_tags(&mut self, tags: Vec<String>) -> Result<()> {
+        let tags = normalize_tags(tags)?;
+        self.tags = tags;
+        Ok(())
+    }
 }
 
 impl fmt::Debug for Credential {
@@ -207,6 +253,7 @@ impl fmt::Debug for Credential {
             .field("service", &self.service())
             .field("username", &self.username())
             .field("password", &"<redacted>")
+            .field("tags", &self.tags())
             .finish()
     }
 }
@@ -242,6 +289,56 @@ fn validate_password(password: &str) -> Result<()> {
     validate_field("password", password, true)
 }
 
+/// Tags are used for grant scopes, so they have a deliberately small and
+/// unambiguous alphabet: lowercase ASCII letters, digits, `-`, `_` and `.`,
+/// starting with a letter or digit. This keeps matching case-sensitive and
+/// free of whitespace or control-character tricks.
+pub fn validate_tag(tag: &str) -> Result<()> {
+    if tag.is_empty() {
+        return Err(Error::InvalidInput("tag cannot be empty".into()));
+    }
+    if tag.len() > MAX_TAG_BYTES {
+        return Err(Error::InvalidInput(format!(
+            "tag is too long ({} bytes; maximum is {MAX_TAG_BYTES})",
+            tag.len()
+        )));
+    }
+    let mut chars = tag.chars();
+    let first = chars.next().expect("the tag is not empty");
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return Err(Error::InvalidInput(format!(
+            "invalid tag '{tag}': must start with a lowercase letter or digit"
+        )));
+    }
+    if let Some(bad) = chars
+        .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.')))
+    {
+        return Err(Error::InvalidInput(format!(
+            "invalid tag '{tag}': '{bad}' is not allowed (use lowercase letters, digits, '-', '_' or '.')"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate, sort and de-duplicate a tag list. Callers that accept tags from
+/// the command line use this so the stored order is deterministic;
+/// duplicates are merged rather than rejected.
+pub fn normalize_tags(tags: Vec<String>) -> Result<Vec<String>> {
+    let mut tags = tags;
+    for tag in &tags {
+        validate_tag(tag)?;
+    }
+    tags.sort();
+    tags.dedup();
+    if tags.len() > MAX_TAGS_PER_CREDENTIAL {
+        return Err(Error::InvalidInput(format!(
+            "too many tags ({}, maximum is {MAX_TAGS_PER_CREDENTIAL})",
+            tags.len()
+        )));
+    }
+    Ok(tags)
+}
+
 fn validate_field(name: &str, value: &str, required: bool) -> Result<()> {
     if required && value.is_empty() {
         return Err(Error::InvalidInput(format!("{name} cannot be empty")));
@@ -268,6 +365,14 @@ fn byte_len(credentials: &[Credential]) -> Result<usize> {
         ] {
             total = total
                 .checked_add(4 + field.len())
+                .ok_or_else(|| Error::InvalidInput("vault contents are too large".into()))?;
+        }
+        total = total
+            .checked_add(4)
+            .ok_or_else(|| Error::InvalidInput("vault contents are too large".into()))?;
+        for tag in credential.tags() {
+            total = total
+                .checked_add(4 + tag.len())
                 .ok_or_else(|| Error::InvalidInput("vault contents are too large".into()))?;
         }
     }
@@ -301,6 +406,11 @@ pub fn encode(credentials: &[Credential]) -> Result<Zeroizing<Vec<u8>>> {
         ] {
             out.extend_from_slice(&(field.len() as u32).to_le_bytes());
             out.extend_from_slice(field.as_bytes());
+        }
+        out.extend_from_slice(&(credential.tags().len() as u32).to_le_bytes());
+        for tag in credential.tags() {
+            out.extend_from_slice(&(tag.len() as u32).to_le_bytes());
+            out.extend_from_slice(tag.as_bytes());
         }
     }
     debug_assert_eq!(out.len(), total);
@@ -379,11 +489,16 @@ pub fn decode(data: &[u8]) -> Result<Vec<Credential>> {
     }
     let mut cursor = Cursor::new(data);
     let version = cursor.read_u8()?;
-    if version != STORE_VERSION && version != STORE_VERSION_WITHOUT_IDS {
-        return Err(Error::MalformedVault(format!(
-            "unsupported credential store version {version}"
-        )));
-    }
+    let (has_ids, has_tags) = match version {
+        STORE_VERSION => (true, true),
+        STORE_VERSION_WITHOUT_TAGS => (true, false),
+        STORE_VERSION_WITHOUT_IDS => (false, false),
+        other => {
+            return Err(Error::MalformedVault(format!(
+                "unsupported credential store version {other}"
+            )));
+        }
+    };
     let count = cursor.read_u32()? as usize;
     if count > MAX_CREDENTIALS {
         return Err(Error::MalformedVault(format!(
@@ -396,7 +511,7 @@ pub fn decode(data: &[u8]) -> Result<Vec<Credential>> {
     for _ in 0..count {
         // Store version 1 has no ids: generate them now so the entry gets a
         // stable id as soon as it is written back in version 2.
-        let id = if version >= STORE_VERSION {
+        let id = if has_ids {
             cursor.read_id()?
         } else {
             EntryId::generate()?
@@ -410,7 +525,30 @@ pub fn decode(data: &[u8]) -> Result<Vec<Credential>> {
         let service = cursor.read_string("service")?;
         let username = cursor.read_string("username")?;
         let password = Zeroizing::new(cursor.read_string("password")?);
-        let credential = Credential::with_id(id, service, username, password)
+        let tags = if has_tags {
+            let count = cursor.read_u32()? as usize;
+            if count > MAX_TAGS_PER_CREDENTIAL {
+                return Err(Error::MalformedVault(format!(
+                    "tag count {count} exceeds the maximum of {MAX_TAGS_PER_CREDENTIAL}"
+                )));
+            }
+            let mut tags: Vec<String> = Vec::with_capacity(count);
+            let mut seen_tags = HashSet::with_capacity(count);
+            for _ in 0..count {
+                let tag = cursor.read_string("tag")?;
+                validate_tag(&tag).map_err(|err| Error::MalformedVault(err.to_string()))?;
+                if !seen_tags.insert(tag.clone()) {
+                    return Err(Error::MalformedVault(format!(
+                        "duplicate tag '{tag}' on one credential"
+                    )));
+                }
+                tags.push(tag);
+            }
+            tags
+        } else {
+            Vec::new()
+        };
+        let credential = Credential::with_id(id, service, username, password, tags)
             .map_err(|err| Error::MalformedVault(err.to_string()))?;
         credentials.push(credential);
     }
@@ -468,11 +606,133 @@ mod tests {
         }
     }
 
+    /// Build a store version 2 payload (ids, no tags) by hand, the way the
+    /// previous release wrote it.
+    fn encode_v2(credentials: &[(&str, &str, &str)]) -> Vec<u8> {
+        let mut out = vec![STORE_VERSION_WITHOUT_TAGS];
+        out.extend_from_slice(&(credentials.len() as u32).to_le_bytes());
+        for (service, username, password) in credentials {
+            out.extend_from_slice(&EntryId::generate().unwrap().0);
+            for field in [*service, *username, *password] {
+                out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+                out.extend_from_slice(field.as_bytes());
+            }
+        }
+        out
+    }
+
     #[test]
     fn empty_vault_roundtrips() {
         let encoded = encode(&[]).unwrap();
-        assert_eq!(&*encoded, &[2, 0, 0, 0, 0]);
+        assert_eq!(&*encoded, &[3, 0, 0, 0, 0]);
         assert!(decode(&encoded).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tags_roundtrip_sorted_and_unique() {
+        let credential = credential("tagged.example", "user", "secret")
+            .with_tags(vec![
+                "work".to_owned(),
+                "prod".to_owned(),
+                "work".to_owned(),
+            ])
+            .unwrap();
+        assert_eq!(credential.tags(), ["prod", "work"]);
+        assert!(credential.has_tag("prod"));
+        assert!(!credential.has_tag("dev"));
+        assert!(credential.has_all_tags(&["prod".to_owned(), "work".to_owned()]));
+        assert!(!credential.has_all_tags(&["prod".to_owned(), "dev".to_owned()]));
+
+        let decoded = decode(&encode(&[credential]).unwrap()).unwrap();
+        assert_eq!(decoded[0].tags(), ["prod", "work"]);
+        assert_eq!(decoded[0].service(), "tagged.example");
+    }
+
+    #[test]
+    fn version_2_payload_is_migrated_without_data_loss() {
+        let payload = encode_v2(&[("old.example", "alice", "secret-one")]);
+        let migrated = decode(&payload).unwrap();
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].service(), "old.example");
+        assert_eq!(migrated[0].username(), "alice");
+        assert_eq!(migrated[0].password(), "secret-one");
+        assert!(migrated[0].tags().is_empty());
+
+        // Saving writes store version 3 and preserves the id.
+        let upgraded = encode(&migrated).unwrap();
+        assert_eq!(upgraded[0], STORE_VERSION);
+        let reopened = decode(&upgraded).unwrap();
+        assert_eq!(reopened[0].id(), migrated[0].id());
+    }
+
+    #[test]
+    fn tag_validation_rejects_ambiguous_names() {
+        for bad in [
+            "",
+            "Prod",
+            "-leading",
+            "_leading",
+            ".leading",
+            "has space",
+            "has\ncontrol",
+            "slash/inside",
+            "colon:inside",
+            "é",
+        ] {
+            assert!(
+                validate_tag(bad).is_err(),
+                "invalid tag '{bad}' was accepted"
+            );
+        }
+        for good in ["a", "prod", "prod-1", "team_a.backup", "0"] {
+            validate_tag(good).unwrap_or_else(|err| panic!("valid tag '{good}' rejected: {err}"));
+        }
+        assert!(validate_tag(&"x".repeat(MAX_TAG_BYTES + 1)).is_err());
+        let too_many: Vec<String> = (0..=MAX_TAGS_PER_CREDENTIAL)
+            .map(|index| format!("tag{index}"))
+            .collect();
+        assert!(normalize_tags(too_many).is_err());
+        let exactly_full: Vec<String> = (0..MAX_TAGS_PER_CREDENTIAL)
+            .map(|index| format!("tag{index}"))
+            .collect();
+        assert_eq!(
+            normalize_tags(exactly_full).unwrap().len(),
+            MAX_TAGS_PER_CREDENTIAL
+        );
+
+        let mut credential = credential("svc", "u", "p");
+        assert!(credential.set_tags(vec!["Prod".to_owned()]).is_err());
+        assert!(
+            credential.tags().is_empty(),
+            "a failed set_tags must leave the credential untouched"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_or_excessive_tags_in_payload() {
+        let encoded = encode(&[credential("svc", "u", "p")
+            .with_tags(vec!["a".to_owned()])
+            .unwrap()])
+        .unwrap()
+        .to_vec();
+        // The tag count is the last four bytes before the single tag entry.
+        let tag_count_offset = encoded.len() - (4 + 4 + 1);
+        let mut duplicated = encoded.clone();
+        duplicated[tag_count_offset..tag_count_offset + 4].copy_from_slice(&2u32.to_le_bytes());
+        duplicated.extend_from_slice(&(1u32.to_le_bytes()));
+        duplicated.extend_from_slice(b"a");
+        assert!(matches!(
+            decode(&duplicated).unwrap_err(),
+            Error::MalformedVault(message) if message.contains("duplicate tag")
+        ));
+
+        let mut excessive = encoded;
+        excessive[tag_count_offset..tag_count_offset + 4]
+            .copy_from_slice(&((MAX_TAGS_PER_CREDENTIAL + 1) as u32).to_le_bytes());
+        assert!(matches!(
+            decode(&excessive).unwrap_err(),
+            Error::MalformedVault(message) if message.contains("tag count")
+        ));
     }
 
     #[test]
@@ -503,6 +763,7 @@ mod tests {
         assert_eq!(migrated[0].service(), "old.example");
         assert_eq!(migrated[0].username(), "alice");
         assert_eq!(migrated[0].password(), "secret-one");
+        assert!(migrated[0].tags().is_empty());
         assert_eq!(migrated[1].service(), "other.example");
         assert_eq!(migrated[1].password(), "secret-two");
         assert_ne!(migrated[0].id(), migrated[1].id());
@@ -629,7 +890,7 @@ mod tests {
     #[test]
     fn rejects_bad_store_version() {
         assert!(matches!(
-            decode(&[3, 0, 0, 0, 0]).unwrap_err(),
+            decode(&[4, 0, 0, 0, 0]).unwrap_err(),
             Error::MalformedVault(_)
         ));
     }

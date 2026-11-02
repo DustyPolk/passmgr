@@ -188,6 +188,131 @@ fn add_get_list_and_delete() {
     assert!(stderr(&output).contains("No credentials stored."));
 }
 
+/// Tags are metadata: they can be attached, listed, filtered on, and
+/// replaced without rotating the password, and they never expose a secret.
+#[test]
+fn tags_are_stored_filtered_and_metadata_only() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+
+    const OTHER_SECRET: &str = "other-s3cret-value-should-never-leak";
+    let output = run(
+        &[
+            "--db",
+            &vault,
+            "add",
+            "--tag",
+            "work",
+            "--tag=prod",
+            "work.example",
+            "alice",
+        ],
+        &format!("master\nmaster\n{EXAMPLE_SECRET}\n{EXAMPLE_SECRET}\n"),
+    );
+    assert_success(&output);
+    let output = run(
+        &[
+            "--db",
+            &vault,
+            "add",
+            "--tag",
+            "home",
+            "home.example",
+            "bob",
+        ],
+        &format!("master\n{OTHER_SECRET}\n{OTHER_SECRET}\n"),
+    );
+    assert_success(&output);
+
+    let output = run(&["--db", &vault, "list", "--json"], "master\n");
+    assert_success(&output);
+    let json: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    for entry in entries {
+        assert!(
+            entry.get("tags").is_none(),
+            "JSON metadata omits tags for now"
+        );
+        assert!(entry.get("password").is_none());
+    }
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert!(!stdout(&output).contains(OTHER_SECRET));
+
+    let output = run(&["--db", &vault, "list"], "master\n");
+    assert_success(&output);
+    let work_ref = get_reference(&run(&["--db", &vault, "get", "work.example"], "master\n"));
+    let home_ref = get_reference(&run(&["--db", &vault, "get", "home.example"], "master\n"));
+    let listing = stdout(&output);
+    assert!(listing.contains(&format!(
+        "- work.example (alice) [{work_ref}]\n  tags: prod, work\n"
+    )));
+    assert!(listing.contains(&format!(
+        "- home.example (bob) [{home_ref}]\n  tags: home\n"
+    )));
+    assert!(!listing.contains(EXAMPLE_SECRET) && !listing.contains(OTHER_SECRET));
+
+    let output = run(&["--db", &vault, "list", "--tag", "prod"], "master\n");
+    assert_success(&output);
+    assert!(stdout(&output).contains("work.example"));
+    assert!(!stdout(&output).contains("home.example"));
+
+    let output = run(
+        &["--db", &vault, "list", "--tag", "prod", "--tag", "home"],
+        "master\n",
+    );
+    assert_success(&output);
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("No credentials match tags: home, prod."));
+
+    // A metadata-only tag edit does not ask for a new password.
+    let output = run(
+        &["--db", &vault, "edit", "--tag", "prod", "work.example"],
+        "master\n",
+    );
+    assert_success(&output);
+    assert_eq!(stdout(&output), "");
+    assert_eq!(
+        vault_password(&vault, "work.example", "master"),
+        EXAMPLE_SECRET
+    );
+    let output = run(&["--db", &vault, "list", "--tag", "prod"], "master\n");
+    assert_success(&output);
+    let listing = stdout(&output);
+    assert!(
+        listing.contains("  tags: prod\n"),
+        "tags were replaced: {listing}"
+    );
+    assert!(!listing.contains("prod, work"));
+
+    let output = run(
+        &["--db", &vault, "edit", "--clear-tags", "home.example"],
+        "master\n",
+    );
+    assert_success(&output);
+    let output = run(&["--db", &vault, "get", "home.example"], "master\n");
+    assert_success(&output);
+    assert!(!stdout(&output).contains("Tags:"));
+
+    let output = run(&["--db", &vault, "get", "work.example"], "master\n");
+    assert_success(&output);
+    assert!(stdout(&output).contains("Tags: prod\n"));
+
+    let output = run(
+        &["--db", &vault, "add", "--tag", "Prod", "bad.example", "eve"],
+        "master\n",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "invalid tags fail at parse time"
+    );
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("invalid tag"));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+}
+
 /// Entry references are stable across processes and metadata edits, and
 /// printing them never exposes the stored password.
 #[test]
