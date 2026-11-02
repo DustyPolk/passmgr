@@ -35,7 +35,7 @@ come first.
       make it force the same state, including in `check_reveal` (a flag cannot
       weaken the gate — `--agent` can only *add* refusal). Unit tests for every
       marker and for `--agent` itself.
-- [ ] **0.5 Stable exit codes.** 0 ok, 2 usage, 3 not found, 4 auth failed,
+- [x] **0.5 Stable exit codes.** 0 ok, 2 usage, 3 not found, 4 auth failed,
       5 refused (non-TTY reveal / agent), 6 malformed vault. `Error::Refused`
       already maps to 5; the remaining variants still exit 1. Document in `--help`
       and assert in tests.

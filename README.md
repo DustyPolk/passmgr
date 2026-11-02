@@ -250,11 +250,17 @@ FORMAT.md       vault format specification
 
 ## Exit codes
 
+These codes are stable: scripts and agents may rely on them.
+
 | Code | Meaning |
 | --- | --- |
 | 0 | Success |
-| 1 | Runtime error (wrong password, missing vault, I/O failure, etc.) |
-| 2 | Usage error (unknown command or option, bad arguments) |
+| 1 | Other runtime error (duplicate entry, I/O failure, crypto setup failure) |
+| 2 | Usage error (unknown command or option, bad arguments) or invalid input at a prompt |
+| 3 | Not found (missing vault file or unknown service) |
+| 4 | Authentication failed (wrong master password) |
+| 5 | Refused (plaintext reveal without a terminal, in an agent context, or with `--agent`) |
+| 6 | Malformed, truncated, or unsupported vault file |
 
 ## License
 

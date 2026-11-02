@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use passmgr::Error;
 use passmgr::agent;
+use passmgr::error::{EXIT_OK, EXIT_USAGE};
 use passmgr::password::{self, MAX_LEN, MIN_LEN, Preset};
 use passmgr::store::{self, Credential};
 use passmgr::terminal;
@@ -74,31 +75,29 @@ Notes:
     the TTY-gated 'get --reveal'.
   - Creating a new vault asks for the master password twice.
   - global options (--db, --agent) must come before the command.
-  - Exit code 5 means the command was refused (for example 'get --reveal'
-    without a terminal, in an agent context, or with --agent).
+  - Exit codes are stable: 0 success, 1 runtime failure, 2 usage or invalid
+    input, 3 not found, 4 wrong master password, 5 refused (for example
+    'get --reveal' without a terminal, in an agent context, or with --agent),
+    6 malformed, truncated or unsupported vault file.
   - Vaults are encrypted with Argon2id and AES-256-GCM.
   - The legacy C vault format is not readable; this version uses a new format.
 "#;
 
 fn main() -> std::process::ExitCode {
     match run() {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(()) => std::process::ExitCode::from(EXIT_OK),
         Err(CliError::Usage(message)) => {
             eprintln!("passmgr: {message}");
             eprintln!();
             eprintln!("{USAGE}");
-            std::process::ExitCode::from(2)
+            std::process::ExitCode::from(EXIT_USAGE)
         }
         Err(CliError::Runtime(Error::Io(error))) if error.kind() == io::ErrorKind::BrokenPipe => {
-            std::process::ExitCode::SUCCESS
-        }
-        Err(CliError::Runtime(Error::Refused(message))) => {
-            eprintln!("passmgr: {message}");
-            std::process::ExitCode::from(5)
+            std::process::ExitCode::from(EXIT_OK)
         }
         Err(CliError::Runtime(error)) => {
             report_runtime_error(&error);
-            std::process::ExitCode::from(1)
+            std::process::ExitCode::from(error.exit_code())
         }
     }
 }

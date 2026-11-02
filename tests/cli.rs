@@ -224,7 +224,11 @@ fn wrong_master_password_fails() {
     add_example(&vault);
 
     let output = run(&["--db", &vault, "get", "example.com"], "wrong\n");
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "wrong password is an auth error"
+    );
     assert_eq!(stdout(&output), "");
     assert!(stderr(&output).contains("wrong master password or corrupted vault"));
 }
@@ -251,7 +255,7 @@ fn missing_vault_is_reported() {
     let vault = vault_path(&directory);
 
     let output = run(&["--db", &vault, "list"], "master\n");
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(3), "missing vault is not found");
     assert!(stderr(&output).contains("no vault found"));
 }
 
@@ -272,8 +276,76 @@ fn legacy_c_vault_is_rejected() {
     }
 
     let output = run(&["--db", &vault, "list"], "master\n");
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        output.status.code(),
+        Some(6),
+        "a legacy vault is an unreadable format"
+    );
     assert!(stderr(&output).contains("legacy C format"));
+}
+
+/// Exit codes are part of the CLI contract: 0 success, 2 usage/invalid input,
+/// 3 not found, 4 auth failed, 5 refused, 6 malformed vault. Agents and
+/// scripts rely on these, so every class is exercised here.
+#[test]
+fn exit_codes_are_stable() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    // 3: the vault exists but the credential does not.
+    let output = run(&["--db", &vault, "get", "missing.example"], "master\n");
+    assert_eq!(output.status.code(), Some(3), "unknown service");
+    assert!(stderr(&output).contains("no credential found"));
+
+    // 4: wrong master password.
+    let output = run(&["--db", &vault, "list"], "wrong\n");
+    assert_eq!(output.status.code(), Some(4), "wrong master password");
+
+    // 6: a truncated vault file must be reported as malformed, not as a
+    // crash and not as a generic failure.
+    let bytes = fs::read(&vault).unwrap();
+    let truncated = directory.path().join("truncated.dat");
+    fs::write(&truncated, &bytes[..bytes.len() - 1]).unwrap();
+    let output = run(&["--db", truncated.to_str().unwrap(), "list"], "master\n");
+    assert_eq!(output.status.code(), Some(6), "truncated vault");
+    assert!(stderr(&output).contains("malformed vault"));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+
+    // 6: a file that is not a vault at all.
+    let garbage = directory.path().join("garbage.dat");
+    fs::write(&garbage, b"this is not a vault").unwrap();
+    let output = run(&["--db", garbage.to_str().unwrap(), "list"], "master\n");
+    assert_eq!(output.status.code(), Some(6), "not a vault");
+    assert!(stderr(&output).contains("not a passmgr vault"));
+
+    // 2: an empty master password is invalid input, not an auth failure.
+    let output = run(&["--db", &vault, "list"], "\n");
+    assert_eq!(output.status.code(), Some(2), "empty master password");
+    assert!(stderr(&output).contains("master password cannot be empty"));
+
+    // 2: a usage error.
+    let output = run(&["--bogus"], "");
+    assert_eq!(output.status.code(), Some(2), "unknown global option");
+
+    // 0: success, and the help text documents the contract.
+    let output = run(&["--help"], "");
+    assert_success(&output);
+    let help = stdout(&output);
+    for code in [
+        "0 success",
+        "2 usage",
+        "3 not found",
+        "4 wrong master password",
+        "5 refused",
+        "6 malformed",
+    ] {
+        assert!(
+            help.contains(code),
+            "--help must document exit codes; missing {code:?}"
+        );
+    }
 }
 
 #[cfg(unix)]

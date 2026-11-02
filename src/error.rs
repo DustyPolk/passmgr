@@ -4,6 +4,22 @@ use std::path::PathBuf;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Stable process exit codes. These are part of the command-line contract:
+/// scripts and agents may rely on them, so do not renumber them.
+pub const EXIT_OK: u8 = 0;
+/// Any runtime failure without a more specific code below.
+pub const EXIT_FAILURE: u8 = 1;
+/// Usage error (bad arguments) or invalid input supplied at a prompt.
+pub const EXIT_USAGE: u8 = 2;
+/// The requested vault or credential does not exist.
+pub const EXIT_NOT_FOUND: u8 = 3;
+/// The master password was wrong (or the vault failed authentication).
+pub const EXIT_AUTH_FAILED: u8 = 4;
+/// The operation was refused (for example a plaintext reveal outside a TTY).
+pub const EXIT_REFUSED: u8 = 5;
+/// The vault file is malformed, truncated, or in an unsupported format.
+pub const EXIT_MALFORMED_VAULT: u8 = 6;
+
 /// Errors returned by the library.
 #[derive(Debug)]
 pub enum Error {
@@ -22,6 +38,26 @@ pub enum Error {
     DuplicateService(String),
     ServiceNotFound(String),
     InvalidInput(String),
+}
+
+impl Error {
+    /// The stable exit code for this error. See the `EXIT_*` constants.
+    pub fn exit_code(&self) -> u8 {
+        match self {
+            Self::VaultNotFound(_) | Self::ServiceNotFound(_) => EXIT_NOT_FOUND,
+            Self::AuthenticationFailed => EXIT_AUTH_FAILED,
+            Self::Refused(_) => EXIT_REFUSED,
+            Self::NotAVault
+            | Self::LegacyVault
+            | Self::UnsupportedVersion(_)
+            | Self::UnsupportedFormat(_)
+            | Self::MalformedVault(_) => EXIT_MALFORMED_VAULT,
+            Self::InvalidInput(_) => EXIT_USAGE,
+            // Duplicate entries, I/O failures and crypto failures (RNG or
+            // encryption setup) are plain runtime failures.
+            Self::Io(_) | Self::Crypto(_) | Self::DuplicateService(_) => EXIT_FAILURE,
+        }
+    }
 }
 
 impl fmt::Display for Error {
@@ -72,5 +108,41 @@ impl std::error::Error for Error {
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_codes_are_stable_and_distinct() {
+        let cases: Vec<(Error, u8)> = vec![
+            (Error::VaultNotFound(PathBuf::from("v.dat")), EXIT_NOT_FOUND),
+            (Error::ServiceNotFound("svc".into()), EXIT_NOT_FOUND),
+            (Error::AuthenticationFailed, EXIT_AUTH_FAILED),
+            (Error::Refused("no".into()), EXIT_REFUSED),
+            (Error::NotAVault, EXIT_MALFORMED_VAULT),
+            (Error::LegacyVault, EXIT_MALFORMED_VAULT),
+            (Error::UnsupportedVersion(9), EXIT_MALFORMED_VAULT),
+            (Error::UnsupportedFormat("x".into()), EXIT_MALFORMED_VAULT),
+            (Error::MalformedVault("x".into()), EXIT_MALFORMED_VAULT),
+            (Error::InvalidInput("x".into()), EXIT_USAGE),
+            (Error::DuplicateService("svc".into()), EXIT_FAILURE),
+            (Error::Crypto("x".into()), EXIT_FAILURE),
+            (Error::Io(std::io::Error::other("x")), EXIT_FAILURE),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(error.exit_code(), expected, "wrong code for {error:?}");
+        }
+
+        // The documented contract: 0 success, 2 usage, 3 not found,
+        // 4 auth, 5 refused, 6 malformed vault.
+        assert_eq!(EXIT_OK, 0);
+        assert_eq!(EXIT_USAGE, 2);
+        assert_eq!(EXIT_NOT_FOUND, 3);
+        assert_eq!(EXIT_AUTH_FAILED, 4);
+        assert_eq!(EXIT_REFUSED, 5);
+        assert_eq!(EXIT_MALFORMED_VAULT, 6);
     }
 }

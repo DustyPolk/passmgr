@@ -2,6 +2,42 @@
 
 Newest entries first. Date, what was done, what the next iteration must know.
 
+## 2026-11-02 — TODO 0.5: stable exit codes
+
+- `src/error.rs` now owns the CLI exit-code contract: public `EXIT_OK` (0),
+  `EXIT_FAILURE` (1), `EXIT_USAGE` (2), `EXIT_NOT_FOUND` (3),
+  `EXIT_AUTH_FAILED` (4), `EXIT_REFUSED` (5), `EXIT_MALFORMED_VAULT` (6), plus
+  `Error::exit_code()`. Re-exported from `src/lib.rs`.
+- Mapping: `VaultNotFound`/`ServiceNotFound` → 3; `AuthenticationFailed` → 4;
+  `Refused` → 5; `NotAVault`/`LegacyVault`/`UnsupportedVersion`/
+  `UnsupportedFormat`/`MalformedVault` → 6; `InvalidInput` → 2 (invalid input at
+  a prompt is treated as usage, e.g. empty master password); `Io`/`Crypto`/
+  `DuplicateService` → 1 (generic failure).
+- Decision: `Crypto` stays at 1, not 6. It also covers RNG and cipher-setup
+  failures during save, which are not a malformed vault file. Vault corruption
+  at read time surfaces as `MalformedVault` (6) or `AuthenticationFailed` (4).
+- `src/main.rs`: `main()` no longer hardcodes 1/5; it prints via
+  `report_runtime_error` and exits with `error.exit_code()`. BrokenPipe still
+  exits 0. `CliError::Usage` uses `EXIT_USAGE`. The removed
+  `CliError::Runtime(Error::Refused(..))` arm produced identical output because
+  `Error::Refused` Display is the message and `report_runtime_error` adds no
+  hint for it.
+- `--help` and README now document all six codes (README table replaced).
+- Tests: new `error.rs` unit test asserts every variant's code and the numeric
+  constants; new e2e `exit_codes_are_stable` covers unknown service (3), wrong
+  password (4), truncated vault (6 + "malformed vault"), non-vault file (6),
+  empty master password (2), unknown option (2), and greps `--help` for each
+  documented code. Existing e2e expectations updated: wrong password 1→4,
+  missing vault 1→3, legacy vault 1→6.
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings`
+  clean, `cargo test` 63 passed (34 lib unit + 12 main unit + 17 e2e, ~51 s).
+  `cargo audit` still not installed (`error: no such command: audit`).
+- **Next iteration must know:** TODO 0.6 (`rm` alias + `edit`) is next. Use the
+  `EXIT_*` constants for any new exit path; do not hardcode numbers. `rm` is a
+  pure alias, so route it to `Command::Delete`. `edit` will need the vault
+  password re-prompted twice for a rotation and should return 3 for an unknown
+  service.
+
 ## 2026-11-02 — TODO 0.4: global `--agent` flag
 
 - `src/agent.rs` now models the signal source explicitly: new

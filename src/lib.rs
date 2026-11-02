@@ -11,7 +11,10 @@ pub mod store;
 pub mod terminal;
 pub mod vault;
 
-pub use error::{Error, Result};
+pub use error::{
+    EXIT_AUTH_FAILED, EXIT_FAILURE, EXIT_MALFORMED_VAULT, EXIT_NOT_FOUND, EXIT_OK, EXIT_REFUSED,
+    EXIT_USAGE, Error, Result,
+};
 pub use password::{MAX_LEN, MIN_LEN, Preset, generate_password};
 pub use store::Credential;
 pub use vault::Vault;
