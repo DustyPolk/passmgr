@@ -375,6 +375,48 @@ mod tests {
     }
 
     #[test]
+    fn timestamps_survive_saves_and_rotation_keeps_created() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "master";
+
+        let mut vault = Vault::open_for_add(&path, master).unwrap();
+        vault
+            .add(credential("timed.example", "alice", "first"))
+            .unwrap();
+        let created = vault.get("timed.example").unwrap().created_unix();
+        let rotated = vault.get("timed.example").unwrap().last_rotated_unix();
+        assert!(created > 0);
+        assert_eq!(rotated, created);
+        vault.save(master).unwrap();
+
+        let mut vault = Vault::open(&path, master).unwrap();
+        let credential = vault.get("timed.example").unwrap();
+        assert_eq!(credential.created_unix(), created);
+        assert_eq!(credential.last_rotated_unix(), rotated);
+
+        vault
+            .get_mut("timed.example")
+            .unwrap()
+            .set_password(Zeroizing::new("second".to_owned()))
+            .unwrap();
+        vault.save(master).unwrap();
+
+        let reopened = Vault::open(&path, master).unwrap();
+        let credential = reopened.get("timed.example").unwrap();
+        assert_eq!(credential.password(), "second");
+        assert_eq!(
+            credential.created_unix(),
+            created,
+            "rotation must never change the creation time"
+        );
+        assert!(
+            credential.last_rotated_unix() >= rotated,
+            "rotation must record a new timestamp"
+        );
+    }
+
+    #[test]
     fn lookup_by_reference_is_stable_across_renames() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("vault.dat");

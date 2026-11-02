@@ -3,10 +3,12 @@
 //! The payload is versioned binary data (integers little-endian):
 //!
 //! ```text
-//! u8                     store version (3)
+//! u8                     store version (4)
 //! u32                    credential count
 //! for each credential:
 //!     byte[16]           entry id
+//!     u64                created      (Unix seconds, UTC; 0 = unknown)
+//!     u64                last_rotated (Unix seconds, UTC; 0 = unknown)
 //!     u32 + bytes        service  (UTF-8)
 //!     u32 + bytes        username (UTF-8)
 //!     u32 + bytes        password (UTF-8)
@@ -15,15 +17,18 @@
 //!         u32 + bytes    tag      (UTF-8)
 //! ```
 //!
-//! Store version 1 had no entry ids and version 2 had no tags. Both are still
-//! read for migration; missing ids are generated in memory and written out on
-//! the next save (no data loss, no crypto change).
+//! Store version 1 had no entry ids, version 2 had no tags, and version 3 had
+//! no timestamps. All are still read for migration; missing ids are generated
+//! in memory and missing timestamps decode as 0 ("unknown") and are written
+//! out on the next save (no data loss, no crypto change).
 //!
 //! Length-prefixing means services, usernames, and passwords may contain any
 //! characters (including `:` and newlines) without escaping.
 
 use std::collections::HashSet;
 use std::fmt;
+use std::io;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use getrandom::fill;
 use zeroize::Zeroizing;
@@ -40,7 +45,15 @@ pub const ENTRY_ID_BYTES: usize = 16;
 const ENTRY_ID_HEX_CHARS: usize = ENTRY_ID_BYTES * 2;
 const ENTRY_REF_PREFIX: &str = "pm://";
 
-const STORE_VERSION: u8 = 3;
+/// Timestamps are unsigned Unix seconds (UTC). Zero means "unknown": it is
+/// what a pre-v4 payload decodes to. The upper bound is 9999-12-31T23:59:59Z,
+/// which keeps date rendering from overflowing and rejects nonsense values.
+pub const MAX_TIMESTAMP_UNIX: u64 = 253_402_300_799;
+
+const STORE_VERSION: u8 = 4;
+/// Version 3 is read-only for migration: it has ids and tags but no
+/// timestamps.
+const STORE_VERSION_WITHOUT_TIMESTAMPS: u8 = 3;
 /// Version 2 is read-only for migration: it has ids but no tags.
 const STORE_VERSION_WITHOUT_TAGS: u8 = 2;
 /// Version 1 is read-only for migration: it has no ids and no tags.
@@ -133,10 +146,57 @@ fn hex_digit(byte: u8) -> Result<u8> {
     }
 }
 
-/// A single stored credential. Its fields are wiped when the value is dropped.
+/// Creation and last-rotation times, in Unix seconds. Both are metadata, not
+/// secrets, so they live in plain `u64` fields. Zero means unknown (a payload
+/// migrated from store version 3 or older).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Timestamps {
+    created: u64,
+    last_rotated: u64,
+}
+
+impl Timestamps {
+    /// The current time for a newly created credential. Creating a credential
+    /// counts as its first rotation.
+    fn now() -> Result<Self> {
+        let now = now_unix_seconds()?;
+        Ok(Self {
+            created: now,
+            last_rotated: now,
+        })
+    }
+
+    /// Migration sentinel for payloads that predate timestamps.
+    fn unknown() -> Self {
+        Self {
+            created: 0,
+            last_rotated: 0,
+        }
+    }
+}
+
+/// Read the system clock as Unix seconds, refusing values that cannot be a
+/// real timestamp. A clock failure is an environment failure (exit 1), not a
+/// usage error.
+fn now_unix_seconds() -> Result<u64> {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Error::Io(io::Error::other("system clock is before the Unix epoch")))?
+        .as_secs();
+    if seconds > MAX_TIMESTAMP_UNIX {
+        return Err(Error::Io(io::Error::other(
+            "system clock is beyond the supported timestamp range",
+        )));
+    }
+    Ok(seconds)
+}
+
+/// A single stored credential. Its secret fields are wiped when the value is
+/// dropped; ids, tags and timestamps are metadata.
 #[derive(Clone)]
 pub struct Credential {
     id: EntryId,
+    timestamps: Timestamps,
     service: Zeroizing<String>,
     username: Zeroizing<String>,
     password: Zeroizing<String>,
@@ -145,10 +205,12 @@ pub struct Credential {
 }
 
 impl Credential {
-    /// Create a credential with a freshly generated id and no tags.
+    /// Create a credential with a freshly generated id, no tags, and the
+    /// current time as both `created` and `last_rotated`.
     pub fn new(service: String, username: String, password: Zeroizing<String>) -> Result<Self> {
         Self::with_id(
             EntryId::generate()?,
+            Timestamps::now()?,
             service,
             username,
             password,
@@ -158,6 +220,7 @@ impl Credential {
 
     fn with_id(
         id: EntryId,
+        timestamps: Timestamps,
         service: String,
         username: String,
         password: Zeroizing<String>,
@@ -168,6 +231,7 @@ impl Credential {
         let tags = normalize_tags(tags)?;
         Ok(Self {
             id,
+            timestamps,
             service: Zeroizing::new(service),
             username: Zeroizing::new(username),
             password,
@@ -189,6 +253,16 @@ impl Credential {
     /// The agent-facing reference for this credential.
     pub fn reference(&self) -> String {
         self.id.to_ref()
+    }
+
+    /// When the credential was created, in Unix seconds (0 = unknown).
+    pub fn created_unix(&self) -> u64 {
+        self.timestamps.created
+    }
+
+    /// When the password last changed, in Unix seconds (0 = unknown).
+    pub fn last_rotated_unix(&self) -> u64 {
+        self.timestamps.last_rotated
     }
 
     pub fn service(&self) -> &str {
@@ -217,9 +291,13 @@ impl Credential {
         Ok(())
     }
 
+    /// Replace the password and record the rotation time. Rotation is the only
+    /// way `last_rotated` moves; `created` never changes.
     pub fn set_password(&mut self, password: Zeroizing<String>) -> Result<()> {
+        let now = now_unix_seconds()?;
         validate_password(&password)?;
         self.password = password;
+        self.timestamps.last_rotated = now;
         Ok(())
     }
 
@@ -250,6 +328,8 @@ impl fmt::Debug for Credential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Credential")
             .field("id", &self.id())
+            .field("created_unix", &self.created_unix())
+            .field("last_rotated_unix", &self.last_rotated_unix())
             .field("service", &self.service())
             .field("username", &self.username())
             .field("password", &"<redacted>")
@@ -356,7 +436,7 @@ fn byte_len(credentials: &[Credential]) -> Result<usize> {
     let mut total: usize = 1 + 4;
     for credential in credentials {
         total = total
-            .checked_add(ENTRY_ID_BYTES)
+            .checked_add(ENTRY_ID_BYTES + 8 + 8)
             .ok_or_else(|| Error::InvalidInput("vault contents are too large".into()))?;
         for field in [
             credential.service(),
@@ -394,11 +474,17 @@ pub fn encode(credentials: &[Credential]) -> Result<Zeroizing<Vec<u8>>> {
         )));
     }
 
+    for credential in credentials {
+        validate_timestamps(credential.timestamps)?;
+    }
+
     let mut out = Zeroizing::new(Vec::with_capacity(total));
     out.push(STORE_VERSION);
     out.extend_from_slice(&(credentials.len() as u32).to_le_bytes());
     for credential in credentials {
         out.extend_from_slice(&credential.id.0);
+        out.extend_from_slice(&credential.created_unix().to_le_bytes());
+        out.extend_from_slice(&credential.last_rotated_unix().to_le_bytes());
         for field in [
             credential.service(),
             credential.username(),
@@ -415,6 +501,34 @@ pub fn encode(credentials: &[Credential]) -> Result<Zeroizing<Vec<u8>>> {
     }
     debug_assert_eq!(out.len(), total);
     Ok(out)
+}
+
+fn validate_timestamps(timestamps: Timestamps) -> Result<()> {
+    for (name, value) in [
+        ("created", timestamps.created),
+        ("last_rotated", timestamps.last_rotated),
+    ] {
+        if value > MAX_TIMESTAMP_UNIX {
+            return Err(Error::InvalidInput(format!(
+                "{name} timestamp {value} exceeds the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_decoded_timestamps(timestamps: Timestamps) -> Result<()> {
+    for (name, value) in [
+        ("created", timestamps.created),
+        ("last_rotated", timestamps.last_rotated),
+    ] {
+        if value > MAX_TIMESTAMP_UNIX {
+            return Err(Error::MalformedVault(format!(
+                "{name} timestamp {value} exceeds the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds"
+            )));
+        }
+    }
+    Ok(())
 }
 
 struct Cursor<'a> {
@@ -440,6 +554,13 @@ impl<'a> Cursor<'a> {
         let bytes = self.read_bytes(4)?;
         Ok(u32::from_le_bytes(
             bytes.try_into().expect("read_bytes returned four bytes"),
+        ))
+    }
+
+    fn read_u64(&mut self) -> Result<u64> {
+        let bytes = self.read_bytes(8)?;
+        Ok(u64::from_le_bytes(
+            bytes.try_into().expect("read_bytes returned eight bytes"),
         ))
     }
 
@@ -489,10 +610,11 @@ pub fn decode(data: &[u8]) -> Result<Vec<Credential>> {
     }
     let mut cursor = Cursor::new(data);
     let version = cursor.read_u8()?;
-    let (has_ids, has_tags) = match version {
-        STORE_VERSION => (true, true),
-        STORE_VERSION_WITHOUT_TAGS => (true, false),
-        STORE_VERSION_WITHOUT_IDS => (false, false),
+    let (has_ids, has_tags, has_timestamps) = match version {
+        STORE_VERSION => (true, true, true),
+        STORE_VERSION_WITHOUT_TIMESTAMPS => (true, true, false),
+        STORE_VERSION_WITHOUT_TAGS => (true, false, false),
+        STORE_VERSION_WITHOUT_IDS => (false, false, false),
         other => {
             return Err(Error::MalformedVault(format!(
                 "unsupported credential store version {other}"
@@ -522,6 +644,18 @@ pub fn decode(data: &[u8]) -> Result<Vec<Credential>> {
                 id.to_ref()
             )));
         }
+        // Pre-v4 payloads have no timestamps: carry 0 ("unknown") until the
+        // entry is rewritten, so the absence is visible rather than invented.
+        let timestamps = if has_timestamps {
+            let timestamps = Timestamps {
+                created: cursor.read_u64()?,
+                last_rotated: cursor.read_u64()?,
+            };
+            validate_decoded_timestamps(timestamps)?;
+            timestamps
+        } else {
+            Timestamps::unknown()
+        };
         let service = cursor.read_string("service")?;
         let username = cursor.read_string("username")?;
         let password = Zeroizing::new(cursor.read_string("password")?);
@@ -548,7 +682,7 @@ pub fn decode(data: &[u8]) -> Result<Vec<Credential>> {
         } else {
             Vec::new()
         };
-        let credential = Credential::with_id(id, service, username, password, tags)
+        let credential = Credential::with_id(id, timestamps, service, username, password, tags)
             .map_err(|err| Error::MalformedVault(err.to_string()))?;
         credentials.push(credential);
     }
@@ -600,6 +734,8 @@ mod tests {
         assert_eq!(decoded.len(), credentials.len());
         for (actual, expected) in decoded.iter().zip(&credentials) {
             assert_eq!(actual.id(), expected.id());
+            assert_eq!(actual.created_unix(), expected.created_unix());
+            assert_eq!(actual.last_rotated_unix(), expected.last_rotated_unix());
             assert_eq!(actual.service(), expected.service());
             assert_eq!(actual.username(), expected.username());
             assert_eq!(actual.password(), expected.password());
@@ -621,10 +757,30 @@ mod tests {
         out
     }
 
+    /// Build a store version 3 payload (ids and tags, no timestamps) by hand,
+    /// the way the previous release wrote it.
+    fn encode_v3(credentials: &[(&str, &str, &str, &[&str])]) -> Vec<u8> {
+        let mut out = vec![STORE_VERSION_WITHOUT_TIMESTAMPS];
+        out.extend_from_slice(&(credentials.len() as u32).to_le_bytes());
+        for (service, username, password, tags) in credentials {
+            out.extend_from_slice(&EntryId::generate().unwrap().0);
+            for field in [*service, *username, *password] {
+                out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+                out.extend_from_slice(field.as_bytes());
+            }
+            out.extend_from_slice(&(tags.len() as u32).to_le_bytes());
+            for tag in *tags {
+                out.extend_from_slice(&(tag.len() as u32).to_le_bytes());
+                out.extend_from_slice(tag.as_bytes());
+            }
+        }
+        out
+    }
+
     #[test]
     fn empty_vault_roundtrips() {
         let encoded = encode(&[]).unwrap();
-        assert_eq!(&*encoded, &[3, 0, 0, 0, 0]);
+        assert_eq!(&*encoded, &[4, 0, 0, 0, 0]);
         assert!(decode(&encoded).unwrap().is_empty());
     }
 
@@ -649,6 +805,27 @@ mod tests {
     }
 
     #[test]
+    fn version_3_payload_is_migrated_with_timestamps_unknown() {
+        let payload = encode_v3(&[("v3.example", "alice", "secret", &["prod", "work"])]);
+        let migrated = decode(&payload).unwrap();
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].service(), "v3.example");
+        assert_eq!(migrated[0].tags(), ["prod", "work"]);
+        assert_eq!(migrated[0].created_unix(), 0);
+        assert_eq!(migrated[0].last_rotated_unix(), 0);
+
+        // Saving upgrades to store version 4 and preserves id, tags and the
+        // "unknown" timestamps instead of inventing a creation date.
+        let upgraded = encode(&migrated).unwrap();
+        assert_eq!(upgraded[0], STORE_VERSION);
+        let reopened = decode(&upgraded).unwrap();
+        assert_eq!(reopened[0].id(), migrated[0].id());
+        assert_eq!(reopened[0].tags(), ["prod", "work"]);
+        assert_eq!(reopened[0].created_unix(), 0);
+        assert_eq!(reopened[0].last_rotated_unix(), 0);
+    }
+
+    #[test]
     fn version_2_payload_is_migrated_without_data_loss() {
         let payload = encode_v2(&[("old.example", "alice", "secret-one")]);
         let migrated = decode(&payload).unwrap();
@@ -657,8 +834,10 @@ mod tests {
         assert_eq!(migrated[0].username(), "alice");
         assert_eq!(migrated[0].password(), "secret-one");
         assert!(migrated[0].tags().is_empty());
+        assert_eq!(migrated[0].created_unix(), 0);
+        assert_eq!(migrated[0].last_rotated_unix(), 0);
 
-        // Saving writes store version 3 and preserves the id.
+        // Saving writes store version 4 and preserves the id.
         let upgraded = encode(&migrated).unwrap();
         assert_eq!(upgraded[0], STORE_VERSION);
         let reopened = decode(&upgraded).unwrap();
@@ -766,6 +945,8 @@ mod tests {
         assert!(migrated[0].tags().is_empty());
         assert_eq!(migrated[1].service(), "other.example");
         assert_eq!(migrated[1].password(), "secret-two");
+        assert_eq!(migrated[1].created_unix(), 0);
+        assert_eq!(migrated[1].last_rotated_unix(), 0);
         assert_ne!(migrated[0].id(), migrated[1].id());
 
         // Saving writes the new store version, and the migrated ids stick.
@@ -888,9 +1069,66 @@ mod tests {
     }
 
     #[test]
+    fn new_entries_record_creation_and_rotation_times() {
+        let mut credential = credential("timed.example", "user", "first");
+        let created = credential.created_unix();
+        assert!(created > 0, "a new entry gets a real timestamp");
+        assert!(created <= MAX_TIMESTAMP_UNIX);
+        assert_eq!(credential.last_rotated_unix(), created);
+
+        // Pretend the entry was last rotated long ago, then rotate it. Only the
+        // rotation time moves; the creation time is immutable.
+        credential.timestamps.last_rotated = 1_000_000;
+        credential
+            .set_password(Zeroizing::new("second".to_owned()))
+            .unwrap();
+        assert_eq!(credential.created_unix(), created);
+        assert!(credential.last_rotated_unix() > 1_000_000);
+        assert!(credential.last_rotated_unix() <= MAX_TIMESTAMP_UNIX);
+
+        // A rejected password leaves the rotation time unchanged.
+        let before = credential.last_rotated_unix();
+        assert!(
+            credential
+                .set_password(Zeroizing::new(String::new()))
+                .is_err()
+        );
+        assert_eq!(credential.last_rotated_unix(), before);
+
+        let decoded = decode(&encode(&[credential]).unwrap()).unwrap();
+        assert_eq!(decoded[0].created_unix(), created);
+        assert!(decoded[0].last_rotated_unix() >= before);
+    }
+
+    #[test]
+    fn rejects_out_of_range_timestamps_in_payload() {
+        let encoded = encode(&[credential("timed.example", "u", "p")])
+            .unwrap()
+            .to_vec();
+        // Layout: version(1) + count(4) + id(16) + created(8).
+        let created_offset = 1 + 4 + ENTRY_ID_BYTES;
+        let mut payload = encoded;
+        payload[created_offset..created_offset + 8]
+            .copy_from_slice(&(MAX_TIMESTAMP_UNIX + 1).to_le_bytes());
+        assert!(matches!(
+            decode(&payload).unwrap_err(),
+            Error::MalformedVault(message) if message.contains("created timestamp")
+        ));
+
+        // Encoding must refuse the same value rather than write a payload that
+        // its own reader would reject.
+        let mut credential = credential("timed.example", "u", "p");
+        credential.timestamps.created = MAX_TIMESTAMP_UNIX + 1;
+        assert!(matches!(
+            encode(&[credential]).unwrap_err(),
+            Error::InvalidInput(message) if message.contains("created timestamp")
+        ));
+    }
+
+    #[test]
     fn rejects_bad_store_version() {
         assert!(matches!(
-            decode(&[4, 0, 0, 0, 0]).unwrap_err(),
+            decode(&[5, 0, 0, 0, 0]).unwrap_err(),
             Error::MalformedVault(_)
         ));
     }

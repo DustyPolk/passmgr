@@ -1,7 +1,7 @@
 # passmgr vault format
 
 This document specifies on-disk vault format version 2 (container) with
-credential store version 3. All multi-byte integers
+credential store version 4. All multi-byte integers
 are **little-endian**. A vault is a single file containing a header, a
 ciphertext, and a 16-byte GCM authentication tag.
 
@@ -71,10 +71,12 @@ ignored.
 After successful decryption, the plaintext is versioned binary data:
 
 ```text
-u8          store version = 3
+u8          store version = 4
 u32         credential count
 repeat count times:
     byte[16]    entry id (random, stable per credential)
+    u64         created, Unix seconds UTC (0 = unknown)
+    u64         last_rotated, Unix seconds UTC (0 = unknown)
     u32         service length in bytes
     byte[]      service, UTF-8
     u32         username length in bytes
@@ -95,9 +97,21 @@ secrets, but they live inside the encrypted payload so the vault file does not
 leak how many entries exist.
 
 Store version 2 has the same layout without the tag fields. Store version 1
-has no ids and no tags. Both are read for migration: missing ids are generated
-in memory while decoding, missing tags decode as an empty list, and the next
-save writes store version 3. Credential fields are preserved unchanged.
+has no ids and no tags. Store version 3 has ids and tags but no timestamps.
+Versions 1-3 are read for migration: missing ids are generated in memory,
+missing tags decode as an empty list, missing timestamps decode as `0`, and
+the next save writes store version 4. Credential fields are preserved
+unchanged.
+
+Timestamps are unsigned 64-bit Unix seconds (UTC) and are metadata, not
+secrets. `created` is set when the credential is added and never changes.
+`last_rotated` is set at creation and updated on every password rotation. A
+value of `0` means "unknown": it is what payloads migrated from store version
+3 or older decode to, so no creation date is invented. Values above
+253402300799 (9999-12-31T23:59:59Z) are rejected as malformed on read and as
+invalid on write, so date rendering cannot overflow. Second precision means a
+rotation within the same second as the previous one leaves `last_rotated`
+unchanged; it never moves backwards under a normal clock.
 
 Tags are lowercase metadata labels used for scoped agent access. On disk each
 credential stores a sorted, duplicate-free list: each tag must be 1-32 bytes,
@@ -119,9 +133,9 @@ implementation applies additional validation when reading and writing:
 - at most 10,000 credentials;
 - the decoded payload is at most 10 MiB.
 
-An empty vault encodes as `03 00 00 00 00`: store version 3 and a count of zero.
-Version 2 (`02 00 00 00 00`) and version 1 (`01 00 00 00 00`) empty payloads are
-also accepted and upgraded on save.
+An empty vault encodes as `04 00 00 00 00`: store version 4 and a count of zero.
+Version 3 (`03 00 00 00 00`), version 2 (`02 00 00 00 00`) and version 1
+(`01 00 00 00 00`) empty payloads are also accepted and upgraded on save.
 
 ## Versioning
 
@@ -129,9 +143,9 @@ also accepted and upgraded on save.
   algorithms.
 - The KDF and AEAD ids provide algorithm agility inside a container version.
 - The plaintext store version at the start of the decrypted payload controls
-  the credential encoding. Versions 1 (no entry ids) and 2 (no tags) are
-  accepted for migration and rewritten as version 3 on save; unknown versions
-  are rejected.
+  the credential encoding. Versions 1 (no entry ids), 2 (no tags) and 3 (no
+  timestamps) are accepted for migration and rewritten as version 4 on save;
+  unknown versions are rejected.
 
 A reader must reject unknown versions rather than guessing. Version 1 is
 reserved for the legacy C vault:

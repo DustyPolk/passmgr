@@ -931,6 +931,16 @@ fn edit_rotates_the_password_without_printing_it() {
     let vault = vault_path(&directory);
     add_example(&vault);
 
+    let (created_before, rotated_before) = {
+        let opened = passmgr::Vault::open(&vault, "master").expect("vault opens");
+        let credential = opened.get("example.com").expect("credential exists");
+        (credential.created_unix(), credential.last_rotated_unix())
+    };
+    assert!(
+        created_before > 0,
+        "a new credential records a creation time"
+    );
+
     const NEW_SECRET: &str = "rotated-s3cret-should-never-leak";
     let output = run(
         &["--db", &vault, "edit", "example.com"],
@@ -958,6 +968,15 @@ fn edit_rotates_the_password_without_printing_it() {
     let vault = passmgr::Vault::open(&vault, "master").expect("vault opens");
     let credential = vault.get("example.com").expect("credential exists");
     assert_eq!(credential.username(), "alice", "username is unchanged");
+    assert_eq!(
+        credential.created_unix(),
+        created_before,
+        "rotation must preserve the creation time"
+    );
+    assert!(
+        credential.last_rotated_unix() >= rotated_before,
+        "rotation must record a rotation time"
+    );
 }
 
 /// `edit --rename --username` is a metadata-only change: it must not prompt

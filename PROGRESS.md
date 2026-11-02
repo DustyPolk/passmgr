@@ -1,3 +1,56 @@
+## 2026-11-02 — Created/last-rotated timestamps (TODO 1.4, unblocks 1.2b)
+
+- TODO 1.2b was the first unchecked item but was **blocked on 1.4**, so this
+  iteration did 1.4 (the blocker). 1.2b is now unblocked and is next.
+- Store **version 4**: each credential in the encrypted payload now carries
+  `u64 created` and `u64 last_rotated` immediately after the 16-byte id. Both
+  are Unix seconds UTC. Layout: `u8 version | u32 count | { id[16], created,
+  last_rotated, service, username, password, tags }`. Container and crypto are
+  unchanged (still container v2, same Argon2id/AES-GCM params).
+- `created` is set by `Credential::new` together with `last_rotated` (adding a
+  credential counts as its first rotation) and never changes afterwards.
+  `Credential::set_password` is the only mutator that moves `last_rotated`; it
+  reads the clock **before** validating/replacing, so a rejected password (e.g.
+  empty) leaves both password and timestamp untouched. Public getters
+  `created_unix()` / `last_rotated_unix()`.
+- Migration: versions 1, 2 and 3 still decode. Pre-v4 entries get `created =
+  last_rotated = 0`, documented as "unknown", rather than inventing a date at
+  migration time; the next save writes version 4 and preserves the zeros. So a
+  migrated entry has no known creation time; 1.2b must render `0` as
+  unknown/absent, not 1970-01-01.
+- Validation: timestamps above `store::MAX_TIMESTAMP_UNIX = 253_402_300_799`
+  (9999-12-31T23:59:59Z) are `MalformedVault` (exit 6) on read and
+  `InvalidInput` (exit 2) on write, so a hand-crafted payload cannot overflow
+  future date rendering. `created > last_rotated` is **not** rejected: a clock
+  that moves backwards is legitimate, and enforcing order would fail closed on
+  real vaults for no security gain.
+- Clock failure (system time before the Unix epoch or past the bound) returns
+  `Error::Io` (exit 1) instead of adding an error variant; it is an environment
+  failure, not user input.
+- Precision is whole seconds. A rotation within the same second as the previous
+  one leaves `last_rotated` numerically unchanged; tests therefore assert `>=`
+  where the real clock is involved and use a crafted private field for the
+  deterministic "rotation moves the timestamp" proof.
+- Tests: store unit tests for the v4 round-trip (timestamps preserved), a new
+  hand-built **v3** payload migrating with id/tags intact and timestamps 0,
+  empty vault now `04 00 00 00 00`, v1/v2 migration timestamps 0, timestamp
+  range rejection on both read and write, and a deterministic rotation test
+  (created immutable, last_rotated moves, rejected password does not move it).
+  Vault test `timestamps_survive_saves_and_rotation_keeps_created`; e2e
+  `edit_rotates_the_password_without_printing_it` now captures `created`
+  before the edit and asserts it is unchanged after rotating. No secret bytes
+  are involved (timestamps are metadata).
+- Docs: `FORMAT.md` payload v4, migration and timestamp rules; README security
+  section gains a Timestamps bullet; `store.rs` module doc updated.
+- Gate: `cargo fmt --check` clean, clippy `--all-targets -D warnings` clean,
+  `cargo test` 95 passed (51 lib + 17 bin + 27 e2e, ~147 s). `cargo audit`
+  still not installed (`error: no such command: audit`); no dependency changed.
+- **Next iteration must know:** do **1.2b** (add `tags`, `created`,
+  `last_rotated` to `entry_metadata` in `src/main.rs` and to text output if
+  desired). Decide the JSON representation there: raw Unix seconds are the
+  stored form; if ISO-8601 is wanted, either hand-roll days-from-civil or add a
+  justified date dependency. Do not put `password` anywhere near that struct.
+
 ## 2026-11-02 — Tags on credentials (TODO 1.3)
 
 - Implemented per-credential tags and store **version 3**. Payload gains

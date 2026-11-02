@@ -72,8 +72,13 @@ come first.
       sorted/deduped tags, 1-32 bytes `[a-z0-9._-]`, max 32 per credential.
       Tags are printed as metadata in text output and deliberately kept out of
       JSON until 1.2b.)
-- [ ] **1.4 `last_rotated` timestamp** per credential, updated by `edit`.
-      Store version bump handled in 1.1's migration.
+- [x] **1.4 `created` / `last_rotated` timestamps** per credential. Store version
+      4: each payload entry gains two `u64` Unix seconds fields (`created`,
+      `last_rotated`); versions 1-3 migrate with `0` ("unknown"). `add` sets
+      both, `set_password` updates only `last_rotated`, values above
+      253402300799 are rejected. `created` was added in the same format bump as
+      `last_rotated` because 1.2b needs both and two store-version bumps would
+      be wasted work. Nothing prints them yet; 1.2b adds them to JSON.
 
 ## Phase 2 — unlock daemon (`pmd`)
 
