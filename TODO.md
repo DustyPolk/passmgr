@@ -62,10 +62,13 @@ come first.
       `Vault::get_by_ref`, `serde_json` dependency. Tests: JSON parses, values
       round-trip through escaping, reference survives a rename, and the secret
       is absent from stdout/stderr in both text and JSON modes.
-- [ ] **1.2b Extend the JSON entry with `tags`, `created` and `last_rotated`.**
+- [x] **1.2b Extend the JSON entry with `tags`, `created` and `last_rotated`.**
       Schema addition only (agents must tolerate new keys). Tags now exist
-      (1.3), so this is blocked only on 1.4 (`created`/`last_rotated`); add all
-      three keys together to avoid two schema migrations.
+      (1.3), so this was blocked only on 1.4 (`created`/`last_rotated`); all
+      three keys were added together. (Tags are a sorted array; timestamps are
+      RFC 3339 UTC strings, `null` when the stored value is 0 = unknown. The
+      vault still stores raw Unix seconds. `src/timestamp.rs` does the
+      conversion with no new dependency.)
 - [x] **1.3 Tags** on credentials (`--tag`), used later for grant scope. Test:
       filter by tag, reject unknown/empty tags, `list --tag`. (Store version 3;
       `--tag` on `add`/`edit`, `--clear-tags`, `list --tag` with AND semantics,
@@ -78,7 +81,7 @@ come first.
       both, `set_password` updates only `last_rotated`, values above
       253402300799 are rejected. `created` was added in the same format bump as
       `last_rotated` because 1.2b needs both and two store-version bumps would
-      be wasted work. Nothing prints them yet; 1.2b adds them to JSON.
+      be wasted work. JSON output added them in 1.2b.
 
 ## Phase 2 — unlock daemon (`pmd`)
 

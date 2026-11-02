@@ -11,6 +11,7 @@ use passmgr::error::{EXIT_OK, EXIT_USAGE};
 use passmgr::password::{self, MAX_LEN, MIN_LEN, Preset};
 use passmgr::store::{self, Credential};
 use passmgr::terminal;
+use passmgr::timestamp;
 use passmgr::vault::{self, Vault};
 use zeroize::Zeroizing;
 
@@ -60,8 +61,9 @@ Commands:
   list [--json] [--tag TAG] List stored services, usernames, references and
                              tags. --tag filters to entries that carry every
                              given tag and is repeatable. With --json, print
-                             {"entries":[...]} where each entry has only
-                             "ref", "service" and "username".
+                             {"entries":[...]} where each entry has "ref",
+                             "service", "username", "tags", "created" and
+                             "last_rotated".
   show [--json] <ref>        Show one credential by its pm:// reference.
                              Metadata only, no password. --json prints the
                              entry object directly.
@@ -109,7 +111,8 @@ Notes:
     without revealing any secret, and survives renames. 'show' accepts only a
     full reference, never a service name.
   - 'list --json' and 'show --json' emit references and metadata only; there
-    is no JSON field that carries a password.
+    is no JSON field that carries a password. "created" and "last_rotated"
+    are RFC 3339 UTC strings, or null when the timestamp is unknown.
   - Tags are lowercase labels: 1-32 bytes starting with a letter or digit, then
     [a-z0-9._-]; at most 32 per credential. They are metadata, never secrets.
   - Tags are metadata, not secrets. They are lowercase letters, digits, '-',
@@ -907,11 +910,16 @@ fn command_list(json: bool, tags: &[String], path: &Path) -> Result<(), Error> {
 
 /// The JSON form of an entry: references and metadata only. A credential's
 /// password has no accessor here, so serializing an entry cannot leak it.
+/// Timestamps are RFC 3339 UTC strings, or `null` when the stored value is 0
+/// (unknown, which is what entries migrated from a pre-v4 payload carry).
 fn entry_metadata(credential: &Credential) -> serde_json::Value {
     serde_json::json!({
         "ref": credential.reference(),
         "service": credential.service(),
         "username": credential.username(),
+        "tags": credential.tags(),
+        "created": timestamp::to_json(credential.created_unix()),
+        "last_rotated": timestamp::to_json(credential.last_rotated_unix()),
     })
 }
 
@@ -1345,5 +1353,55 @@ mod tests {
         assert!(parse(&["rm", "a", "b"]).is_err());
         assert!(HELP.contains("rm <service>"));
         assert!(HELP.contains("edit [options]"));
+    }
+
+    /// Build a store version 4 payload by hand, so a test can choose the stored
+    /// timestamps (including the `0` = unknown case the public API never makes).
+    fn store_v4_payload(created: u64, last_rotated: u64) -> Vec<u8> {
+        let mut out = vec![4];
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&[0x11; 16]);
+        out.extend_from_slice(&created.to_le_bytes());
+        out.extend_from_slice(&last_rotated.to_le_bytes());
+        for field in ["example.com", "alice", "correct horse battery"] {
+            out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            out.extend_from_slice(field.as_bytes());
+        }
+        out.extend_from_slice(&1u32.to_le_bytes());
+        let tag = "prod";
+        out.extend_from_slice(&(tag.len() as u32).to_le_bytes());
+        out.extend_from_slice(tag.as_bytes());
+        out
+    }
+
+    #[test]
+    fn json_entry_exposes_tags_and_utc_timestamps_but_no_password() {
+        let credentials = store::decode(&store_v4_payload(951_782_400, 1_735_689_600)).unwrap();
+        let entry = entry_metadata(&credentials[0]);
+        assert_eq!(entry["ref"], serde_json::json!(credentials[0].reference()));
+        assert_eq!(entry["service"], serde_json::json!("example.com"));
+        assert_eq!(entry["username"], serde_json::json!("alice"));
+        assert_eq!(entry["tags"], serde_json::json!(["prod"]));
+        assert_eq!(entry["created"], serde_json::json!("2000-02-29T00:00:00Z"));
+        assert_eq!(
+            entry["last_rotated"],
+            serde_json::json!("2025-01-01T00:00:00Z")
+        );
+        assert!(entry.get("password").is_none());
+        let text = serde_json::to_string(&entry).unwrap();
+        assert!(!text.contains("correct horse battery"));
+    }
+
+    #[test]
+    fn json_entry_renders_unknown_timestamps_as_null() {
+        // Pre-v4 payloads migrate with 0 in both fields; that absence must stay
+        // visible as `null` instead of being rendered as 1970-01-01.
+        let credentials = store::decode(&store_v4_payload(0, 0)).unwrap();
+        let entry = entry_metadata(&credentials[0]);
+        assert_eq!(entry["created"], serde_json::Value::Null);
+        assert_eq!(entry["last_rotated"], serde_json::Value::Null);
+        let text = serde_json::to_string(&entry).unwrap();
+        assert!(!text.contains("1970-0"));
+        assert!(!text.contains("correct horse battery"));
     }
 }

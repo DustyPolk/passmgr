@@ -1,3 +1,51 @@
+## 2026-11-02 — Tags and timestamps in JSON (TODO 1.2b)
+
+- TODO 1.2b: `list --json`, `show --json` entries now carry all six keys:
+  `ref`, `service`, `username`, `tags`, `created`, `last_rotated`. The schema
+  is unchanged elsewhere; `list` still prints exactly `{"entries":[...]}` and
+  `show --json` the entry object. No password key exists by construction:
+  `entry_metadata` only calls metadata getters.
+- **Representation decision:** `tags` is always an array (sorted, deduped, as
+  stored). `created` / `last_rotated` are RFC 3339 UTC strings
+  (`2026-11-02T18:20:02Z`) and **`null` when the stored value is 0** (unknown,
+  i.e. entries migrated from a pre-v4 payload). Chose strings over raw epoch
+  integers because JSON here is the agent-facing surface: a UTC string is
+  self-describing, has no timezone ambiguity, and fixed-width `...Z` strings
+  sort chronologically, so an agent can use `>`. Storage still keeps raw
+  `u64` seconds; this is presentation only.
+- No new dependency. New module `src/timestamp.rs` exposes `format_utc(u64)
+  -> String` and `to_json(u64) -> serde_json::Value`. `civil_from_days` is
+  Howard Hinnant's exact proleptic-Gregorian algorithm, private, and total
+  over the whole `u64` range (a value beyond the store bound would render a
+  five-digit year instead of panicking; the store rejects those first). Values
+  up to `store::MAX_TIMESTAMP_UNIX = 253402300799` all format with 4-digit
+  years, up to `9999-12-31T23:59:59Z`.
+- Tests: 13 known formatting vectors from `date -u` (epoch, day boundary,
+  2000-02-29 leap century, 2024-02-29, 2100-01-01 non-leap century, y2038,
+  max timestamp); leap-year contiguity test (each day strictly increasing,
+  fixed 20-byte width, Feb 29 -> Mar 1); `to_json(0)` is `null` while
+  `format_utc(0)` is the epoch. Two bin tests decode a hand-built store-v4
+  payload (private `STORE_VERSION` is not exported, so the literal `4` is
+  documented there) to prove zero timestamps render `null` and nonzero ones
+  render exact strings, tags render sorted, and the password is absent from
+  both the `Value` and its serialization. E2E
+  `show_and_list_json_expose_metadata_only` now tags the entry during the
+  rename edit, asserts the sorted `tags` array, asserts `created` is a
+  20-byte `...Z` string, and asserts `created == last_rotated` after a
+  metadata-only edit. `tags_are_stored_filtered_and_metadata_only` was
+  updated from "JSON omits tags for now" to asserting the sorted tag arrays
+  (same intent, new schema).
+- Docs: README machine-readable section now shows a full entry example and
+  documents `null`; Tags and Timestamps (security) bullets corrected.
+- Gate: `cargo fmt --check` clean, clippy `--all-targets -D warnings` clean,
+  `cargo test` 100 passed (54 lib + 19 bin + 27 e2e). `cargo audit` still not
+  installed (`error: no such command: audit`); dependencies unchanged.
+- **Next iteration must know:** Phase 1 is complete. Next is **2.1**
+  (length-prefixed JSON protocol module, pure functions, max message size).
+  The JSON schema for entry metadata should be treated as stable; if a field
+  is ever added, agents already tolerate new keys, but never add `password`.
+  `src/timestamp.rs` is the only place timestamp formatting lives.
+
 ## 2026-11-02 — Created/last-rotated timestamps (TODO 1.4, unblocks 1.2b)
 
 - TODO 1.2b was the first unchecked item but was **blocked on 1.4**, so this

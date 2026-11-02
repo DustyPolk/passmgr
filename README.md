@@ -90,8 +90,8 @@ written to stderr. Read the value back with the TTY-gated `get --reveal`.
 ### Tags
 
 Tags are lowercase metadata labels for grouping entries, for example by
-environment or purpose. They are never secrets and never appear in JSON
-output; they are stored inside the encrypted payload.
+environment or purpose. They are never secrets; they are stored inside the
+encrypted payload and appear as a `tags` array in JSON output.
 
 ```bash
 passmgr add --tag work --tag prod example.com alice
@@ -181,8 +181,23 @@ passmgr show --json pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5
 `list --json` prints one JSON document, `{"entries":[...]}`, and nothing else
 on stdout. `show <ref>` looks a credential up by its full `pm://` reference and
 prints `Ref`, `Service`, and `Username`; `show --json` prints the entry object
-directly. The only keys in an entry are `ref`, `service`, and `username`:
-there is no password field in any JSON output, by construction. `show` accepts
+directly. An entry has exactly these keys:
+
+```json
+{
+  "ref": "pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5",
+  "service": "example.com",
+  "username": "alice",
+  "tags": ["prod", "work"],
+  "created": "2026-11-02T18:20:02Z",
+  "last_rotated": "2026-11-02T18:20:02Z"
+}
+```
+
+There is no password field in any JSON output, by construction. `tags` is
+always an array (sorted, duplicate-free). `created` and `last_rotated` are
+RFC 3339 timestamps in UTC, or `null` when the value is unknown (the entry was
+migrated from an older payload that did not store timestamps). `show` accepts
 references only (a service name is a usage error, exit 2), and an unknown
 reference exits 3. References survive renames, so they are the stable handle
 for scripts and agents.
@@ -265,8 +280,8 @@ passmgr --version
   seconds inside the encrypted payload. Store version 4 added them; payloads
   from version 3 and older decode with `0` ("unknown") and are rewritten as
   version 4 on the next save. Rotation never changes `created`. Timestamps are
-  metadata and are not printed by any command yet; the JSON schema will expose
-  them in a later change.
+  metadata: `list --json` and `show --json` render them as RFC 3339 UTC
+  strings (`null` when unknown).
 - **Memory handling:** decrypted payloads, master passwords, generated
   passwords, keys, and credential fields use `zeroize` containers. Credential
   `Debug` output redacts the password.

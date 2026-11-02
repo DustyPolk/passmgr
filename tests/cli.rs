@@ -230,12 +230,25 @@ fn tags_are_stored_filtered_and_metadata_only() {
     let json: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
     let entries = json["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 2);
+    let entry_for = |service: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["service"] == serde_json::json!(service))
+            .expect("entry present")
+    };
+    assert_eq!(
+        entry_for("work.example")["tags"],
+        serde_json::json!(["prod", "work"]),
+        "tags are sorted metadata"
+    );
+    assert_eq!(
+        entry_for("home.example")["tags"],
+        serde_json::json!(["home"])
+    );
     for entry in entries {
-        assert!(
-            entry.get("tags").is_none(),
-            "JSON metadata omits tags for now"
-        );
         assert!(entry.get("password").is_none());
+        assert!(entry["created"].as_str().is_some());
+        assert!(entry["last_rotated"].as_str().is_some());
     }
     assert!(!stdout(&output).contains(EXAMPLE_SECRET));
     assert!(!stdout(&output).contains(OTHER_SECRET));
@@ -1139,7 +1152,8 @@ fn show_and_list_json_expose_metadata_only() {
     assert!(!stdout(&output).contains(EXAMPLE_SECRET));
     assert!(!stderr(&output).contains(EXAMPLE_SECRET));
 
-    // The reference lookup survives a rename.
+    // The reference lookup survives a rename; tags are metadata-only here, so
+    // the timestamps below stay as `add` wrote them.
     let output = run(
         &[
             "--db",
@@ -1148,6 +1162,10 @@ fn show_and_list_json_expose_metadata_only() {
             "example.com",
             "--rename",
             "renamed.example",
+            "--tag",
+            "prod",
+            "--tag",
+            "work",
         ],
         "master\n",
     );
@@ -1163,7 +1181,18 @@ fn show_and_list_json_expose_metadata_only() {
     assert_eq!(shown["ref"], serde_json::json!(reference));
     assert_eq!(shown["service"], serde_json::json!("renamed.example"));
     assert_eq!(shown["username"], serde_json::json!("alice"));
+    assert_eq!(shown["tags"], serde_json::json!(["prod", "work"]));
     assert!(shown.get("password").is_none());
+
+    // Timestamps are RFC 3339 UTC strings. `add` sets both, and the rename/tag
+    // edit above must not rotate the password.
+    let created = shown["created"].as_str().expect("created is a string");
+    let last_rotated = shown["last_rotated"]
+        .as_str()
+        .expect("last_rotated is a string");
+    assert_eq!(created.len(), 20, "unexpected timestamp shape: {created}");
+    assert!(created.ends_with('Z'), "timestamps are UTC: {created}");
+    assert_eq!(created, last_rotated, "metadata edits must not rotate");
     assert!(!stdout(&output).contains(EXAMPLE_SECRET));
     assert!(!stderr(&output).contains(EXAMPLE_SECRET));
 

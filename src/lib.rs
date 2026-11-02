@@ -9,6 +9,7 @@ pub mod error;
 pub mod password;
 pub mod store;
 pub mod terminal;
+pub mod timestamp;
 pub mod vault;
 
 pub use error::{
