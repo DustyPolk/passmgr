@@ -26,6 +26,8 @@ Commands:
   add [options] <service> <username>
                              Add a credential. The credential password is
                              prompted (and confirmed) unless --generate is used.
+                             With --generate the password is stored but never
+                             printed; only the entry name is confirmed.
   get [--reveal] <service>   Show credential metadata. Allowed flags:
                                --reveal   Print the password. Human use only:
                                           stdin and stdout must both be a
@@ -64,6 +66,8 @@ Examples:
 Notes:
   - The master password is required for every command except generate/help/version.
   - Prompts are written to stderr; command data is written to stdout.
+  - 'add --generate' never prints the generated password; read it back with
+    the TTY-gated 'get --reveal'.
   - Creating a new vault asks for the master password twice.
   - Exit code 5 means the command was refused (for example 'get --reveal'
     without a terminal, or in an agent context).
@@ -466,18 +470,21 @@ fn command_add(options: AddOptions, path: &Path) -> Result<(), Error> {
         None => prompt_credential_password(&options.service)?,
     };
 
+    let service = options.service;
     vault.add(Credential::new(
-        options.service,
+        service.clone(),
         options.username,
         credential_password,
     )?)?;
     vault.save(&master)?;
 
     if options.generate {
-        let added = vault.list().last().expect("credential was just added");
-        stdout_write(format_args!("Generated password: {}\n", added.password()))?;
+        // Never print the generated password: the only way to read it back is
+        // the TTY-gated `get --reveal`. Only metadata goes to the terminal.
+        eprintln!("Credential '{service}' added successfully with a generated password.");
+    } else {
+        eprintln!("Credential added successfully.");
     }
-    eprintln!("Credential added successfully.");
     Ok(())
 }
 

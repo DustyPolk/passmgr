@@ -81,8 +81,9 @@ passmgr add --generate --pin --length 8 example.com alice
 ```
 
 `add` rejects a service that already exists. Delete the old entry first if you
-want to replace it. With `--generate`, the generated password is printed to
-stdout after the vault has been saved successfully.
+want to replace it. With `--generate`, the generated password is stored but
+never printed: stdout stays empty and only a confirmation naming the entry is
+written to stderr. Read the value back with the TTY-gated `get --reveal`.
 
 ### Get a credential
 

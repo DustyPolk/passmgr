@@ -182,13 +182,25 @@ fn generated_add_then_get_returns_same_password() {
         "master\nmaster\n",
     );
     assert_success(&output);
-    let generated = stdout(&output)
-        .strip_prefix("Generated password: ")
-        .expect("generated password line")
-        .trim()
-        .to_owned();
+
+    // Read the stored value in-process: the CLI must never print it.
+    let generated = vault_password(&vault, "svc", "master");
     assert_eq!(generated.len(), 12);
     assert!(generated.chars().all(|c| c.is_ascii_alphanumeric()));
+
+    assert_eq!(
+        stdout(&output),
+        "",
+        "add --generate must not print the generated password to stdout"
+    );
+    assert!(
+        !stdout(&output).contains(&generated) && !stderr(&output).contains(&generated),
+        "the generated password must never appear on stdout or stderr"
+    );
+    assert!(
+        stderr(&output).contains("svc"),
+        "the confirmation names the entry"
+    );
 
     let output = run(&["--db", &vault, "get", "svc"], "master\n");
     assert_success(&output);
