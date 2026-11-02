@@ -42,12 +42,13 @@ because the secure password prompt uses POSIX termios.
 ## Usage
 
 ```text
-passmgr [--db PATH] <command> [arguments]
+passmgr [--db PATH] [--agent] <command> [arguments]
 ```
 
-The vault path is chosen in this order:
+Global options must appear before the command. The vault path is chosen in this
+order:
 
-1. `--db PATH` (must appear before the command)
+1. `--db PATH`
 2. the `PASSMGR_DB` environment variable
 3. `./passwords.dat`
 
@@ -108,10 +109,12 @@ passmgr get --reveal example.com
 ```
 
 `--reveal` is strictly for a human at a terminal. It is refused with exit
-code 5 unless **both** stdin and stdout are terminals and no agent environment
-marker is set (`PASSMGR_AGENT`, `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_SANDBOX`).
-There is no bypass flag, and the check happens before the vault is opened, so a
-pipe or an agent never reaches the plaintext. Do not try to feed secrets to
+code 5 unless **both** stdin and stdout are terminals, no agent environment
+marker is set (`PASSMGR_AGENT`, `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_SANDBOX`),
+and the global `--agent` flag was not passed. `--agent` can only add refusal: it
+makes metadata commands explicitly agent-safe and is never a way to obtain a
+secret. There is no bypass flag, and the check happens before the vault is
+opened, so a pipe or an agent never reaches the plaintext. Do not try to feed secrets to
 another program with `--reveal`. Injection commands (planned `run --env`) are
 the supported way to use a secret without reading it.
 

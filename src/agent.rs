@@ -5,11 +5,12 @@
 //! must satisfy both conditions:
 //!
 //! 1. stdin *and* stdout are terminals, and
-//! 2. no agent environment marker is present.
+//! 2. no agent environment marker is present and the global `--agent` flag was
+//!    not passed.
 //!
-//! There is deliberately no flag that bypasses this check. The decision lives
-//! here, in one place, so that every future plaintext path (clipboard, export)
-//! can reuse it.
+//! There is deliberately no flag that bypasses this check. The `--agent` flag
+//! can only *add* refusal, never remove it. The decision lives here, in one
+//! place, so that every future plaintext path (clipboard, export) can reuse it.
 
 use std::env;
 use std::io::{self, IsTerminal};
@@ -18,7 +19,7 @@ use std::io::{self, IsTerminal};
 ///
 /// Presence alone counts, even with an empty value: an inherited marker is
 /// treated as an agent context, which is the conservative choice. The CLI's
-/// `--agent` flag (TODO 0.4) will force the same state.
+/// global `--agent` flag forces the same state via [`AgentSource::Flag`].
 pub const AGENT_MARKERS: [&str; 4] = [
     "PASSMGR_AGENT",
     "CLAUDECODE",
@@ -41,11 +42,30 @@ pub fn is_agent_context() -> bool {
     agent_marker().is_some()
 }
 
+/// Where the "this is an agent context" signal came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSource {
+    /// An agent environment marker was found; carries the marker name.
+    Env(&'static str),
+    /// The global `--agent` flag was passed.
+    Flag,
+}
+
+impl AgentSource {
+    /// Human-readable description of the signal. Never contains secret material.
+    fn describe(self) -> String {
+        match self {
+            Self::Env(name) => format!("{name} is set"),
+            Self::Flag => "the --agent flag was passed".to_owned(),
+        }
+    }
+}
+
 /// Why a plaintext reveal was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RevealRefusal {
-    /// An agent environment marker was found; carries the marker name.
-    AgentContext(&'static str),
+    /// The process is in an agent context; carries the signal's source.
+    AgentContext(AgentSource),
     /// stdin is not a terminal, so a human cannot be typing here.
     StdinNotTerminal,
     /// stdout is not a terminal, so the value would be captured by a pipe.
@@ -56,9 +76,10 @@ impl RevealRefusal {
     /// Human-readable refusal reason. Never contains secret material.
     pub fn message(self) -> String {
         match self {
-            Self::AgentContext(marker) => format!(
-                "refusing to reveal a secret in an agent context ({marker} is set); \
-                 plaintext reveal is reserved for a human at a terminal and has no bypass"
+            Self::AgentContext(source) => format!(
+                "refusing to reveal a secret in an agent context ({}); \
+                 plaintext reveal is reserved for a human at a terminal and has no bypass",
+                source.describe()
             ),
             Self::StdinNotTerminal => "refusing to reveal a secret: stdin is not a terminal; \
                  plaintext reveal is reserved for a human at a terminal and has no bypass"
@@ -72,15 +93,17 @@ impl RevealRefusal {
 
 /// Pure decision function for a plaintext reveal.
 ///
-/// Precedence is agent marker first, then stdin, then stdout, so the reported
-/// reason names the strongest problem.
+/// Precedence is agent context first, then stdin, then stdout, so the reported
+/// reason names the strongest problem. An agent environment marker is reported
+/// ahead of `--agent` when both are present, because it can be inherited
+/// unintentionally and is the more surprising of the two.
 pub fn reveal_refusal(
     stdin_is_tty: bool,
     stdout_is_tty: bool,
-    marker: Option<&'static str>,
+    source: Option<AgentSource>,
 ) -> Option<RevealRefusal> {
-    if let Some(marker) = marker {
-        return Some(RevealRefusal::AgentContext(marker));
+    if let Some(source) = source {
+        return Some(RevealRefusal::AgentContext(source));
     }
     if !stdin_is_tty {
         return Some(RevealRefusal::StdinNotTerminal);
@@ -91,12 +114,24 @@ pub fn reveal_refusal(
     None
 }
 
-/// Check the real process: terminals and environment.
-pub fn check_reveal() -> Result<(), RevealRefusal> {
+/// Resolve the agent signal from the environment and the `--agent` flag.
+///
+/// The flag can only add refusal: passing `false` changes nothing, passing
+/// `true` refuses even when the environment is clean.
+pub fn agent_source(agent_flag: bool) -> Option<AgentSource> {
+    agent_marker().map(AgentSource::Env).or(if agent_flag {
+        Some(AgentSource::Flag)
+    } else {
+        None
+    })
+}
+
+/// Check the real process: terminals, environment and the `--agent` flag.
+pub fn check_reveal(agent_flag: bool) -> Result<(), RevealRefusal> {
     match reveal_refusal(
         io::stdin().is_terminal(),
         io::stdout().is_terminal(),
-        agent_marker(),
+        agent_source(agent_flag),
     ) {
         Some(refusal) => Err(refusal),
         None => Ok(()),
@@ -109,6 +144,10 @@ mod tests {
 
     fn marker_from_names(names: &[&'static str]) -> Option<&'static str> {
         marker_from(|name| names.contains(&name))
+    }
+
+    fn env_source(marker: &'static str) -> Option<AgentSource> {
+        Some(AgentSource::Env(marker))
     }
 
     #[test]
@@ -147,20 +186,62 @@ mod tests {
     #[test]
     fn agent_marker_wins_over_terminals() {
         assert_eq!(
-            reveal_refusal(true, true, Some("PASSMGR_AGENT")),
-            Some(RevealRefusal::AgentContext("PASSMGR_AGENT"))
+            reveal_refusal(true, true, env_source("PASSMGR_AGENT")),
+            Some(RevealRefusal::AgentContext(AgentSource::Env(
+                "PASSMGR_AGENT"
+            )))
         );
         assert_eq!(
-            reveal_refusal(false, false, Some("CLAUDECODE")),
-            Some(RevealRefusal::AgentContext("CLAUDECODE"))
+            reveal_refusal(false, false, env_source("CLAUDECODE")),
+            Some(RevealRefusal::AgentContext(AgentSource::Env("CLAUDECODE")))
+        );
+    }
+
+    #[test]
+    fn the_agent_flag_refuses_even_with_two_terminals() {
+        assert_eq!(
+            reveal_refusal(true, true, agent_source(true)),
+            Some(RevealRefusal::AgentContext(AgentSource::Flag))
+        );
+        assert_eq!(
+            reveal_refusal(false, true, agent_source(true)),
+            Some(RevealRefusal::AgentContext(AgentSource::Flag))
+        );
+    }
+
+    #[test]
+    fn the_agent_flag_cannot_weaken_the_check() {
+        // Without the flag, the decision is unchanged.
+        assert_eq!(agent_source(false), None);
+        assert_eq!(reveal_refusal(true, true, agent_source(false)), None);
+        assert_eq!(
+            reveal_refusal(false, true, agent_source(false)),
+            Some(RevealRefusal::StdinNotTerminal)
+        );
+    }
+
+    #[test]
+    fn an_environment_marker_is_reported_before_the_flag() {
+        // Simulated: the environment lookup wins, so the message names the
+        // marker a reviewer can inspect and remove.
+        let inherited = marker_from(|name| name == "CURSOR_AGENT").map(AgentSource::Env);
+        assert_eq!(
+            reveal_refusal(true, true, inherited.or(Some(AgentSource::Flag))),
+            Some(RevealRefusal::AgentContext(AgentSource::Env(
+                "CURSOR_AGENT"
+            )))
         );
     }
 
     #[test]
     fn refusal_messages_name_the_reason_and_offer_no_bypass() {
-        let agent = RevealRefusal::AgentContext("CODEX_SANDBOX").message();
+        let agent = RevealRefusal::AgentContext(AgentSource::Env("CODEX_SANDBOX")).message();
         assert!(agent.contains("agent context"));
         assert!(agent.contains("CODEX_SANDBOX"));
+
+        let flag = RevealRefusal::AgentContext(AgentSource::Flag).message();
+        assert!(flag.contains("agent context"));
+        assert!(flag.contains("--agent"));
 
         let stdin = RevealRefusal::StdinNotTerminal.message();
         assert!(stdin.contains("stdin is not a terminal"));
@@ -168,7 +249,7 @@ mod tests {
         let stdout = RevealRefusal::StdoutNotTerminal.message();
         assert!(stdout.contains("stdout is not a terminal"));
 
-        for message in [agent, stdin, stdout] {
+        for message in [agent, flag, stdin, stdout] {
             assert!(message.contains("no bypass"));
             assert!(!message.contains("--force"));
         }

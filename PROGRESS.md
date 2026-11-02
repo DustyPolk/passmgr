@@ -2,6 +2,42 @@
 
 Newest entries first. Date, what was done, what the next iteration must know.
 
+## 2026-11-02 — TODO 0.4: global `--agent` flag
+
+- `src/agent.rs` now models the signal source explicitly: new
+  `pub enum AgentSource { Env(&'static str), Flag }` and
+  `RevealRefusal::AgentContext(AgentSource)`. `reveal_refusal` takes
+  `Option<AgentSource>` (was `Option<&'static str>`), and the message renders
+  either "`NAME` is set" or "the --agent flag was passed".
+- New `agent::agent_source(agent_flag: bool)` resolves env marker first, then
+  the flag; `agent::check_reveal(agent_flag: bool)` now takes the flag. The flag
+  can only *add* refusal — `agent_source(false)` is `None` and every existing
+  terminal/marker decision is unchanged.
+- `src/main.rs`: `Parsed { db_path, agent, command }`; `--agent` is parsed in
+  the global-option loop beside `--db` and is a bare boolean (repeating it is
+  harmless). `command_get(service, reveal, agent_mode, path)` passes it to
+  `check_reveal`, still **before** `unlock`, so a refused reveal never prompts
+  or opens the vault. `USAGE`, `HELP` and README updated, including
+  "global options must come before the command".
+- Decision: `--agent` is global-prefix only (`passmgr --agent get ...`).
+  `passmgr get --agent ...` is a usage error (exit 2) rather than silently
+  ignored — one placement rule, no ambiguity with `--`. Documented in help and
+  asserted by a test.
+- Tests: 3 new unit tests in `src/agent.rs` (flag refuses with two terminals;
+  flag cannot weaken the check; env marker reported before the flag) plus an
+  extended message test. 2 new unit tests in `src/main.rs` (parsing before the
+  command, including repeats and `--help`; bare-flag/placement errors). 4 new
+  e2e tests in `tests/cli.rs`: `--agent` blocks reveal on a full pty, blocks it
+  over pipes (exit 5, stderr names `--agent`, no secret bytes), metadata
+  `get`/`list` still work under `--agent`, and `--agent` is documented/rejected
+  after the command.
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings`
+  clean, `cargo test` 61 passed (33 lib unit + 12 main unit + 16 e2e, ~47 s).
+  `cargo audit` still not installed (`error: no such command: audit`).
+- **Next iteration must know:** TODO 0.5 (stable exit codes) is next;
+  `Error::Refused` maps to 5, everything else still exits 1. `--agent` currently
+  affects only reveal; TODO 4.x will extend it to JSON/help behavior.
+
 ## 2026-11-02 — TODO 0.3: `add --generate` no longer prints the password
 
 - `src/main.rs::command_add` no longer prints `Generated password: <value>`.

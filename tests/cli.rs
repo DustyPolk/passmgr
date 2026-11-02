@@ -550,3 +550,94 @@ fn agent_marker_blocks_reveal_even_on_a_terminal() {
     assert!(!output.stdout.contains(EXAMPLE_SECRET));
     assert!(!output.stderr.contains(EXAMPLE_SECRET));
 }
+
+/// The global `--agent` flag refuses a reveal even when both streams are
+/// terminals and the environment is clean: the flag only ever adds refusal.
+#[cfg(target_os = "linux")]
+#[test]
+fn agent_flag_blocks_reveal_even_on_a_terminal() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    let output = run_on_pty(
+        &["--agent", "--db", &vault, "get", "--reveal", "example.com"],
+        "",
+        true,
+        true,
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(5));
+    assert!(
+        output.stderr.contains("--agent"),
+        "stderr was: {}",
+        output.stderr
+    );
+    assert!(!output.stdout.contains(EXAMPLE_SECRET));
+    assert!(!output.stderr.contains(EXAMPLE_SECRET));
+}
+
+/// `--agent` also wins over a terminal on stdin with a pipe on stdout, and the
+/// refusal is reported before the vault is opened (no prompt is consumed).
+#[test]
+fn agent_flag_blocks_reveal_over_pipes() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    let output = run(
+        &["--agent", "--db", &vault, "get", "--reveal", "example.com"],
+        "master\n",
+    );
+    assert_eq!(output.status.code(), Some(5));
+    assert_eq!(stdout(&output), "");
+    assert!(
+        stderr(&output).contains("--agent"),
+        "stderr was: {}",
+        stderr(&output)
+    );
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+}
+
+/// Agent mode is not a blanket refusal: metadata commands still work.
+#[test]
+fn agent_flag_still_allows_metadata_commands() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    let output = run(
+        &["--agent", "--db", &vault, "get", "example.com"],
+        "master\n",
+    );
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        "Service: example.com\nUsername: alice\nPassword: <redacted>\n"
+    );
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+
+    let output = run(&["--agent", "--db", &vault, "list"], "master\n");
+    assert_success(&output);
+    assert_eq!(stdout(&output), "Stored Services:\n- example.com (alice)\n");
+}
+
+/// `--agent` is a global option: it is documented and rejected after the
+/// command rather than silently ignored.
+#[test]
+fn agent_flag_is_global_and_documented() {
+    let _guard = serial();
+
+    let output = run(&["get", "--agent", "example.com"], "");
+    assert_eq!(output.status.code(), Some(2), "usage error");
+    assert!(stderr(&output).contains("--agent"));
+
+    let output = run(&["--help"], "");
+    assert_success(&output);
+    assert!(stdout(&output).contains("--agent"));
+    assert!(stdout(&output).contains("must come before the command"));
+}

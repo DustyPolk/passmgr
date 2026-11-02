@@ -15,12 +15,12 @@ use zeroize::Zeroizing;
 
 const DEFAULT_DB: &str = "passwords.dat";
 
-const USAGE: &str = "Usage: passmgr [--db PATH] <command> [arguments]
+const USAGE: &str = "Usage: passmgr [--db PATH] [--agent] <command> [arguments]
 Try 'passmgr --help' for more information.";
 
 const HELP: &str = r#"Simple Secure Password Manager (Rust)
 
-Usage: passmgr [--db PATH] <command> [arguments]
+Usage: passmgr [--db PATH] [--agent] <command> [arguments]
 
 Commands:
   add [options] <service> <username>
@@ -34,9 +34,10 @@ Commands:
                                           terminal and no agent environment
                                           marker (PASSMGR_AGENT, CLAUDECODE,
                                           CURSOR_AGENT, CODEX_SANDBOX) may be
-                                          set. Otherwise the command is
-                                          refused with exit code 5. There is
-                                          no bypass flag.
+                                          set, and --agent must not be passed.
+                                          Otherwise the command is refused
+                                          with exit code 5. There is no
+                                          bypass flag.
   delete <service>           Remove a credential permanently.
   list                       List stored services and usernames.
   generate [options]         Generate a secure random password.
@@ -45,6 +46,9 @@ Commands:
 
 Global options:
   --db PATH                  Vault file (default: ./passwords.dat, or $PASSMGR_DB).
+  --agent                    Force agent mode. This can only make the tool more
+                             restrictive: 'get --reveal' is refused even on a
+                             terminal. It never reveals a secret by itself.
   -h, --help                 Show this help.
   -V, --version              Show version information.
 
@@ -69,8 +73,9 @@ Notes:
   - 'add --generate' never prints the generated password; read it back with
     the TTY-gated 'get --reveal'.
   - Creating a new vault asks for the master password twice.
+  - global options (--db, --agent) must come before the command.
   - Exit code 5 means the command was refused (for example 'get --reveal'
-    without a terminal, or in an agent context).
+    without a terminal, in an agent context, or with --agent).
   - Vaults are encrypted with Argon2id and AES-256-GCM.
   - The legacy C vault format is not readable; this version uses a new format.
 "#;
@@ -112,13 +117,14 @@ impl From<Error> for CliError {
 fn run() -> Result<(), CliError> {
     let parsed = parse_args(env::args_os().skip(1).collect()).map_err(CliError::Usage)?;
     let path = parsed.db_path;
+    let agent_mode = parsed.agent;
 
     match parsed.command {
         Command::Help => stdout_write(format_args!("{}", HELP))?,
         Command::Version => stdout_write(format_args!("passmgr {}\n", env!("CARGO_PKG_VERSION")))?,
         Command::Generate(options) => command_generate(options)?,
         Command::Add(options) => command_add(options, &path)?,
-        Command::Get { service, reveal } => command_get(&service, reveal, &path)?,
+        Command::Get { service, reveal } => command_get(&service, reveal, agent_mode, &path)?,
         Command::Delete(service) => command_delete(&service, &path)?,
         Command::List => command_list(&path)?,
     }
@@ -128,6 +134,8 @@ fn run() -> Result<(), CliError> {
 #[derive(Debug)]
 struct Parsed {
     db_path: PathBuf,
+    /// The global `--agent` flag. It can only add refusal, never remove it.
+    agent: bool,
     command: Command,
 }
 
@@ -160,6 +168,7 @@ struct GenerateOptions {
 fn parse_args(args: Vec<OsString>) -> Result<Parsed, String> {
     let mut args = args.into_iter().peekable();
     let mut db_override = None;
+    let mut agent = false;
 
     let (command, rest) = loop {
         let argument = args
@@ -175,8 +184,14 @@ fn parse_args(args: Vec<OsString>) -> Result<Parsed, String> {
                     .ok_or_else(|| "missing command after '--'".to_owned())?;
                 break (command, args.collect());
             }
-            "-h" | "--help" => return Ok(finish_parsing(db_override, Command::Help)),
-            "-V" | "--version" => return Ok(finish_parsing(db_override, Command::Version)),
+            "-h" | "--help" => {
+                return Ok(finish_parsing(db_override, agent, Command::Help));
+            }
+            "-V" | "--version" => {
+                return Ok(finish_parsing(db_override, agent, Command::Version));
+            }
+            // A boolean flag, so repeating it is harmless.
+            "--agent" => agent = true,
             "--db" => {
                 let value = args
                     .next()
@@ -198,10 +213,10 @@ fn parse_args(args: Vec<OsString>) -> Result<Parsed, String> {
     };
 
     let command = parse_command(command, rest)?;
-    Ok(finish_parsing(db_override, command))
+    Ok(finish_parsing(db_override, agent, command))
 }
 
-fn finish_parsing(db_override: Option<PathBuf>, command: Command) -> Parsed {
+fn finish_parsing(db_override: Option<PathBuf>, agent: bool, command: Command) -> Parsed {
     let db_path = db_override
         .or_else(|| {
             env::var_os("PASSMGR_DB")
@@ -209,7 +224,11 @@ fn finish_parsing(db_override: Option<PathBuf>, command: Command) -> Parsed {
                 .map(PathBuf::from)
         })
         .unwrap_or_else(|| PathBuf::from(DEFAULT_DB));
-    Parsed { db_path, command }
+    Parsed {
+        db_path,
+        agent,
+        command,
+    }
 }
 
 fn set_db(slot: &mut Option<PathBuf>, path: PathBuf) -> Result<(), String> {
@@ -488,11 +507,12 @@ fn command_add(options: AddOptions, path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-fn command_get(service: &str, reveal: bool, path: &Path) -> Result<(), Error> {
+fn command_get(service: &str, reveal: bool, agent_mode: bool, path: &Path) -> Result<(), Error> {
     if reveal {
         // Refuse before touching the vault or prompting for the master
         // password: a pipe or an agent context must never reach the plaintext.
-        agent::check_reveal().map_err(|refusal| Error::Refused(refusal.message()))?;
+        // `--agent` can only add refusal; it never removes the TTY rule.
+        agent::check_reveal(agent_mode).map_err(|refusal| Error::Refused(refusal.message()))?;
     }
     let (vault, _) = unlock(path)?;
     let credential = vault
@@ -715,8 +735,51 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.db_path, PathBuf::from("/tmp/other.dat"));
+        assert!(!parsed.agent, "--agent defaults to off");
         assert!(
             matches!(parsed.command, Command::Get { service, reveal } if service == "svc" && !reveal)
+        );
+    }
+
+    #[test]
+    fn parses_the_agent_flag_before_the_command() {
+        let parsed = parse_args(vec![
+            OsString::from("--agent"),
+            OsString::from("--db=/tmp/example.dat"),
+            OsString::from("get"),
+            OsString::from("--reveal"),
+            OsString::from("svc"),
+        ])
+        .unwrap();
+        assert!(parsed.agent);
+        assert_eq!(parsed.db_path, PathBuf::from("/tmp/example.dat"));
+        assert!(
+            matches!(parsed.command, Command::Get { service, reveal } if service == "svc" && reveal)
+        );
+
+        // Repeating the flag is harmless, and help/version accept it too.
+        let parsed = parse_args(vec![
+            OsString::from("--agent"),
+            OsString::from("--agent"),
+            OsString::from("list"),
+        ])
+        .unwrap();
+        assert!(parsed.agent);
+        assert!(matches!(parsed.command, Command::List));
+        assert!(
+            parse_args(vec![OsString::from("--agent"), OsString::from("--help")])
+                .unwrap()
+                .agent
+        );
+    }
+
+    #[test]
+    fn the_agent_flag_is_a_bare_global_flag() {
+        assert!(parse(&["--agent"]).is_err(), "a command is still required");
+        assert!(parse(&["--agent=yes", "list"]).is_err());
+        assert!(
+            parse(&["get", "--agent", "svc"]).is_err(),
+            "--agent is global and must precede the command"
         );
     }
 
