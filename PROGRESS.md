@@ -1,3 +1,70 @@
+## 2026-11-02 — Socket setup module (TODO 2.2)
+
+- New `src/socket.rs` (registered in `src/lib.rs` as `#[cfg(unix)] pub mod
+  socket;`). No daemon binary yet; this is the socket-placement layer that
+  TODO 2.4 will bind. No CLI surface change.
+- Paths: `RuntimePaths::resolve()` -> `$XDG_RUNTIME_DIR/passmgr` when that
+  variable is set and non-empty, else `<temp_dir>/passmgr-<euid>` (macOS has
+  no `XDG_RUNTIME_DIR`; `env::temp_dir()` is the per-user `$TMPDIR` there).
+  The uid suffix keeps two users sharing a temp dir from colliding, and the
+  directory checks below fail closed on anything pre-created by someone else.
+  Files inside: `pmd.sock` and `pmd.lock`.
+- `RuntimePaths::ensure_dir`: `create_dir` + `set_permissions(0700)` when it
+  does not exist; when it does, `symlink_metadata` (never follows a symlink)
+  must show a real directory, owned by `geteuid()`, mode exactly 0700.
+  Otherwise `SocketError::InsecurePath` and no socket is created. Chose
+  **refuse, not repair**, for an existing directory: a 0755 dir may already
+  have been observed, so silently fixing it would hide a real exposure.
+  Parents are never created (`create_dir`, not `create_dir_all`): a missing
+  `XDG_RUNTIME_DIR` is a broken environment, not something to paper over.
+- Single instance: `flock(LOCK_EX|LOCK_NB)` on `pmd.lock` (0600, created via
+  `OpenOptionsExt::mode`, then `set_permissions` to narrow an old file).
+  `EWOULDBLOCK` -> `AlreadyRunning`. The lock file is deliberately **not**
+  unlinked on drop (unlinking while holding it lets a second daemon lock a
+  fresh inode); the socket is unlinked on drop only if its inode still matches
+  the one recorded at bind time.
+- Ordering in `DaemonSocket::bind_at`: length-check the path (<= 104 bytes,
+  the macOS `sun_path` limit, so a path that works on Linux also works there),
+  validate/create the dir, take the lock, then probe the socket, then bind,
+  then chmod 0600. Locking before probing means two simultaneous starts cannot
+  both conclude "stale".
+- Stale-socket rule: `symlink_metadata`; symlink or non-socket -> `NotASocket`
+  and the file is left untouched; foreign uid -> refused; then a probe
+  `UnixStream::connect`: success -> `AlreadyRunning` (never steal a live
+  socket, even if the lock file was deleted), `ECONNREFUSED` -> unlink and
+  rebind, `NotFound` -> race, fine. The probe connection is closed immediately;
+  2.4's accept loop must tolerate a peer that connects and disconnects.
+- The socket is chmodded 0600 *after* bind because bind applies the umask.
+  Documented in the module: the 0700 directory already keeps other users out,
+  so the window is not externally reachable; the chmod is defence in depth.
+- `connect()` / `connect_at()` map `NotFound` and `ConnectionRefused` to
+  `SocketError::NotRunning` so 2.6 can tell the user to run `pm unlock`.
+  `SocketError` is a module-local enum (like `ProtocolError`) with `Display`
+  and `std::error::Error`, not wired into the CLI exit-code contract yet; 2.4
+  decides the mapping. No secret values exist anywhere in this module.
+- Tests: 15 lib tests in `src/socket.rs` — XDG vs fallback resolution (empty
+  XDG treated as unset), dir/socket/lock modes 0700/0600/0600 plus a real
+  client-listener byte round-trip, reuse of an existing 0700 dir, second daemon
+  rejected while the first keeps working, stale socket replaced, live socket
+  without a lock not stolen (original listener still accepts), regular file at
+  the socket path preserved, symlinked dir refused, 0750 dir refused with the
+  mode named in the error, overlong path rejected before any I/O (no directory
+  created), drop removes the socket but keeps the lock and releases it, connect
+  with no daemon and with a stale socket both report `NotRunning`, `flock`
+  conflict/release on the same path.
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
+  clean, `cargo test` 131 passed (85 lib + 19 bin + 27 e2e, ~150 s; e2e is
+  Argon2id-bound and serialized). `cargo audit` still not installed
+  (`error: no such command: audit`). No new dependency (`libc`, `tempfile`
+  already present).
+- **Next iteration must know:** next is **2.3** (peer credential check:
+  `SO_PEERCRED` on Linux via `getsockopt`, `getpeereid` on macOS, before any
+  read). Add it to `src/socket.rs` or a small `src/peer.rs`; the accepted
+  stream from `DaemonSocket::listener()` is where to call it. Do not add a
+  request type that returns plaintext. 2.4 will own signal handling, idle
+  timeout and key zeroization; the `flock` guard must stay alive for the whole
+  daemon lifetime (keep the `DaemonSocket` in scope).
+
 ## 2026-11-02 — Protocol framing module (TODO 2.1)
 
 - New `src/protocol.rs` (registered in `src/lib.rs`): pure, no-I/O wire

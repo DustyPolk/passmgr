@@ -94,9 +94,14 @@ come first.
       fields tolerated, unknown types/versions rejected, `run.env`/`ref`/`command`
       bounds validated on encode and decode, and no request type can carry or
       return a plaintext value.)
-- [ ] **2.2 Socket setup.** `$XDG_RUNTIME_DIR/passmgr/pmd.sock` (dir 0700, socket
+- [x] **2.2 Socket setup.** `$XDG_RUNTIME_DIR/passmgr/pmd.sock` (dir 0700, socket
       0600; macOS per-user 0700 dir fallback). Stale-socket detection, single
-      instance lock. Tests where the platform allows.
+      instance lock. Tests where the platform allows. (`src/socket.rs`:
+      `RuntimePaths` resolves/validates the 0700 dir, `DaemonSocket::bind`
+      takes a non-blocking `flock` on `pmd.lock` before touching the socket,
+      and only unlinks a socket after a probe connect gets `ECONNREFUSED`.
+      Non-sockets and symlinks at the path are refused untouched. Drop removes
+      the socket and releases the lock. 15 unit tests.)
 - [ ] **2.3 Peer credential check.** `SO_PEERCRED` on Linux, `getpeereid` on macOS;
       reject mismatched UID before parsing a request. Test with a helper that
       connects and asserts rejection when the check is forced to fail.
