@@ -16,6 +16,9 @@ pub enum Error {
     MalformedVault(String),
     Crypto(String),
     AuthenticationFailed,
+    /// The operation is not allowed in this context (for example a plaintext
+    /// reveal without a terminal, or in an agent context). Maps to exit code 5.
+    Refused(String),
     DuplicateService(String),
     ServiceNotFound(String),
     InvalidInput(String),
@@ -44,6 +47,7 @@ impl fmt::Display for Error {
             Self::AuthenticationFailed => {
                 write!(f, "wrong master password or corrupted vault")
             }
+            Self::Refused(detail) => f.write_str(detail),
             Self::DuplicateService(service) => write!(
                 f,
                 "a credential for '{service}' already exists; delete it first"

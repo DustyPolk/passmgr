@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use passmgr::Error;
+use passmgr::agent;
 use passmgr::password::{self, MAX_LEN, MIN_LEN, Preset};
 use passmgr::store::{self, Credential};
 use passmgr::terminal;
@@ -26,8 +27,14 @@ Commands:
                              Add a credential. The credential password is
                              prompted (and confirmed) unless --generate is used.
   get [--reveal] <service>   Show credential metadata. Allowed flags:
-                               --reveal   Print the password (human use only;
-                                          requires a terminal).
+                               --reveal   Print the password. Human use only:
+                                          stdin and stdout must both be a
+                                          terminal and no agent environment
+                                          marker (PASSMGR_AGENT, CLAUDECODE,
+                                          CURSOR_AGENT, CODEX_SANDBOX) may be
+                                          set. Otherwise the command is
+                                          refused with exit code 5. There is
+                                          no bypass flag.
   delete <service>           Remove a credential permanently.
   list                       List stored services and usernames.
   generate [options]         Generate a secure random password.
@@ -58,6 +65,8 @@ Notes:
   - The master password is required for every command except generate/help/version.
   - Prompts are written to stderr; command data is written to stdout.
   - Creating a new vault asks for the master password twice.
+  - Exit code 5 means the command was refused (for example 'get --reveal'
+    without a terminal, or in an agent context).
   - Vaults are encrypted with Argon2id and AES-256-GCM.
   - The legacy C vault format is not readable; this version uses a new format.
 "#;
@@ -73,6 +82,10 @@ fn main() -> std::process::ExitCode {
         }
         Err(CliError::Runtime(Error::Io(error))) if error.kind() == io::ErrorKind::BrokenPipe => {
             std::process::ExitCode::SUCCESS
+        }
+        Err(CliError::Runtime(Error::Refused(message))) => {
+            eprintln!("passmgr: {message}");
+            std::process::ExitCode::from(5)
         }
         Err(CliError::Runtime(error)) => {
             report_runtime_error(&error);
@@ -469,6 +482,11 @@ fn command_add(options: AddOptions, path: &Path) -> Result<(), Error> {
 }
 
 fn command_get(service: &str, reveal: bool, path: &Path) -> Result<(), Error> {
+    if reveal {
+        // Refuse before touching the vault or prompting for the master
+        // password: a pipe or an agent context must never reach the plaintext.
+        agent::check_reveal().map_err(|refusal| Error::Refused(refusal.message()))?;
+    }
     let (vault, _) = unlock(path)?;
     let credential = vault
         .get(service)

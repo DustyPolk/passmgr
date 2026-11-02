@@ -106,9 +106,13 @@ requires the explicit `--reveal` flag:
 passmgr get --reveal example.com
 ```
 
-`--reveal` is meant for a human at a terminal; do not use it to feed secrets to
-another program. Injection commands (planned `run --env`) are the supported way
-to use a secret without reading it.
+`--reveal` is strictly for a human at a terminal. It is refused with exit
+code 5 unless **both** stdin and stdout are terminals and no agent environment
+marker is set (`PASSMGR_AGENT`, `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_SANDBOX`).
+There is no bypass flag, and the check happens before the vault is opened, so a
+pipe or an agent never reaches the plaintext. Do not try to feed secrets to
+another program with `--reveal`. Injection commands (planned `run --env`) are
+the supported way to use a secret without reading it.
 
 ### List services
 

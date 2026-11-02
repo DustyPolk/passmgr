@@ -2,6 +2,42 @@
 
 Newest entries first. Date, what was done, what the next iteration must know.
 
+## 2026-11-02 — TODO 0.2: `--reveal` gated on a TTY and agent context
+
+- New `src/agent.rs`: `AGENT_MARKERS` (`PASSMGR_AGENT`, `CLAUDECODE`,
+  `CURSOR_AGENT`, `CODEX_SANDBOX`), `agent_marker()`, `is_agent_context()`,
+  pure decision fn `reveal_refusal(stdin_tty, stdout_tty, marker)` returning
+  `RevealRefusal` (`AgentContext(marker)` / `StdinNotTerminal` /
+  `StdoutNotTerminal`), and `check_reveal()` which wires in `IsTerminal` + env.
+- `command_get` calls `check_reveal()` **before** `unlock`, so a refused reveal
+  never opens the vault or prompts for the master password. No bypass flag.
+- `Error::Refused(String)` added (`src/error.rs`, Display prints the message
+  verbatim) and `main()` maps it to exit code 5. This is the first piece of TODO
+  0.5; other errors still exit 1.
+- Design choice: an agent marker counts when **present**, even with an empty
+  value (conservative). Precedence in the refusal reason: marker → stdin →
+  stdout.
+- `src/lib.rs` exposes `pub mod agent`.
+- Tests: 5 new unit tests in `src/agent.rs` (all markers, unrelated vars,
+  all four terminal combinations, marker precedence, message text). `tests/cli.rs`
+  now strips agent markers from the test environment (`base_command`), asserts
+  piped `get --reveal` → exit 5 with no secret, loops all four markers, and adds
+  Linux-only pty tests via `posix_openpt`/`ptsname` (`run_on_pty`, `read_pty`,
+  handles EIO after child exit): stdout-piped refusal, success on a real pty, and
+  `PASSMGR_AGENT=1` refused even on a pty. Piped reveal success assertions were
+  replaced with an in-process `passmgr::Vault::open` read (`vault_password`).
+- README and `--help` updated: exit 5 meaning, both-terminals rule, marker list,
+  "no bypass".
+- Gate: `cargo fmt --check` clean, clippy `-D warnings` clean, `cargo test`
+  52 passed (30 lib unit + 10 main unit + 12 e2e, ~35 s). `cargo audit` still not
+  installed on this machine (only unverified gate step).
+- **Next iteration must know:** TODO 0.4's `--agent` flag must feed into
+  `agent::check_reveal` so it *adds* refusal; `agent.rs` already holds the
+  decision. TODO 0.3 (`add --generate` printing the secret) is untouched.
+  Piped `--reveal` in docs/tests is now expected to fail with 5. The pty tests
+  are `#[cfg(target_os = "linux")]`; macOS relies on the unit tests for the
+  decision logic.
+
 ## 2026-11-02 — TODO 0.1: `get` is metadata-only, `--reveal` added
 
 - `passmgr get <service>` now prints `Password: <redacted>` and never the stored

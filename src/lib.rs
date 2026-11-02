@@ -3,6 +3,7 @@
 //! The vault is a single file protected with Argon2id and AES-256-GCM.
 //! See `FORMAT.md` for the on-disk layout.
 
+pub mod agent;
 pub mod crypto;
 pub mod error;
 pub mod password;
