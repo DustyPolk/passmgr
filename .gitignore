@@ -1,11 +1,13 @@
-# Compiled objects
+# Rust build output
+/target/
+
+# Vault files (SENSITIVE - never commit!)
+/passwords.dat
+*.vault
+
+# Legacy C build output
+/legacy-c/passmgr
 *.o
-
-# Binary
-passmgr
-
-# Password database (SENSITIVE - never commit!)
-passwords.dat
 
 # Editor/IDE
 *.swp
@@ -13,10 +15,7 @@ passwords.dat
 *~
 .vscode/
 .idea/
+.DS_Store
 
-# Debug
+# Debug symbols
 *.dSYM/
-
-passwords.dat
-
-passmgr

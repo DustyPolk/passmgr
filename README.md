@@ -1,106 +1,241 @@
-# Simple Secure Password Manager (C)
+# passmgr
 
-A lightweight, local command-line password manager written in C. It uses **AES-256-GCM** for encryption and **PBKDF2** for secure key derivation, ensuring your credentials remain safe.
+A small, local password manager written in Rust. Credentials live in one
+encrypted vault file; there is no server, account, or network access.
+
+> **Vault format changed.** This Rust implementation uses a new vault format
+> (version 2). Vaults created by the original C version are detected and
+> rejected with a clear error instead of being modified. The C implementation
+> is archived under [`legacy-c/`](legacy-c/) and can still read old vaults.
 
 ## Features
 
--   **Strong Encryption**: Uses AES-256 in Galois/Counter Mode (GCM) for authenticated encryption.
--   **Secure Key Derivation**: Uses PBKDF2 (SHA-256) with 600,000 iterations and a random salt to protect against brute-force attacks.
--   **Memory Safety**: Explicitly wipes sensitive data (passwords, keys) from memory after use.
--   **Secure Storage**: Database file is created with strict permissions (0600), readable only by the owner.
--   **No Argument Leaks**: Passwords are prompted interactively and securely (no echo), ensuring they don't appear in shell history.
--   **Dependencies**: Built on top of `libgcrypt` and `libgpg-error`.
+- Authenticated encryption with AES-256-GCM.
+- Argon2id key derivation with a random salt for every save.
+- Atomic vault replacement, owner-only file permissions, and warnings for
+  insecure permissions.
+- Password generation with rejection sampling for unbiased output.
+- Passwords are never accepted as command-line arguments and are not echoed
+  while typing.
+- Sensitive buffers are zeroized when dropped.
+- A small dependency set: `aes-gcm`, `argon2`, `getrandom`, `tempfile`,
+  `zeroize`, and `libc` for terminal handling.
 
-## Prerequisites
+## Build
 
-You need a C compiler (`gcc`) and the GnuPG development libraries.
-
-### Linux (Debian/Ubuntu)
-```bash
-sudo apt update
-sudo apt install build-essential libgcrypt20-dev libgpg-error-dev
-```
-
-### macOS (Homebrew)
-```bash
-brew install libgcrypt libgpg-error
-```
-
-## Building
-
-Clone the repository and run `make`:
+Rust 1.85 or newer is required.
 
 ```bash
-git clone https://github.com/DustyPolk/passmgr.git
-cd passmgr
-make
+cargo build --release
+# binary: target/release/passmgr
 ```
 
-This produces the `passmgr` binary.
+To install it into Cargo's binary directory:
+
+```bash
+cargo install --path .
+```
+
+The code targets Unix-like systems (Linux and macOS). Windows is not supported
+because the secure password prompt uses POSIX termios.
 
 ## Usage
 
-### 1. Add a Credential
-Add a new service. You will be securely prompted for the Master Password (to unlock the DB) and then the password for the service.
-
-```bash
-./passmgr add google.com myemail@gmail.com
+```text
+passmgr [--db PATH] <command> [arguments]
 ```
 
-You can also auto-generate a secure password during addition:
+The vault path is chosen in this order:
+
+1. `--db PATH` (must appear before the command)
+2. the `PASSMGR_DB` environment variable
+3. `./passwords.dat`
+
+The master password is prompted for every command except `generate`, `help`,
+and `version`. Prompts are written to stderr, so stdout only contains command
+data. When stdin is a pipe, passwords are read as ordinary lines, which makes
+the tool scriptable:
+
 ```bash
-./passmgr add --generate google.com myemail@gmail.com
-./passmgr add --generate --simple --length 24 google.com myemail@gmail.com
+printf 'master\nmaster\nsecret\nsecret\n' |
+  passmgr --db ~/.secrets/work.dat add example.com alice
 ```
 
-### 2. Get a Credential
-Retrieve a password.
+Creating a new vault asks for the master password twice. Manual credential
+entry asks for the credential password twice as well.
+
+### Add a credential
 
 ```bash
-./passmgr get google.com
-# Output:
-# Service: google.com
-# Username: myemail@gmail.com
-# Password: <decrypted_password>
+passmgr add example.com alice
 ```
 
-### 3. List Credentials
-See all stored accounts (usernames and services only).
+You are prompted for the master password, then for the credential password.
+
+Generate the credential password instead:
 
 ```bash
+passmgr add --generate example.com alice
+passmgr add --generate --simple --length 24 example.com alice
+passmgr add --generate --pin --length 8 example.com alice
+```
+
+`add` rejects a service that already exists. Delete the old entry first if you
+want to replace it. With `--generate`, the generated password is printed to
+stdout after the vault has been saved successfully.
+
+### Get a credential
+
+```bash
+passmgr get example.com
+```
+
+Output:
+
+```text
+Service: example.com
+Username: alice
+Password: <decrypted password>
+```
+
+### List services
+
+```bash
+passmgr list
+```
+
+Output:
+
+```text
+Stored Services:
+- example.com (alice)
+```
+
+Only service names and usernames are printed; passwords are never written to
+stdout by `list`.
+
+### Delete a credential
+
+```bash
+passmgr delete example.com
+```
+
+### Generate a password without touching a vault
+
+```bash
+passmgr generate
+passmgr generate --simple --length 24
+passmgr generate --pin --length 8
+```
+
+| Preset | Characters | Default length |
+| --- | --- | --- |
+| `--strong` (default) | uppercase, lowercase, digits, symbols | 20 |
+| `--simple` | uppercase, lowercase, digits | 16 |
+| `--pin` | digits | 6 |
+
+Lengths must be between 4 and 128. If multiple presets are given, the last one
+wins.
+
+### Help and version
+
+```bash
+passmgr --help
+passmgr help
+passmgr --version
+```
+
+## Security design
+
+- **Key derivation:** Argon2id, version 1.3, with 64 MiB of memory, 3 passes,
+  and 1 lane by default. The parameters are stored in the vault header so they
+  can be raised later without breaking existing vaults. Bounds on accepted
+  parameters prevent a malicious header from requesting unbounded memory.
+- **Encryption:** AES-256-GCM with a fresh 12-byte nonce and 16-byte salt on
+  every save. The complete 56-byte header is authenticated as associated data.
+- **Atomic saves:** the new container is written to a temporary file in the
+  vault's directory, fsynced, and renamed over the old file. The temporary file
+  is created with mode `0600`.
+- **Permissions:** new vaults are owner-only. Existing vaults with group or
+  other permission bits produce a warning with a suggested `chmod` command.
+- **Memory handling:** decrypted payloads, master passwords, generated
+  passwords, keys, and credential fields use `zeroize` containers. Credential
+  `Debug` output redacts the password.
+- **No shell leaks:** passwords are read from stdin, not from arguments or the
+  environment.
+- **Integrity:** GCM authentication covers the ciphertext and all header fields,
+  including the KDF parameters, salt, nonce, and length. Truncated, extended,
+  or modified files fail closed.
+- **Limits:** vault files are limited to 16 MiB and credentials to 10,000
+  entries. These bounds are checked before expensive allocations or decryption.
+- **No recovery:** losing the master password means losing the vault. There is
+  no backdoor, recovery key, or password hint.
+
+A local password manager cannot protect against a compromised machine,
+keyloggers, or an attacker who can read process memory. Use a strong, unique
+master password and keep backups of the vault file.
+
+## Vault format
+
+The binary format is documented in [`FORMAT.md`](FORMAT.md). Version 2 uses:
+
+- magic `PMGR`, format version 2;
+- an explicit KDF id (Argon2id) and AEAD id (AES-256-GCM);
+- little-endian length fields and a versioned plaintext store.
+
+The old C implementation used PBKDF2-SHA256, a different header, and a
+line-oriented plaintext store. Those files begin with `PMGR` version byte `1`
+and are reported as legacy vaults.
+
+## Migrating from the C version
+
+No automatic importer is included. To move credentials manually:
+
+```bash
+cd legacy-c
+make
 ./passmgr list
+./passmgr get example.com
 ```
 
-### 4. Delete a Credential
-Remove an entry permanently.
+Then add each entry to a new Rust vault in a different file:
 
 ```bash
-./passmgr delete google.com
+passmgr --db ~/.secrets/new.dat add example.com alice
 ```
 
-### 5. Generate a Password
-Generate a secure password without storing it.
+Do not point the Rust binary at the old vault file: it will refuse to read it,
+and the old binary should remain the only tool used to modify it.
+
+## Development
 
 ```bash
-./passmgr generate                      # Default: Strong, 20 chars
-./passmgr generate --simple             # Alphanumeric only
-./passmgr generate --pin --length 6     # 6-digit PIN
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-### 6. Help
-View all commands and options.
+The library crate exposes the crypto, storage, password generation, and vault
+modules for testing. End-to-end CLI tests live in `tests/cli.rs`; they run
+serially because each unlock uses 64 MiB for Argon2.
 
-```bash
-./passmgr --help
+Repository layout:
+
+```text
+src/            Rust implementation
+tests/cli.rs    end-to-end tests
+legacy-c/       archived C implementation and its README
+FORMAT.md       vault format specification
 ```
 
-## Security Implementation
+## Exit codes
 
--   **Initialization Vector (IV)**: A unique 12-byte random IV is generated for every save operation.
--   **Salt**: A unique 16-byte random salt is generated for the PBKDF2 derivation.
--   **Auth Tag**: The GCM authentication tag verifies the integrity of the data, preventing tampering.
--   **Memory**: `mlock` (via `libgcrypt` secure memory) is requested to prevent swapping sensitive data to disk. Buffers are `memset` to zero immediately after use.
+| Code | Meaning |
+| --- | --- |
+| 0 | Success |
+| 1 | Runtime error (wrong password, missing vault, I/O failure, etc.) |
+| 2 | Usage error (unknown command or option, bad arguments) |
 
 ## License
 
-MIT License
+MIT

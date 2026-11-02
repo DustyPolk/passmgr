@@ -1,0 +1,23 @@
+[package]
+name = "passmgr"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A simple, secure local password manager"
+license = "MIT"
+repository = "https://github.com/DustyPolk/passmgr"
+readme = "README.md"
+
+[dependencies]
+aes-gcm = "0.10"
+argon2 = "0.5"
+getrandom = "0.3"
+libc = "0.2"
+tempfile = "3"
+zeroize = { version = "1", features = ["derive"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
