@@ -713,3 +713,166 @@ fn agent_flag_is_global_and_documented() {
     assert!(stdout(&output).contains("--agent"));
     assert!(stdout(&output).contains("must come before the command"));
 }
+
+/// Editing without metadata flags rotates the password. The new value is
+/// prompted twice, stored, and never written to stdout or stderr.
+#[test]
+fn edit_rotates_the_password_without_printing_it() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    const NEW_SECRET: &str = "rotated-s3cret-should-never-leak";
+    let output = run(
+        &["--db", &vault, "edit", "example.com"],
+        &format!("master\n{NEW_SECRET}\n{NEW_SECRET}\n"),
+    );
+    assert_success(&output);
+
+    assert_eq!(
+        stdout(&output),
+        "",
+        "edit must not write command data to stdout"
+    );
+    assert!(
+        !stdout(&output).contains(NEW_SECRET) && !stderr(&output).contains(NEW_SECRET),
+        "the new password must never appear on stdout or stderr"
+    );
+    assert!(
+        !stdout(&output).contains(EXAMPLE_SECRET) && !stderr(&output).contains(EXAMPLE_SECRET),
+        "the old password must never appear on stdout or stderr"
+    );
+    assert!(stderr(&output).contains("example.com"));
+
+    assert_eq!(vault_password(&vault, "example.com", "master"), NEW_SECRET);
+
+    let vault = passmgr::Vault::open(&vault, "master").expect("vault opens");
+    let credential = vault.get("example.com").expect("credential exists");
+    assert_eq!(credential.username(), "alice", "username is unchanged");
+}
+
+/// `edit --rename --username` is a metadata-only change: it must not prompt
+/// for a credential password, and no secret may be printed.
+#[test]
+fn edit_renames_and_updates_the_username() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    let output = run(
+        &[
+            "--db",
+            &vault,
+            "edit",
+            "example.com",
+            "--rename",
+            "new.example",
+            "--username",
+            "bob",
+        ],
+        "master\n",
+    );
+    assert_success(&output);
+    assert_eq!(stdout(&output), "");
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+
+    let output = run(&["--db", &vault, "list"], "master\n");
+    assert_success(&output);
+    assert_eq!(stdout(&output), "Stored Services:\n- new.example (bob)\n");
+
+    let output = run(&["--db", &vault, "get", "example.com"], "master\n");
+    assert_eq!(output.status.code(), Some(3), "the old name is gone");
+
+    let opened = passmgr::Vault::open(&vault, "master").expect("vault opens");
+    let credential = opened.get("new.example").expect("renamed credential");
+    assert_eq!(credential.username(), "bob");
+    assert_eq!(credential.password(), EXAMPLE_SECRET);
+}
+
+/// `edit --generate` stores a fresh password and only confirms by entry name.
+#[test]
+fn edit_generates_a_password_without_printing_it() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    let output = run(
+        &[
+            "--db",
+            &vault,
+            "edit",
+            "example.com",
+            "--generate",
+            "--pin",
+            "--length",
+            "8",
+        ],
+        "master\n",
+    );
+    assert_success(&output);
+
+    let generated = vault_password(&vault, "example.com", "master");
+    assert_eq!(generated.len(), 8);
+    assert!(generated.chars().all(|c| c.is_ascii_digit()));
+    assert_ne!(generated, EXAMPLE_SECRET);
+    assert_eq!(stdout(&output), "");
+    assert!(
+        !stdout(&output).contains(&generated) && !stderr(&output).contains(&generated),
+        "a generated replacement must never be printed"
+    );
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET) && !stderr(&output).contains(EXAMPLE_SECRET));
+    assert!(stderr(&output).contains("generated password"));
+}
+
+/// An unknown service is a not-found error and must be detected before the
+/// replacement password is prompted for.
+#[test]
+fn edit_unknown_service_is_not_found() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    let output = run(&["--db", &vault, "edit", "missing.example"], "master\n");
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("no credential found"));
+    assert!(
+        !stderr(&output).contains("Enter password for"),
+        "the new password must not be prompted before the entry is found"
+    );
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+
+    // The existing credential is untouched.
+    assert_eq!(
+        vault_password(&vault, "example.com", "master"),
+        EXAMPLE_SECRET
+    );
+}
+
+/// `rm` is a pure alias: same behavior, same messages, same exit codes.
+#[test]
+fn rm_is_an_alias_for_delete() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    let output = run(&["--db", &vault, "rm", "example.com"], "master\n");
+    assert_success(&output);
+    assert!(stderr(&output).contains("Credential deleted successfully."));
+
+    let output = run(&["--db", &vault, "list"], "master\n");
+    assert_success(&output);
+    assert_eq!(stdout(&output), "");
+    assert!(stderr(&output).contains("No credentials stored."));
+
+    let output = run(&["--db", &vault, "rm", "missing.example"], "master\n");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(stderr(&output).contains("no credential found"));
+}

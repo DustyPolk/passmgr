@@ -40,6 +40,17 @@ Commands:
                                           with exit code 5. There is no
                                           bypass flag.
   delete <service>           Remove a credential permanently.
+  rm <service>               Alias for delete.
+  edit [options] <service>   Update a credential. Without --username or
+                             --rename the password is rotated: the new value
+                             is prompted twice and never printed. Allowed
+                             flags:
+                               --username U   Set the username.
+                               --rename NAME  Rename the service.
+                               --generate     Generate a new password instead
+                                              of prompting (implies rotation).
+                               --strong, --simple, --pin, --length N
+                                              Generation options for --generate.
   list                       List stored services and usernames.
   generate [options]         Generate a secure random password.
   help                       Show this help.
@@ -53,8 +64,8 @@ Global options:
   -h, --help                 Show this help.
   -V, --version              Show version information.
 
-Password generation options (add/generate):
-  --generate                 Generate the password instead of prompting (add only).
+Password generation options (add/edit/generate):
+  --generate                 Generate the password instead of prompting (add/edit only).
   --strong                   Uppercase, lowercase, digits, symbols (default).
   --simple                   Uppercase, lowercase, digits only.
   --pin                      Digits only.
@@ -63,6 +74,8 @@ Password generation options (add/generate):
 Examples:
   passmgr add github.com octocat
   passmgr add --generate --simple --length 24 github.com octocat
+  passmgr edit --generate github.com
+  passmgr edit --rename github.example github.com
   passmgr generate --pin --length 8
   passmgr get github.com
   passmgr list
@@ -73,6 +86,8 @@ Notes:
   - Prompts are written to stderr; command data is written to stdout.
   - 'add --generate' never prints the generated password; read it back with
     the TTY-gated 'get --reveal'.
+  - 'edit' never prints the new password either; rotating prompts for it
+    twice, and a generated one is only confirmed by name.
   - Creating a new vault asks for the master password twice.
   - global options (--db, --agent) must come before the command.
   - Exit codes are stable: 0 success, 1 runtime failure, 2 usage or invalid
@@ -125,6 +140,7 @@ fn run() -> Result<(), CliError> {
         Command::Add(options) => command_add(options, &path)?,
         Command::Get { service, reveal } => command_get(&service, reveal, agent_mode, &path)?,
         Command::Delete(service) => command_delete(&service, &path)?,
+        Command::Edit(options) => command_edit(options, &path)?,
         Command::List => command_list(&path)?,
     }
     Ok(())
@@ -143,6 +159,7 @@ enum Command {
     Add(AddOptions),
     Get { service: String, reveal: bool },
     Delete(String),
+    Edit(EditOptions),
     List,
     Generate(GenerateOptions),
     Help,
@@ -160,6 +177,16 @@ struct AddOptions {
 
 #[derive(Debug)]
 struct GenerateOptions {
+    preset: Preset,
+    length: usize,
+}
+
+#[derive(Debug)]
+struct EditOptions {
+    service: String,
+    username: Option<String>,
+    rename: Option<String>,
+    generate: bool,
     preset: Preset,
     length: usize,
 }
@@ -256,7 +283,8 @@ fn parse_command(command: OsString, rest: Vec<OsString>) -> Result<Command, Stri
     match command.as_str() {
         "add" => parse_add(rest),
         "get" => parse_get(rest),
-        "delete" => parse_single_argument("delete", rest).map(Command::Delete),
+        "delete" | "rm" => parse_single_argument(&command, rest).map(Command::Delete),
+        "edit" => parse_edit(rest),
         "list" => {
             require_no_arguments("list", &rest)?;
             Ok(Command::List)
@@ -397,6 +425,96 @@ fn parse_add(args: Vec<OsString>) -> Result<Command, String> {
     }))
 }
 
+fn flag_value(args: &[OsString], index: usize, name: &str) -> Result<String, String> {
+    let value = args
+        .get(index + 1)
+        .ok_or_else(|| format!("{name} requires a value"))?;
+    value
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{name} value must be valid UTF-8"))
+}
+
+fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
+    let mut generate = false;
+    let mut preset = Preset::Strong;
+    let mut length = None;
+    let mut username = None;
+    let mut rename = None;
+    let mut service = None;
+    let mut only_positional = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        let text = args[index]
+            .to_str()
+            .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
+
+        if !only_positional && text.starts_with('-') && text != "-" {
+            match text {
+                "--" => {
+                    only_positional = true;
+                    index += 1;
+                    continue;
+                }
+                "-h" | "--help" => return Ok(Command::Help),
+                "--generate" => generate = true,
+                "--strong" => preset = Preset::Strong,
+                "--simple" => preset = Preset::Simple,
+                "--pin" => preset = Preset::Pin,
+                "--length" => {
+                    let value = flag_value(&args, index, "--length")?;
+                    length = Some(parse_length(&value)?);
+                    index += 2;
+                    continue;
+                }
+                "--username" => {
+                    username = Some(flag_value(&args, index, "--username")?);
+                    index += 2;
+                    continue;
+                }
+                "--rename" => {
+                    rename = Some(flag_value(&args, index, "--rename")?);
+                    index += 2;
+                    continue;
+                }
+                other if other.starts_with("--length=") => {
+                    length = Some(parse_length(&other["--length=".len()..])?);
+                }
+                other if other.starts_with("--username=") => {
+                    username = Some(other["--username=".len()..].to_owned());
+                }
+                other if other.starts_with("--rename=") => {
+                    rename = Some(other["--rename=".len()..].to_owned());
+                }
+                other => {
+                    return Err(format!(
+                        "unknown flag '{other}' (use '--' before values beginning with '-')"
+                    ));
+                }
+            }
+            index += 1;
+            continue;
+        }
+
+        if service.replace(text.to_owned()).is_some() {
+            return Err("'edit' requires exactly one <service> argument".to_owned());
+        }
+        index += 1;
+    }
+
+    let service =
+        service.ok_or_else(|| "'edit' requires exactly one <service> argument".to_owned())?;
+    Ok(Command::Edit(EditOptions {
+        service,
+        username,
+        rename,
+        generate,
+        preset,
+        length: length.unwrap_or_else(|| preset.default_length()),
+    }))
+}
+
 fn parse_generate(args: Vec<OsString>) -> Result<Command, String> {
     let mut preset = Preset::Strong;
     let mut length = None;
@@ -529,6 +647,64 @@ fn command_get(service: &str, reveal: bool, agent_mode: bool, path: &Path) -> Re
             "Service: {name}\nUsername: {username}\nPassword: <redacted>\n"
         ))
     }
+}
+
+/// An edit rotates the password unless it is a metadata-only change
+/// (`--username` and/or `--rename` without `--generate`).
+fn edit_rotates_password(options: &EditOptions) -> bool {
+    options.generate || (options.username.is_none() && options.rename.is_none())
+}
+
+fn command_edit(options: EditOptions, path: &Path) -> Result<(), Error> {
+    // Validate everything that is not a secret before unlocking, so a typo
+    // fails without a prompt.
+    if let Some(rename) = &options.rename {
+        store::validate_service(rename)?;
+    }
+    if let Some(username) = &options.username {
+        store::validate_username(username)?;
+    }
+    let rotate = edit_rotates_password(&options);
+
+    let (mut vault, master) = unlock(path)?;
+    if vault.get(&options.service).is_none() {
+        return Err(Error::ServiceNotFound(options.service.clone()));
+    }
+
+    if let Some(rename) = &options.rename {
+        vault.rename(&options.service, rename)?;
+    }
+    let service = options.rename.as_deref().unwrap_or(&options.service);
+
+    if let Some(username) = options.username {
+        vault
+            .get_mut(service)
+            .expect("the credential was just found or renamed")
+            .set_username(username)?;
+    }
+
+    if rotate {
+        let password = if options.generate {
+            password::generate_password(options.preset, options.length)?
+        } else {
+            prompt_credential_password(service)?
+        };
+        vault
+            .get_mut(service)
+            .expect("the credential was just found or renamed")
+            .set_password(password)?;
+    }
+
+    vault.save(&master)?;
+
+    if options.generate {
+        // Never print the generated password; read it back with the
+        // TTY-gated `get --reveal`.
+        eprintln!("Credential '{service}' updated with a generated password.");
+    } else {
+        eprintln!("Credential '{service}' updated.");
+    }
+    Ok(())
 }
 
 fn command_delete(service: &str, path: &Path) -> Result<(), Error> {
@@ -827,5 +1003,75 @@ mod tests {
         assert!(parse(&["get", "--bogus", "svc"]).is_err());
         assert!(parse(&["get", "--reveal"]).is_err());
         assert!(parse(&["get", "a", "b"]).is_err());
+    }
+
+    #[test]
+    fn parses_edit_metadata_and_generation_options() {
+        let Command::Edit(options) = parse(&["edit", "svc"]).unwrap() else {
+            panic!("expected edit command");
+        };
+        assert_eq!(options.service, "svc");
+        assert!(options.username.is_none());
+        assert!(options.rename.is_none());
+        assert!(!options.generate);
+        assert_eq!(options.preset, Preset::Strong);
+        assert_eq!(options.length, 20);
+        assert!(
+            edit_rotates_password(&options),
+            "a bare edit rotates the password"
+        );
+
+        let Command::Edit(options) = parse(&[
+            "edit",
+            "--username",
+            "bob",
+            "--rename=new.example",
+            "--generate",
+            "--pin",
+            "--length=8",
+            "svc",
+        ])
+        .unwrap() else {
+            panic!("expected edit command");
+        };
+        assert_eq!(options.username.as_deref(), Some("bob"));
+        assert_eq!(options.rename.as_deref(), Some("new.example"));
+        assert!(options.generate);
+        assert_eq!(options.preset, Preset::Pin);
+        assert_eq!(options.length, 8);
+        assert!(edit_rotates_password(&options));
+
+        // Metadata-only edits leave the password alone.
+        let Command::Edit(options) = parse(&["edit", "svc", "--username", "bob"]).unwrap() else {
+            panic!("expected edit command");
+        };
+        assert!(!edit_rotates_password(&options));
+        let Command::Edit(options) = parse(&["edit", "svc", "--rename", "new.example"]).unwrap()
+        else {
+            panic!("expected edit command");
+        };
+        assert!(!edit_rotates_password(&options));
+    }
+
+    #[test]
+    fn edit_rejects_bad_arguments() {
+        assert!(parse(&["edit"]).is_err());
+        assert!(parse(&["edit", "a", "b"]).is_err());
+        assert!(parse(&["edit", "--bogus", "svc"]).is_err());
+        assert!(parse(&["edit", "--username", "svc"]).is_err());
+        assert!(parse(&["edit", "--username"]).is_err());
+        assert!(parse(&["edit", "--rename"]).is_err());
+        assert!(parse(&["edit", "--length", "abc", "svc"]).is_err());
+    }
+
+    #[test]
+    fn rm_is_an_alias_for_delete() {
+        assert!(
+            matches!(parse(&["rm", "svc"]).unwrap(), Command::Delete(service) if service == "svc")
+        );
+        assert!(parse(&["rm"]).is_err());
+        assert!(parse(&["rm", "a", "b"]).is_err());
+        assert!(HELP.contains("rm <service>"));
+        assert!(HELP.contains("edit [options]"));
     }
 }

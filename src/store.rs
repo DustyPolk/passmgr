@@ -56,6 +56,26 @@ impl Credential {
     pub fn password(&self) -> &str {
         self.password.as_str()
     }
+
+    /// Replace the service name. The caller is responsible for checking that
+    /// the new name is not already taken.
+    pub fn set_service(&mut self, service: String) -> Result<()> {
+        validate_service(&service)?;
+        self.service = Zeroizing::new(service);
+        Ok(())
+    }
+
+    pub fn set_username(&mut self, username: String) -> Result<()> {
+        validate_username(&username)?;
+        self.username = Zeroizing::new(username);
+        Ok(())
+    }
+
+    pub fn set_password(&mut self, password: Zeroizing<String>) -> Result<()> {
+        validate_password(&password)?;
+        self.password = password;
+        Ok(())
+    }
 }
 
 impl fmt::Debug for Credential {
@@ -71,13 +91,22 @@ impl fmt::Debug for Credential {
 /// Validate the non-secret parts of a credential before prompting for a
 /// password or touching an existing vault.
 pub fn validate_identity(service: &str, username: &str) -> Result<()> {
+    validate_service(service)?;
+    validate_username(username)
+}
+
+pub fn validate_service(service: &str) -> Result<()> {
     validate_field("service", service, true)?;
-    validate_field("username", username, false)?;
     if service.chars().any(char::is_control) {
         return Err(Error::InvalidInput(
             "service name must not contain control characters".into(),
         ));
     }
+    Ok(())
+}
+
+pub fn validate_username(username: &str) -> Result<()> {
+    validate_field("username", username, false)?;
     if username.chars().any(char::is_control) {
         return Err(Error::InvalidInput(
             "username must not contain control characters".into(),
@@ -314,6 +343,32 @@ mod tests {
             decode(&encoded).unwrap_err(),
             Error::MalformedVault(_)
         ));
+    }
+
+    #[test]
+    fn setters_validate_and_replace_fields() {
+        let mut credential = credential("service", "user", "old-password");
+        credential.set_service("new-service".into()).unwrap();
+        credential.set_username("new-user".into()).unwrap();
+        credential
+            .set_password(Zeroizing::new("new-password".into()))
+            .unwrap();
+        assert_eq!(credential.service(), "new-service");
+        assert_eq!(credential.username(), "new-user");
+        assert_eq!(credential.password(), "new-password");
+
+        assert!(credential.set_service(String::new()).is_err());
+        assert!(credential.set_service("bad\nservice".into()).is_err());
+        assert!(credential.set_username("bad\nuser".into()).is_err());
+        assert!(
+            credential
+                .set_password(Zeroizing::new(String::new()))
+                .is_err()
+        );
+        // Failed setters must leave the credential untouched.
+        assert_eq!(credential.service(), "new-service");
+        assert_eq!(credential.username(), "new-user");
+        assert_eq!(credential.password(), "new-password");
     }
 
     #[test]

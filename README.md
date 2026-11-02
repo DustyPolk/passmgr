@@ -63,7 +63,8 @@ printf 'master\nmaster\nsecret\nsecret\n' |
 ```
 
 Creating a new vault asks for the master password twice. Manual credential
-entry asks for the credential password twice as well.
+entry asks for the credential password twice as well, and so does rotating it
+with `edit`.
 
 ### Add a credential
 
@@ -134,10 +135,28 @@ Stored Services:
 Only service names and usernames are printed; passwords are never written to
 stdout by `list`.
 
+### Edit a credential
+
+```bash
+passmgr edit example.com                      # rotate the password
+passmgr edit example.com --username bob       # metadata only
+passmgr edit example.com --rename github.example
+passmgr edit --generate --simple example.com
+```
+
+A bare `edit` rotates the credential password: you are prompted for the new
+value twice. Metadata-only changes (`--username` and/or `--rename` without
+`--generate`) do not touch the password and do not prompt for it. `--generate`
+replaces the password with a generated value without prompting; the generated
+value is never printed, only a confirmation naming the entry is written to
+stderr. Read it back with the TTY-gated `get --reveal`. Renaming onto an
+existing service is rejected, and an unknown service exits with code 3.
+
 ### Delete a credential
 
 ```bash
 passmgr delete example.com
+passmgr rm example.com        # alias
 ```
 
 ### Generate a password without touching a vault

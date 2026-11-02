@@ -2,6 +2,49 @@
 
 Newest entries first. Date, what was done, what the next iteration must know.
 
+## 2026-11-02 — TODO 0.6: `rm` alias and `edit`
+
+- `rm <service>` is a pure alias for `delete`: `parse_command` routes both
+  through `parse_single_argument(&command, rest).map(Command::Delete)`, so
+  messages and exit code 3 for an unknown service are identical.
+- New `edit <service> [--username U] [--rename NAME] [--generate]
+  [--strong|--simple|--pin] [--length N]`. `--rename` was added beyond the
+  TODO wording so a service can actually be renamed (the item's test list
+  required it).
+- Rotation rule is a pure function, `edit_rotates_password(&EditOptions)`:
+  a bare `edit` or `--generate` rotates; `--username` and/or `--rename`
+  without `--generate` is a metadata-only edit and does **not** prompt for a
+  password. Rotating prompts for the new value twice through the existing
+  no-echo `terminal::prompt_password` (`prompt_credential_password`), then
+  saves. `--generate` stores a fresh value and prints only the entry name, so
+  no secret reaches stdout/stderr.
+- Ordering: non-secret inputs are validated before `unlock`; the service is
+  looked up before any replacement-password prompt, so an unknown service
+  exits 3 without consuming a password prompt. Renaming onto an existing
+  service fails with `DuplicateService` (exit 1); renaming to the same name is
+  a no-op. Renaming happens before the username/password update, and all
+  follow-up mutations use the new name.
+- New library API: `store::validate_service`, `store::validate_username`
+  (`validate_identity` now composes them), `Credential::set_service`,
+  `set_username`, `set_password` (each validates and leaves the value
+  untouched on error), `Vault::get_mut` and `Vault::rename`.
+- Docs: `--help`, README (new "Edit a credential" section, `rm` alias) updated.
+  No store-format or crypto changes.
+- Tests: one new setter unit test in `src/store.rs` and one new vault test
+  (`renaming_and_editing_credentials`), 3 new parsing/decision tests in
+  `src/main.rs` (`parses_edit_metadata_and_generation_options`,
+  `edit_rejects_bad_arguments`, `rm_is_an_alias_for_delete`), and 5 new e2e
+  tests in `tests/cli.rs` (rotate with no secret bytes, rename+username with
+  the old name returning 3, generated replacement not printed, unknown service
+  exits 3 before the password prompt, `rm` parity).
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings`
+  clean, `cargo test` 73 passed (36 lib unit + 15 main unit + 22 e2e, ~77 s;
+  e2e is serialized on Argon2 memory). `cargo audit` still not installed
+  (`error: no such command: audit`).
+- **Next iteration must know:** Phase 0 is complete; next is TODO 1.1 (stable
+  entry ids + store version 2 migration). There is no `run`/daemon yet, so
+  `edit` still opens the vault directly with a TTY prompt.
+
 ## 2026-11-02 — TODO 0.5: stable exit codes
 
 - `src/error.rs` now owns the CLI exit-code contract: public `EXIT_OK` (0),

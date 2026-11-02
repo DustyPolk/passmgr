@@ -39,9 +39,11 @@ come first.
       5 refused (non-TTY reveal / agent), 6 malformed vault. `Error::Refused`
       already maps to 5; the remaining variants still exit 1. Document in `--help`
       and assert in tests.
-- [ ] **0.6 Add `rm` (alias of `delete`) and `edit <service> [--username U]
+- [x] **0.6 Add `rm` (alias of `delete`) and `edit <service> [--username U]
       [--generate]`.** Editing the password re-prompts twice. Tests: rename,
-      rotate, unknown service.
+      rotate, unknown service. (Implemented with an additional `--rename NAME`
+      flag so a service can be renamed; metadata-only edits skip the password
+      prompt.)
 
 ## Phase 1 — reference model and audit-friendly metadata
 

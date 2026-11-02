@@ -66,6 +66,30 @@ impl Vault {
             .find(|credential| credential.service() == service)
     }
 
+    pub fn get_mut(&mut self, service: &str) -> Option<&mut Credential> {
+        self.credentials
+            .iter_mut()
+            .find(|credential| credential.service() == service)
+    }
+
+    /// Give an existing credential a new service name. The new name must not
+    /// collide with another credential.
+    pub fn rename(&mut self, service: &str, new_service: &str) -> Result<()> {
+        if service == new_service {
+            return self
+                .get(service)
+                .map(|_| ())
+                .ok_or_else(|| Error::ServiceNotFound(service.to_owned()));
+        }
+        if self.get(new_service).is_some() {
+            return Err(Error::DuplicateService(new_service.to_owned()));
+        }
+        let credential = self
+            .get_mut(service)
+            .ok_or_else(|| Error::ServiceNotFound(service.to_owned()))?;
+        credential.set_service(new_service.to_owned())
+    }
+
     pub fn delete(&mut self, service: &str) -> Result<Credential> {
         let index = self
             .credentials
@@ -247,6 +271,49 @@ mod tests {
         let loaded = Vault::open(&path, master).unwrap();
         assert_eq!(loaded.len(), 1);
         assert!(loaded.get("keep").is_some());
+    }
+
+    #[test]
+    fn renaming_and_editing_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "master";
+
+        let mut vault = Vault::open_for_add(&path, master).unwrap();
+        vault
+            .add(credential("first", "alice", "old-secret"))
+            .unwrap();
+        vault.add(credential("second", "bob", "other")).unwrap();
+
+        vault.rename("first", "renamed").unwrap();
+        assert!(vault.get("first").is_none());
+        assert_eq!(vault.get("renamed").unwrap().username(), "alice");
+
+        assert!(matches!(
+            vault.rename("renamed", "second"),
+            Err(Error::DuplicateService(_))
+        ));
+        assert!(matches!(
+            vault.rename("missing", "anything"),
+            Err(Error::ServiceNotFound(_))
+        ));
+        assert!(matches!(
+            vault.rename("missing", "missing"),
+            Err(Error::ServiceNotFound(_))
+        ));
+        vault.rename("renamed", "renamed").unwrap();
+
+        let credential = vault.get_mut("renamed").unwrap();
+        credential.set_username("carol".to_owned()).unwrap();
+        credential
+            .set_password(Zeroizing::new("new-secret".to_owned()))
+            .unwrap();
+        vault.save(master).unwrap();
+
+        let loaded = Vault::open(&path, master).unwrap();
+        let credential = loaded.get("renamed").unwrap();
+        assert_eq!(credential.username(), "carol");
+        assert_eq!(credential.password(), "new-secret");
     }
 
     #[test]
