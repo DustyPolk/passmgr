@@ -51,7 +51,7 @@ Commands:
                                               of prompting (implies rotation).
                                --strong, --simple, --pin, --length N
                                               Generation options for --generate.
-  list                       List stored services and usernames.
+  list                       List stored services, usernames and references.
   generate [options]         Generate a secure random password.
   help                       Show this help.
   version                    Show version information.
@@ -86,6 +86,9 @@ Notes:
   - Prompts are written to stderr; command data is written to stdout.
   - 'add --generate' never prints the generated password; read it back with
     the TTY-gated 'get --reveal'.
+  - Every credential has a stable reference 'pm://<32 hex characters>', shown
+    by 'list' and 'get'. A reference identifies an entry for agents and tools
+    without revealing any secret, and survives renames.
   - 'edit' never prints the new password either; rotating prompts for it
     twice, and a generated one is only confirmed by name.
   - Creating a new vault asks for the master password twice.
@@ -637,14 +640,17 @@ fn command_get(service: &str, reveal: bool, agent_mode: bool, path: &Path) -> Re
         .ok_or_else(|| Error::ServiceNotFound(service.to_owned()))?;
     let name = credential.service();
     let username = credential.username();
+    let reference = credential.reference();
+    // The reference is metadata (an id, not a secret) and is safe to print in
+    // both modes: agents need it to name the entry.
     if reveal {
         stdout_write(format_args!(
-            "Service: {name}\nUsername: {username}\nPassword: {}\n",
+            "Ref: {reference}\nService: {name}\nUsername: {username}\nPassword: {}\n",
             credential.password()
         ))
     } else {
         stdout_write(format_args!(
-            "Service: {name}\nUsername: {username}\nPassword: <redacted>\n"
+            "Ref: {reference}\nService: {name}\nUsername: {username}\nPassword: <redacted>\n"
         ))
     }
 }
@@ -728,9 +734,10 @@ fn command_list(path: &Path) -> Result<(), Error> {
     for credential in vault.list() {
         writeln!(
             output,
-            "- {} ({})",
+            "- {} ({}) [{}]",
             credential.service(),
-            credential.username()
+            credential.username(),
+            credential.reference()
         )
         .expect("writing to a String cannot fail");
     }

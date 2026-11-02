@@ -77,6 +77,28 @@ fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// Extract the `pm://...` reference from `passmgr get` output.
+fn get_reference(output: &Output) -> String {
+    stdout(output)
+        .lines()
+        .find_map(|line| line.strip_prefix("Ref: "))
+        .expect("get output must contain a Ref line")
+        .to_owned()
+}
+
+/// References are `pm://` followed by 32 lowercase hex characters (16 bytes).
+fn assert_canonical_reference(reference: &str) {
+    let hex = reference
+        .strip_prefix("pm://")
+        .unwrap_or_else(|| panic!("reference '{reference}' must start with pm://"));
+    assert_eq!(hex.len(), 32, "reference '{reference}' must carry 16 bytes");
+    assert!(
+        hex.chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+        "reference '{reference}' must use lowercase hex"
+    );
+}
+
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
@@ -117,9 +139,11 @@ fn add_get_list_and_delete() {
 
     let output = run(&["--db", &vault, "get", "example.com"], "master\n");
     assert_success(&output);
+    let reference = get_reference(&output);
+    assert_canonical_reference(&reference);
     assert_eq!(
         stdout(&output),
-        "Service: example.com\nUsername: alice\nPassword: <redacted>\n"
+        format!("Ref: {reference}\nService: example.com\nUsername: alice\nPassword: <redacted>\n")
     );
     assert!(
         !stdout(&output).contains(EXAMPLE_SECRET) && !stderr(&output).contains(EXAMPLE_SECRET),
@@ -149,7 +173,10 @@ fn add_get_list_and_delete() {
 
     let output = run(&["--db", &vault, "list"], "master\n");
     assert_success(&output);
-    assert_eq!(stdout(&output), "Stored Services:\n- example.com (alice)\n");
+    assert_eq!(
+        stdout(&output),
+        format!("Stored Services:\n- example.com (alice) [{reference}]\n")
+    );
 
     let output = run(&["--db", &vault, "delete", "example.com"], "master\n");
     assert_success(&output);
@@ -159,6 +186,57 @@ fn add_get_list_and_delete() {
     assert_success(&output);
     assert_eq!(stdout(&output), "");
     assert!(stderr(&output).contains("No credentials stored."));
+}
+
+/// Entry references are stable across processes and metadata edits, and
+/// printing them never exposes the stored password.
+#[test]
+fn entry_references_are_stable_and_leak_no_secrets() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    let output = run(&["--db", &vault, "get", "example.com"], "master\n");
+    assert_success(&output);
+    let first = get_reference(&output);
+    assert_canonical_reference(&first);
+
+    // A separate process must report the same reference.
+    let output = run(&["--db", &vault, "get", "example.com"], "master\n");
+    assert_success(&output);
+    assert_eq!(get_reference(&output), first);
+
+    // Renaming and changing the username must not change the id.
+    let output = run(
+        &[
+            "--db",
+            &vault,
+            "edit",
+            "example.com",
+            "--rename",
+            "renamed.example",
+            "--username",
+            "bob",
+        ],
+        "master\n",
+    );
+    assert_success(&output);
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
+
+    let output = run(&["--db", &vault, "get", "renamed.example"], "master\n");
+    assert_success(&output);
+    assert_eq!(get_reference(&output), first);
+
+    let output = run(&["--db", &vault, "list"], "master\n");
+    assert_success(&output);
+    assert_eq!(
+        stdout(&output),
+        format!("Stored Services:\n- renamed.example (bob) [{first}]\n")
+    );
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert!(!stderr(&output).contains(EXAMPLE_SECRET));
 }
 
 #[test]
@@ -686,16 +764,21 @@ fn agent_flag_still_allows_metadata_commands() {
         "master\n",
     );
     assert_success(&output);
+    let reference = get_reference(&output);
+    assert_canonical_reference(&reference);
     assert_eq!(
         stdout(&output),
-        "Service: example.com\nUsername: alice\nPassword: <redacted>\n"
+        format!("Ref: {reference}\nService: example.com\nUsername: alice\nPassword: <redacted>\n")
     );
     assert!(!stdout(&output).contains(EXAMPLE_SECRET));
     assert!(!stderr(&output).contains(EXAMPLE_SECRET));
 
     let output = run(&["--agent", "--db", &vault, "list"], "master\n");
     assert_success(&output);
-    assert_eq!(stdout(&output), "Stored Services:\n- example.com (alice)\n");
+    assert_eq!(
+        stdout(&output),
+        format!("Stored Services:\n- example.com (alice) [{reference}]\n")
+    );
 }
 
 /// `--agent` is a global option: it is documented and rejected after the
@@ -781,7 +864,18 @@ fn edit_renames_and_updates_the_username() {
 
     let output = run(&["--db", &vault, "list"], "master\n");
     assert_success(&output);
-    assert_eq!(stdout(&output), "Stored Services:\n- new.example (bob)\n");
+    let reference = {
+        let opened = passmgr::Vault::open(&vault, "master").expect("vault opens");
+        opened
+            .get("new.example")
+            .expect("renamed credential")
+            .reference()
+    };
+    assert_canonical_reference(&reference);
+    assert_eq!(
+        stdout(&output),
+        format!("Stored Services:\n- new.example (bob) [{reference}]\n")
+    );
 
     let output = run(&["--db", &vault, "get", "example.com"], "master\n");
     assert_eq!(output.status.code(), Some(3), "the old name is gone");

@@ -252,6 +252,48 @@ mod tests {
     }
 
     #[test]
+    fn entry_ids_are_stable_across_vault_saves() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "master";
+
+        let mut vault = Vault::open_for_add(&path, master).unwrap();
+        vault
+            .add(credential("one.example", "alice", "secret-one"))
+            .unwrap();
+        vault
+            .add(credential("two.example", "bob", "secret-two"))
+            .unwrap();
+        let ids: Vec<_> = vault
+            .list()
+            .iter()
+            .map(|credential| credential.id())
+            .collect();
+        assert_ne!(ids[0], ids[1]);
+        vault.save(master).unwrap();
+
+        let loaded = Vault::open(&path, master).unwrap();
+        let loaded_ids: Vec<_> = loaded
+            .list()
+            .iter()
+            .map(|credential| credential.id())
+            .collect();
+        assert_eq!(loaded_ids, ids, "ids survive a save and reopen");
+
+        // Renaming changes the service name, never the id: agent references
+        // must stay valid across edits.
+        let mut loaded = loaded;
+        loaded.rename("one.example", "renamed.example").unwrap();
+        loaded.save(master).unwrap();
+
+        let reopened = Vault::open(&path, master).unwrap();
+        let credential = reopened.get("renamed.example").unwrap();
+        assert_eq!(credential.id(), ids[0]);
+        assert_eq!(credential.reference(), credential.id().to_ref());
+        assert!(credential.reference().starts_with("pm://"));
+    }
+
+    #[test]
     fn deleting_credential_and_saving() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("vault.dat");

@@ -96,10 +96,17 @@ passmgr get example.com
 Output:
 
 ```text
+Ref: pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5
 Service: example.com
 Username: alice
 Password: <redacted>
 ```
+
+`Ref` is the entry's stable reference: `pm://` followed by 32 lowercase hex
+characters (a 16-byte random id). It identifies the entry without exposing any
+secret, and it survives renames, password rotations, and re-saves. Agents and
+scripts should use references rather than service names when they need to name
+an entry.
 
 `get` is metadata-only by default: it never writes the stored password to
 stdout, so it is safe to run from a script or an agent. Printing the password
@@ -129,11 +136,11 @@ Output:
 
 ```text
 Stored Services:
-- example.com (alice)
+- example.com (alice) [pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5]
 ```
 
-Only service names and usernames are printed; passwords are never written to
-stdout by `list`.
+Only the service name, username, and reference are printed; passwords are never
+written to stdout by `list`.
 
 ### Edit a credential
 
@@ -197,6 +204,10 @@ passmgr --version
   is created with mode `0600`.
 - **Permissions:** new vaults are owner-only. Existing vaults with group or
   other permission bits produce a warning with a suggested `chmod` command.
+- **Entry references:** each credential carries a random 16-byte id written in
+  the encrypted payload. Store version 2 added the id; version 1 payloads are
+  read and migrated on the next save by generating ids (no data loss, no crypto
+  change).
 - **Memory handling:** decrypted payloads, master passwords, generated
   passwords, keys, and credential fields use `zeroize` containers. Credential
   `Debug` output redacts the password.

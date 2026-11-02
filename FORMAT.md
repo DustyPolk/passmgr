@@ -70,9 +70,10 @@ ignored.
 After successful decryption, the plaintext is versioned binary data:
 
 ```text
-u8          store version = 1
+u8          store version = 2
 u32         credential count
 repeat count times:
+    byte[16]    entry id (random, stable per credential)
     u32         service length in bytes
     byte[]      service, UTF-8
     u32         username length in bytes
@@ -80,6 +81,17 @@ repeat count times:
     u32         password length in bytes
     byte[]      password, UTF-8
 ```
+
+The entry id is 16 random bytes from the operating system RNG. It is rendered
+to users and agents as the reference `pm://<32 lowercase hex characters>` and
+is independent of the service name, so it survives renames. Ids must be unique
+within a payload; a duplicate is rejected as malformed. Ids are metadata, not
+secrets, but they live inside the encrypted payload so the vault file does not
+leak how many entries exist.
+
+Store version 1 has the same layout without the 16-byte id field. It is read
+for migration: ids are generated in memory while decoding, and the next save
+writes store version 2. Credential fields are preserved unchanged.
 
 The payload has no trailing bytes. Fields are length-prefixed rather than
 line-oriented, so the encoding can represent service names, usernames, and
@@ -94,7 +106,8 @@ implementation applies additional validation when reading and writing:
 - at most 10,000 credentials;
 - the decoded payload is at most 10 MiB.
 
-An empty vault encodes as `01 00 00 00 00`: store version 1 and a count of zero.
+An empty vault encodes as `02 00 00 00 00`: store version 2 and a count of zero.
+A version 1 empty payload (`01 00 00 00 00`) is also accepted and upgraded on save.
 
 ## Versioning
 
@@ -102,7 +115,8 @@ An empty vault encodes as `01 00 00 00 00`: store version 1 and a count of zero.
   algorithms.
 - The KDF and AEAD ids provide algorithm agility inside a container version.
 - The plaintext store version at the start of the decrypted payload controls
-  the credential encoding.
+  the credential encoding. Version 1 (no entry ids) is accepted for migration
+  and rewritten as version 2 on save; unknown versions are rejected.
 
 A reader must reject unknown versions rather than guessing. Version 1 is
 reserved for the legacy C vault:

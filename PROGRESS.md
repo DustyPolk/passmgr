@@ -2,6 +2,50 @@
 
 Newest entries first. Date, what was done, what the next iteration must know.
 
+## 2026-11-02 — TODO 1.1: stable entry references (`pm://<id>`)
+
+- `src/store.rs` store version 2: each credential now begins with a 16-byte
+  random `EntryId` in the encrypted payload. `Credential::new` generates the id
+  from `getrandom::fill` (no new dependency); decode checks uniqueness and
+  rejects duplicate ids as `MalformedVault`.
+- New public API in `src/store.rs`: `EntryId` (`generate`, `to_hex`, `to_ref`,
+  `from_hex`, `parse_ref`, `Hash`/`Eq`, `Display`/`Debug`), `ENTRY_ID_BYTES`,
+  `Credential::id()` and `Credential::reference()`. `Credential::with_id` is the
+  private constructor used by the decoder; validation is unchanged.
+- Reference syntax is `pm://` + exactly 32 hex chars, lower-cased on parse;
+  upper-case input is accepted. **Decision:** no `pm://<service>#<prefix>` form
+  and no id prefixes — a partial reference would be ambiguous, so the full id is
+  required. Parse failures are `InvalidInput` (exit 2). The id is metadata, not
+  a secret, so it is safe on stdout/stderr.
+- Migration: `decode` accepts store version 1 (same layout without ids), gives
+  each credential a fresh id in memory, and the next `save` writes version 2.
+  No crypto or container change; the container format version stays 2 and the
+  salt/nonce handling is untouched. Empty vault is now `02 00 00 00 00`;
+  version 1 empty payloads are still accepted.
+- CLI: `get` output gains a leading `Ref: pm://<id>` line (both metadata and
+  `--reveal` modes, since the ref is not a secret); `list` lines are now
+  `- <service> (<username>) [pm://<id>]`. `--help` and README document the
+  reference. No new commands yet; `show <ref>` is TODO 1.2.
+- `FORMAT.md`: payload section updated to version 2 with the id field, plus
+  migration and duplicate-id rules.
+- Tests: 6 new/updated unit tests in `src/store.rs` (v2 round-trip preserving
+  ids, v1 payload migration with no data loss, unique/stable ids across
+  encode/decode, hex/ref parsing incl. rejects, duplicate-id rejection,
+  oversized-length now with an id) and 1 new `src/vault.rs` test
+  (`entry_ids_are_stable_across_vault_saves`, including rename stability).
+  1 new e2e test `entry_references_are_stable_and_leak_no_secrets`; exact-output
+  e2e assertions updated for the new `Ref:`/`[pm://...]` formats (still assert
+  `EXAMPLE_SECRET` is absent).
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings`
+  clean, `cargo test` 79 passed (41 lib unit + 15 main unit + 23 e2e, ~97 s;
+  e2e serialized on Argon2 memory). `cargo audit` still not installed
+  (`error: no such command: audit`).
+- **Next iteration must know:** TODO 1.2 (`list --json` + `show <ref>`). Resolve
+  references with `passmgr::store::EntryId::parse_ref` and compare against
+  `Credential::id()`; there is deliberately no `Vault::get_by_ref` yet, add one
+  if it keeps 1.2 clean. Old vaults (store v1) are migrated on the first save,
+  so ids are stable from that point on but a v1 vault gets new ids once.
+
 ## 2026-11-02 — TODO 0.6: `rm` alias and `edit`
 
 - `rm <service>` is a pure alias for `delete`: `parse_command` routes both

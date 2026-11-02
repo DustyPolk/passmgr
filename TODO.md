@@ -47,12 +47,13 @@ come first.
 
 ## Phase 1 — reference model and audit-friendly metadata
 
-- [ ] **1.1 Entry references.** Give each credential a stable random `id` (16 bytes,
-      hex) stored in the payload, and a `ref` syntax `pm://<id>` (or
-      `pm://<service>#<id-prefix>`). Requires store version 2 with a migration
-      reader for version 1 (no data loss, no crypto change); document in
-      `FORMAT.md`. Tests: old payload still decodes, ids are unique and stable
-      across saves.
+- [x] **1.1 Entry references.** Give each credential a stable random `id` (16 bytes,
+      hex) stored in the payload, and a `ref` syntax `pm://<id>`. Requires store
+      version 2 with a migration reader for version 1 (no data loss, no crypto
+      change); document in `FORMAT.md`. Tests: old payload still decodes, ids are
+      unique and stable across saves. (Implemented as `pm://<32 hex>` with full ids
+      only: no prefix form, so a reference is never ambiguous. `list` and `get`
+      print the reference; renaming preserves it.)
 - [ ] **1.2 `list --json` and `show <ref>`.** Metadata only: ref, service,
       username, tags, created/rotated timestamps. No values. Test asserts no
       value substring appears.
