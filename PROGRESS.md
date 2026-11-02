@@ -1,3 +1,55 @@
+## 2026-11-02 — Protocol framing module (TODO 2.1)
+
+- New `src/protocol.rs` (registered in `src/lib.rs`): pure, no-I/O wire
+  protocol for the future daemon. Frame = 4-byte big-endian length + JSON body.
+  Envelope = `{"version":1,"request":{"type":...}}`. `encode(&Request)` and
+  `decode(&[u8])` handle exactly one frame; `FrameDecoder` is the incremental
+  read-loop state machine (`push`, `next_frame`, `next_request`, `buffered`).
+- Request types: `ping`, `lock`, `run { env, ref, command }`. **There is no
+  plaintext request type**, and `src/protocol.rs` documents why (any same-user
+  process can reach the socket, so the daemon must never return a value). The
+  test `requests_have_no_plaintext_field` pins the exact wire keys:
+  `ping`/`lock` have only `type`; `run` has `type`, `env`, `ref`, `command`.
+  `reveal`/`get`/`password`/`export` are rejected as unknown types.
+- Limits: `MAX_MESSAGE_BYTES = 64 KiB` body cap, `MAX_BUFFERED_BYTES` = two
+  max frames for the decoder, `MAX_ENV_NAME_BYTES = 128`,
+  `MAX_REFERENCE_BYTES = 128`, `MAX_ARG_BYTES = 4096`, `MAX_ARGS = 256`.
+  The declared length is validated **before** any slice/allocation is made
+  from it (`check_length`), so a prefix of `u32::MAX` is rejected immediately;
+  `FrameDecoder::push` rejects it as soon as the 4-byte prefix arrives, without
+  waiting for the body. Zero-length bodies are `EmptyMessage`; a frame with
+  bytes after it is `TrailingBytes` (one call decodes one frame).
+- Decisions: unknown envelope **fields** are ignored (so 2.5 can add a session
+  token and 3.x a grant without breaking peers); unknown envelope **versions**
+  and unknown request **types** are hard errors. `run.ref` is validated with
+  the canonical `store::EntryId::parse_ref` (reuse, no duplicated syntax); the
+  daemon still must check existence and scope. `run.env` must be
+  `[A-Za-z_][A-Za-z0-9_]*`. All validation runs on encode *and* decode, so a
+  locally built request cannot bypass the contract. Errors carry lengths and a
+  truncated (32-char) request type only — never field values (test
+  `errors_do_not_echo_request_field_values`).
+- `ProtocolError` is a separate enum with `Display` + `std::error::Error`; it
+  deliberately does **not** reuse the CLI `Error`/exit-code contract, because
+  these are daemon-internal failures. No new dependency (`serde_json` was
+  already present). No store/crypto change.
+- Tests: 16 new lib tests — round-trip of all three requests, exact framing
+  bytes, truncated prefix/body, oversized declared length on `decode` and
+  `FrameDecoder`, empty body, trailing bytes, oversized encode (20×4 KiB
+  args), versions 0/2/99/u64::MAX, missing/mistyped envelope fields, unknown
+  types incl. a 10 000-char type truncated in the error, wire-key pinning,
+  all `run` field bounds, fragmented byte-at-a-time decoding, two frames in
+  one push, buffer flood, and a deterministic xorshift smoke test over ~3 000
+  random buffers (no panics).
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
+  clean, `cargo test` 116 passed (70 lib + 19 bin + 27 e2e, ~149 s; e2e is
+  Argon2id-bound and serialized). `cargo audit` still not installed
+  (`error: no such command: audit`).
+- **Next iteration must know:** next is **2.2** (socket setup in
+  `$XDG_RUNTIME_DIR/passmgr/`, dir 0700, socket 0600, stale-socket detection,
+  single-instance lock). Use `FrameDecoder` for reads and `encode` for writes;
+  do not add a request type that returns plaintext. `run.command` is an argv
+  vector (no shell); 2.6 must spawn it directly.
+
 ## 2026-11-02 — Tags and timestamps in JSON (TODO 1.2b)
 
 - TODO 1.2b: `list --json`, `show --json` entries now carry all six keys:

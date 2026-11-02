@@ -85,10 +85,15 @@ come first.
 
 ## Phase 2 — unlock daemon (`pmd`)
 
-- [ ] **2.1 Protocol module.** Length-prefixed JSON framing with `version` field and
+- [x] **2.1 Protocol module.** Length-prefixed JSON framing with `version` field and
       a hard max message size (e.g. 64 KiB). Pure functions, no I/O. Tests:
       round-trip, truncated frame, oversized length, bad version, unknown request
-      type — all rejected without panic.
+      type — all rejected without panic. (`src/protocol.rs`: `encode`/`decode`,
+      streaming `FrameDecoder`, envelope `{"version":1,"request":{"type":...}}`,
+      types `ping`/`lock`/`run`, 64 KiB body cap checked before slicing, unknown
+      fields tolerated, unknown types/versions rejected, `run.env`/`ref`/`command`
+      bounds validated on encode and decode, and no request type can carry or
+      return a plaintext value.)
 - [ ] **2.2 Socket setup.** `$XDG_RUNTIME_DIR/passmgr/pmd.sock` (dir 0700, socket
       0600; macOS per-user 0700 dir fallback). Stale-socket detection, single
       instance lock. Tests where the platform allows.

@@ -7,6 +7,7 @@ pub mod agent;
 pub mod crypto;
 pub mod error;
 pub mod password;
+pub mod protocol;
 pub mod store;
 pub mod terminal;
 pub mod timestamp;
