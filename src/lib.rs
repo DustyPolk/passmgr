@@ -4,6 +4,8 @@
 //! See `FORMAT.md` for the on-disk layout.
 
 pub mod agent;
+#[cfg(unix)]
+pub mod client;
 pub mod crypto;
 #[cfg(unix)]
 pub mod daemon;

@@ -120,7 +120,7 @@ come first.
       malformed/oversized messages are rejected without a crash, a wrong key
       does not start, a second instance is refused, `run` is refused for now,
       and the secret never appears in socket bytes or daemon stderr.
-- [ ] **2.4b `pm unlock` / `pm lock` CLI.** `unlock` is human-only (TTY on stdin
+- [x] **2.4b `pm unlock` / `pm lock` CLI.** `unlock` is human-only (TTY on stdin
       and stdout, refused in agent context with exit 5), prompts once, derives
       and verifies the key, spawns `pmd` detached with the key over stdin, waits
       for readiness, then exits. `lock` sends the lock request and reports.

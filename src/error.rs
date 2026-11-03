@@ -39,6 +39,10 @@ pub enum Error {
     ServiceNotFound(String),
     /// No credential matches the given `pm://` reference. Maps to exit code 3.
     EntryNotFound(String),
+    /// The unlock daemon could not be reached, exited during startup, or
+    /// answered an error. The detail is user-facing and never contains secret
+    /// material. Maps to exit code 1.
+    Daemon(String),
     InvalidInput(String),
 }
 
@@ -57,9 +61,11 @@ impl Error {
             | Self::UnsupportedFormat(_)
             | Self::MalformedVault(_) => EXIT_MALFORMED_VAULT,
             Self::InvalidInput(_) => EXIT_USAGE,
-            // Duplicate entries, I/O failures and crypto failures (RNG or
-            // encryption setup) are plain runtime failures.
-            Self::Io(_) | Self::Crypto(_) | Self::DuplicateService(_) => EXIT_FAILURE,
+            // Duplicate entries, I/O failures, crypto failures (RNG or
+            // encryption setup) and daemon failures are plain runtime errors.
+            Self::Io(_) | Self::Crypto(_) | Self::DuplicateService(_) | Self::Daemon(_) => {
+                EXIT_FAILURE
+            }
         }
     }
 }
@@ -98,6 +104,7 @@ impl fmt::Display for Error {
             Self::EntryNotFound(reference) => {
                 write!(f, "no credential found for reference '{reference}'")
             }
+            Self::Daemon(detail) => f.write_str(detail),
             Self::InvalidInput(detail) => f.write_str(detail),
         }
     }
@@ -138,6 +145,7 @@ mod tests {
             (Error::InvalidInput("x".into()), EXIT_USAGE),
             (Error::DuplicateService("svc".into()), EXIT_FAILURE),
             (Error::Crypto("x".into()), EXIT_FAILURE),
+            (Error::Daemon("x".into()), EXIT_FAILURE),
             (Error::Io(std::io::Error::other("x")), EXIT_FAILURE),
         ];
         for (error, expected) in cases {

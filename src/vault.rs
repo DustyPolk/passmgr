@@ -141,7 +141,11 @@ impl Vault {
     }
 }
 
-fn read_container(path: &Path) -> Result<Vec<u8>> {
+/// Read and validate the encrypted container at `path`.
+///
+/// `unlock` needs the bytes (not the decrypted vault) to derive the key it
+/// hands to the daemon; every check here is format-independent.
+pub fn read_container(path: &Path) -> Result<Vec<u8>> {
     let metadata = match fs::metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {

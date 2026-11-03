@@ -68,6 +68,17 @@ Commands:
                              Metadata only, no password. --json prints the
                              entry object directly.
   generate [options]         Generate a secure random password.
+  unlock                     Derive the vault key and start the unlock daemon.
+                             Human use only: stdin and stdout must both be a
+                             terminal and no agent environment marker may be
+                             set, otherwise the command is refused with exit
+                             code 5. The master password is prompted once;
+                             the derived key reaches the daemon through a
+                             pipe, never through argv or this process's
+                             output.
+  lock                       Ask the unlock daemon to wipe its key and stop.
+                             Requires no terminal: it only shuts the daemon
+                             down, so an agent may use it.
   help                       Show this help.
   version                    Show version information.
 
@@ -99,6 +110,8 @@ Examples:
   passmgr list --tag prod
   passmgr list --json
   passmgr show pm://0123456789abcdef0123456789abcdef
+  passmgr unlock
+  passmgr lock
   passmgr --db ~/.secrets/work.dat list
 
 Notes:
@@ -126,6 +139,11 @@ Notes:
     input, 3 not found, 4 wrong master password, 5 refused (for example
     'get --reveal' without a terminal, in an agent context, or with --agent),
     6 malformed, truncated or unsupported vault file.
+  - 'unlock' starts a per-user background daemon that keeps the vault key in
+    memory, so later commands do not prompt again. The daemon listens on a
+    socket inside $XDG_RUNTIME_DIR/passmgr that only the owning user can
+    connect to, and it has no request that returns plaintext. It stops on
+    'lock' or on SIGTERM/SIGINT.
   - Vaults are encrypted with Argon2id and AES-256-GCM.
   - The legacy C vault format is not readable; this version uses a new format.
 "#;
@@ -175,6 +193,8 @@ fn run() -> Result<(), CliError> {
         Command::Edit(options) => command_edit(options, &path)?,
         Command::List { json, tags } => command_list(json, &tags, &path)?,
         Command::Show { reference, json } => command_show(&reference, json, &path)?,
+        Command::Unlock => command_unlock(agent_mode, &path)?,
+        Command::Lock => command_lock()?,
     }
     Ok(())
 }
@@ -196,6 +216,8 @@ enum Command {
     List { json: bool, tags: Vec<String> },
     Show { reference: String, json: bool },
     Generate(GenerateOptions),
+    Unlock,
+    Lock,
     Help,
     Version,
 }
@@ -332,6 +354,14 @@ fn parse_command(command: OsString, rest: Vec<OsString>) -> Result<Command, Stri
         "version" => {
             require_no_arguments("version", &rest)?;
             Ok(Command::Version)
+        }
+        "unlock" => {
+            require_no_arguments("unlock", &rest)?;
+            Ok(Command::Unlock)
+        }
+        "lock" => {
+            require_no_arguments("lock", &rest)?;
+            Ok(Command::Lock)
         }
         other => Err(format!("unknown command '{other}' (try 'passmgr --help')")),
     }
@@ -951,6 +981,66 @@ fn command_show(reference: &str, json: bool, path: &Path) -> Result<(), Error> {
     }
 }
 
+#[cfg(not(unix))]
+const DAEMON_UNSUPPORTED: &str = "the unlock daemon is supported on Unix systems only";
+
+/// `passmgr unlock`: derive the key at a human terminal and start `pmd`.
+#[cfg(unix)]
+fn command_unlock(agent_mode: bool, path: &Path) -> Result<(), Error> {
+    // Starting the daemon is where a session begins, so it must be the
+    // human's decision. Checked before any prompt: a refusal must not cost a
+    // master-password prompt, and no environment variable can override it.
+    agent::check_human(agent_mode)
+        .map_err(|refusal| Error::Refused(refusal.message_for("start the unlock daemon")))?;
+    warn_insecure(path)?;
+
+    let runtime = passmgr::socket::RuntimePaths::resolve();
+    match passmgr::socket::connect_at(&runtime) {
+        Ok(_) => {
+            return Err(Error::Daemon(
+                "an unlock daemon is already running; run 'passmgr lock' first".to_owned(),
+            ));
+        }
+        Err(passmgr::socket::SocketError::NotRunning) => {}
+        Err(error) => return Err(Error::Daemon(error.to_string())),
+    }
+
+    let container = vault::read_container(path)?;
+    let master = prompt_master(false)?;
+    // Derive and authenticate in one step. A wrong password fails here, in
+    // this short-lived process, before any daemon exists to hold a key.
+    let key = passmgr::crypto::unlock_key(&container, &master)?;
+    drop(master);
+    drop(container);
+
+    let pid = passmgr::client::spawn_daemon(path, &runtime, &key)?;
+    drop(key);
+    stdout_write(format_args!(
+        "Vault unlocked. The unlock daemon is running (pid {pid}).\n\
+         Run 'passmgr lock' to stop it.\n"
+    ))
+}
+
+/// `passmgr lock`: ask the daemon to wipe its key and stop.
+#[cfg(unix)]
+fn command_lock() -> Result<(), Error> {
+    let runtime = passmgr::socket::RuntimePaths::resolve();
+    passmgr::client::lock(&runtime)?;
+    stdout_write(format_args!(
+        "The unlock daemon has wiped its key and stopped.\n"
+    ))
+}
+
+#[cfg(not(unix))]
+fn command_unlock(_agent_mode: bool, _path: &Path) -> Result<(), Error> {
+    Err(Error::Daemon(DAEMON_UNSUPPORTED.to_owned()))
+}
+
+#[cfg(not(unix))]
+fn command_lock() -> Result<(), Error> {
+    Err(Error::Daemon(DAEMON_UNSUPPORTED.to_owned()))
+}
+
 fn unlock(path: &Path) -> Result<(Vault, Zeroizing<String>), Error> {
     warn_insecure(path)?;
     let master = prompt_master(false)?;
@@ -1244,6 +1334,10 @@ mod tests {
         assert!(matches!(parse(&["add", "--help"]).unwrap(), Command::Help));
         assert!(matches!(parse(&["get", "--help"]).unwrap(), Command::Help));
         assert!(matches!(parse(&["--version"]).unwrap(), Command::Version));
+        assert!(matches!(parse(&["unlock"]).unwrap(), Command::Unlock));
+        assert!(matches!(parse(&["lock"]).unwrap(), Command::Lock));
+        assert!(parse(&["unlock", "extra"]).is_err());
+        assert!(parse(&["lock", "extra"]).is_err());
         assert!(parse(&["unknown"]).is_err());
         assert!(parse(&[]).is_err());
     }

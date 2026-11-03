@@ -73,20 +73,32 @@ pub enum RevealRefusal {
 }
 
 impl RevealRefusal {
-    /// Human-readable refusal reason. Never contains secret material.
+    /// Human-readable refusal reason for a plaintext reveal.
+    ///
+    /// Never contains secret material.
     pub fn message(self) -> String {
+        self.message_for("reveal a secret")
+    }
+
+    /// Human-readable refusal reason for any human-only `action` (for example
+    /// `"reveal a secret"` or `"start the unlock daemon"`).
+    ///
+    /// Never contains secret material.
+    pub fn message_for(self, action: &str) -> String {
         match self {
             Self::AgentContext(source) => format!(
-                "refusing to reveal a secret in an agent context ({}); \
-                 plaintext reveal is reserved for a human at a terminal and has no bypass",
+                "refusing to {action} in an agent context ({}); \
+                 this is reserved for a human at a terminal and has no bypass",
                 source.describe()
             ),
-            Self::StdinNotTerminal => "refusing to reveal a secret: stdin is not a terminal; \
-                 plaintext reveal is reserved for a human at a terminal and has no bypass"
-                .to_owned(),
-            Self::StdoutNotTerminal => "refusing to reveal a secret: stdout is not a terminal; \
-                 plaintext reveal is reserved for a human at a terminal and has no bypass"
-                .to_owned(),
+            Self::StdinNotTerminal => format!(
+                "refusing to {action}: stdin is not a terminal; \
+                 this is reserved for a human at a terminal and has no bypass"
+            ),
+            Self::StdoutNotTerminal => format!(
+                "refusing to {action}: stdout is not a terminal; \
+                 this is reserved for a human at a terminal and has no bypass"
+            ),
         }
     }
 }
@@ -127,7 +139,11 @@ pub fn agent_source(agent_flag: bool) -> Option<AgentSource> {
 }
 
 /// Check the real process: terminals, environment and the `--agent` flag.
-pub fn check_reveal(agent_flag: bool) -> Result<(), RevealRefusal> {
+///
+/// This is the shared gate for every human-only operation (plaintext reveal,
+/// starting the unlock daemon). It cannot be weakened by a flag: `--agent`
+/// only adds refusal.
+pub fn check_human(agent_flag: bool) -> Result<(), RevealRefusal> {
     match reveal_refusal(
         io::stdin().is_terminal(),
         io::stdout().is_terminal(),
@@ -136,6 +152,11 @@ pub fn check_reveal(agent_flag: bool) -> Result<(), RevealRefusal> {
         Some(refusal) => Err(refusal),
         None => Ok(()),
     }
+}
+
+/// Check the real process for a plaintext reveal.
+pub fn check_reveal(agent_flag: bool) -> Result<(), RevealRefusal> {
+    check_human(agent_flag)
 }
 
 #[cfg(test)]
@@ -253,5 +274,11 @@ mod tests {
             assert!(message.contains("no bypass"));
             assert!(!message.contains("--force"));
         }
+
+        // A non-reveal human-only action names itself in the refusal.
+        let unlock = RevealRefusal::StdinNotTerminal.message_for("start the unlock daemon");
+        assert!(unlock.contains("start the unlock daemon"));
+        assert!(unlock.contains("stdin is not a terminal"));
+        assert!(unlock.contains("no bypass"));
     }
 }

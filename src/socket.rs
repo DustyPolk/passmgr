@@ -66,6 +66,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Subdirectory of `XDG_RUNTIME_DIR` that holds the socket, lock and session
 /// token. Created with mode 0700.
@@ -522,10 +524,21 @@ pub fn connect_at(paths: &RuntimePaths) -> Result<UnixStream, SocketError> {
     }
 }
 
+/// How long to keep retrying a lock that looks held.
+///
+/// `flock` is released when the last descriptor for the file closes, but a
+/// close performed on another thread can be deferred to that thread's task
+/// work. For a few milliseconds afterwards the lock still looks held even
+/// though its owner has gone. Waiting that window out avoids reporting a
+/// `AlreadyRunning` for a daemon that is already exiting; a live daemon holds
+/// the lock for its whole lifetime, so it still wins.
+const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+
 /// Take a non-blocking exclusive `flock` on `path`.
 ///
 /// The lock is released when the returned `File` is dropped (or the process
-/// exits). A second daemon gets `EWOULDBLOCK`, which maps to
+/// exits). A lock that stays held for [`LOCK_ACQUIRE_TIMEOUT`] maps to
 /// [`SocketError::AlreadyRunning`].
 fn acquire_lock(path: &Path) -> Result<File, SocketError> {
     let file = OpenOptions::new()
@@ -542,16 +555,22 @@ fn acquire_lock(path: &Path) -> Result<File, SocketError> {
         .map_err(|err| SocketError::io(path, err))?;
 
     // SAFETY: `as_raw_fd` returns a valid descriptor owned by `file`, which
-    // outlives the call.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
+    // outlives each call.
+    let deadline = Instant::now() + LOCK_ACQUIRE_TIMEOUT;
+    loop {
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc == 0 {
+            return Ok(file);
+        }
         let err = io::Error::last_os_error();
-        if err.kind() == io::ErrorKind::WouldBlock {
+        if err.kind() != io::ErrorKind::WouldBlock {
+            return Err(SocketError::io(path, err));
+        }
+        if Instant::now() >= deadline {
             return Err(SocketError::AlreadyRunning);
         }
-        return Err(SocketError::io(path, err));
+        thread::sleep(LOCK_RETRY_INTERVAL);
     }
-    Ok(file)
 }
 
 /// Remove a socket left behind by a crashed daemon, but only after proving
@@ -841,6 +860,33 @@ mod tests {
         ));
         drop(held);
         assert!(acquire_lock(&lock_path).is_ok());
+    }
+
+    #[test]
+    fn a_lock_released_by_an_exiting_holder_is_acquired() {
+        // A daemon that has just exited may take a few milliseconds to release
+        // its `flock` (the descriptor can be closed on another thread, which
+        // defers the final fput). Acquiring must wait that window out rather
+        // than report a daemon that is no longer there.
+        let temp = tempfile::tempdir().unwrap();
+        let lock_path = temp.path().join("pmd.lock");
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let holder_path = lock_path.clone();
+        let holder = thread::spawn(move || {
+            let held = acquire_lock(&holder_path).unwrap();
+            ready_tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(60));
+            drop(held);
+        });
+
+        ready_rx.recv().unwrap();
+        let started = Instant::now();
+        assert!(
+            acquire_lock(&lock_path).is_ok(),
+            "a lock released shortly after the attempt must be acquired"
+        );
+        assert!(started.elapsed() < LOCK_ACQUIRE_TIMEOUT);
+        holder.join().unwrap();
     }
 
     fn current_gid() -> u32 {

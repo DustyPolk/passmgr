@@ -1,3 +1,68 @@
+## 2026-11-02 — `pm unlock` / `pm lock` CLI (TODO 2.4b)
+
+- New `src/client.rs` (`#[cfg(unix)]`): the client half of the daemon protocol
+  — `ping`, `lock`, `spawn_daemon` and a generic `request`. Frame writes and
+  reads are bounded (`MAX_MESSAGE_BYTES` + prefix + 1 byte via `take`), every
+  connection has a 5 s timeout, and readiness polling is bounded at 10 s.
+  `spawn_daemon` finds `pmd` next to the current executable, passes `--vault`
+  and `--runtime-dir` (never the key), writes exactly the 32-byte key into
+  `pmd`'s stdin and then closes it. Its stderr goes to an anonymous,
+  immediately unlinked `tempfile` (0600): the daemon must not inherit the
+  caller's stderr pipe, or `Command::output()` would block forever once the
+  caller exits and later daemon writes would hit `EPIPE`. Startup failures
+  report the exit status plus a bounded (8 KiB) excerpt of that log.
+  After a successful ping the child is re-checked after one poll interval, so
+  a pre-existing daemon answering the ping cannot mask our child dying on the
+  instance lock.
+- `pm unlock`: refuses in agent context with exit 5 **before** prompting (new
+  `agent::check_human`, shared with `get --reveal`; the message is produced by
+  `RevealRefusal::message_for(action)` so both call sites read naturally).
+  Then: pre-check the socket (a live daemon means "run 'passmgr lock' first",
+  exit 1), read the vault container, prompt once, derive + **authenticate**
+  the key with `crypto::unlock_key`, drop the password and the container, then
+  hand the key to `pmd`. A wrong password exits with the existing wrong
+  password code and starts nothing. Prints the pid and a hint to stdout.
+- `pm lock`: needs no TTY (it can only stop the daemon, never reveal
+  anything), sends `lock`, and reports that the key was wiped. Without a
+  daemon it exits 1 with the existing `SocketError::NotRunning` message.
+- Both commands are Unix-only, with non-Unix stubs, matching `pmd`.
+  `parse_command` rejects extra arguments; `--help` documents both.
+- Fixed an intermittent, real single-instance race found while stress-running
+  the new tests: `acquire_lock` could see `EWOULDBLOCK` for a few
+  milliseconds after the previous holder's `DaemonSocket` was dropped on
+  another thread (the final `fput` of a descriptor closed by a non-owning
+  thread is deferred to that thread's task work). The instance lock now
+  retries every 5 ms for up to 250 ms before reporting
+  `SocketError::AlreadyRunning`. The lock is still exclusive — a live daemon
+  holds it for its whole lifetime — so this only stops a just-exiting daemon
+  from being reported as running, which would otherwise also hit `unlock`
+  immediately after `lock`. Two tests pin it down: a live holder is still
+  rejected, and a holder that releases within the grace window is acquired.
+- Tests: 6 new lib tests in `src/client.rs` (round-trip, error passthrough,
+  clear missing-daemon error, non-JSON/empty/oversized-prefix responses
+  rejected without a panic, short key refused before spawning, startup
+  failure reports status and log), 1 new `src/socket.rs` test, and
+  `tests/unlock.rs` (6 e2e tests, Linux pty where a TTY is required): non-TTY
+  refusal (exit 5, no prompt), agent-marker refusal on a pty, unlock → ping →
+  lock round-trip with the secret absent from all output and from
+  `pmd`'s argv and `/proc/<pid>/environ`, duplicate unlock refused without a
+  prompt, wrong password exits 4 and starts no daemon, `lock` without a
+  daemon. The e2e test writes the password to the pty before the child
+  disables echo, so the pty echo can contain the password; that is a harness
+  artifact, not a product leak (nothing else ever writes it).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  `cargo test` pass (111 lib, 19 bin, 27 CLI, 6 daemon, 6 unlock; the CLI
+  suite is Argon2-bound, ~150 s). `cargo audit` is not installed here; run it
+  where available.
+- Decisions recorded: `Error::Daemon(String)` (exit 1) carries only daemon
+  transport failures; unlock deliberately does **not** re-prompt when a
+  daemon is already running (it tells the human to lock first) so a second
+  unlock can never silently replace a running daemon's key.
+- Next: 2.4c idle timeout, then 2.5 session token (the socket is currently
+  authorized by peer uid only, so any same-user process may `ping`/`lock` —
+  acceptable for now: no request returns plaintext and `lock` is a DoS at
+  worst).
+
 ## 2026-11-02 — Unlock daemon core and `pmd` (TODO 2.4a)
 
 - Split the original 2.4 into **2.4a** (this entry), **2.4b** (`pm unlock` /
