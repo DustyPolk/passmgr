@@ -534,7 +534,9 @@ fn a_bad_presence_proof_is_denied_and_the_daemon_keeps_serving() {
         Response::Error(ResponseError::Denied)
     );
 
-    // A proof for one digest cannot approve a different one.
+    // A proof computed over one digest does not verify for another: the MAC
+    // covers both. (`Proven` then records the verified digest; the write that
+    // spends it is TODO 3.4.)
     let nonce = challenge(&socket, &fixture.token);
     let proof = Proof::compute(fixture.key.as_slice(), &nonce, &digest).expect("compute proof");
     assert_eq!(

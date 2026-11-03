@@ -209,7 +209,10 @@ pub fn challenge(paths: &RuntimePaths, token: &SessionToken) -> Result<Challenge
 ///
 /// The daemon spends the nonce on every attempt, so a refused proof (wrong
 /// key, altered digest, stale nonce) is final for that challenge: ask for a
-/// new one rather than retrying. The detail never includes the proof.
+/// new one rather than retrying. On success the daemon records the digest as
+/// a one-shot approval; this call does not authorize anything, and the write
+/// for exactly that digest must spend the approval within 60 seconds. The
+/// detail never includes the proof.
 pub fn prove(
     paths: &RuntimePaths,
     token: &SessionToken,

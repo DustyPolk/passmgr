@@ -22,9 +22,12 @@
 //!
 //! `challenge`/`prove` implement the human-presence proof (TODO 3.3, see
 //! [`crate::presence`]): the daemon issues a single-use 60-second nonce and
-//! accepts a key-derived MAC over it once. Nothing here can mint or widen a
-//! grant on its own; the daemon only ever *checks* a proof, it never computes
-//! one for a caller.
+//! accepts a key-derived MAC over it once. A verified proof records the
+//! digest it covered as a one-shot approval ([`presence::Approvals`]); it
+//! grants nothing by itself, because a later write must present that same
+//! digest and spends it once. Nothing here can mint or widen a grant on its
+//! own; the daemon only ever *checks* a proof, it never computes one for a
+//! caller.
 //!
 //! # Lifetime
 //!
@@ -414,6 +417,10 @@ pub fn run(
     // useful for the lifetime of this process, and persisting one would add
     // a file to protect for no security benefit.
     let mut challenges = presence::Challenges::new();
+    // Digests a human proved but no write has consumed yet. Kept here (not
+    // per connection) because the proof arrives on the human's connection and
+    // the write that spends it arrives on another one.
+    let mut approvals = presence::Approvals::new();
 
     let mut last_activity = Instant::now();
     // A `lock` connection whose answer is deferred until the key is gone.
@@ -452,7 +459,7 @@ pub fn run(
                 Ok((stream, _peer)) => {
                     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
                     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
-                    match handle_connection(stream, token, key, &mut challenges) {
+                    match handle_connection(stream, token, key, &mut challenges, &mut approvals) {
                         // `lock`: stop accepting, but answer only after the
                         // workers are joined and the key is zeroized below.
                         Handled::Locked(stream) => {
@@ -574,6 +581,7 @@ fn handle_connection(
     token: &SessionToken,
     key: &LockedKey,
     challenges: &mut presence::Challenges,
+    approvals: &mut presence::Approvals,
 ) -> Handled {
     let authorized = match read_request(&mut stream) {
         Ok(authorized) => authorized,
@@ -618,6 +626,10 @@ fn handle_connection(
                     .proof
                     .verify(key.as_slice(), &prove.nonce, &prove.digest)
             {
+                // Remember exactly what the human approved. `proven` alone
+                // authorizes nothing: the write for this request must come
+                // back with the same digest and spends the approval once.
+                approvals.record(prove.digest, Instant::now());
                 let _ = write_response(&mut stream, &Response::Proven);
                 Handled::Served
             } else {
@@ -854,5 +866,82 @@ mod tests {
         for bad in ["0", "", "-1", "1.5", "15m", " 60"] {
             assert!(parse_idle_timeout(bad).is_err(), "'{bad}' must be rejected");
         }
+    }
+
+    /// Serve one `prove` over a socket pair and return the daemon's answer.
+    fn prove_round_trip(
+        token: &SessionToken,
+        key: &LockedKey,
+        digest: presence::RequestDigest,
+        challenges: &mut presence::Challenges,
+        approvals: &mut presence::Approvals,
+    ) -> Response {
+        let nonce = challenges.issue(Instant::now()).expect("issue");
+        let proof = presence::Proof::compute(key.as_slice(), &nonce, &digest).expect("compute");
+        let frame = protocol::encode(
+            token,
+            &Request::Prove(protocol::ProveRequest {
+                nonce,
+                digest,
+                proof,
+            }),
+        )
+        .expect("encode");
+        let (server, mut client) = UnixStream::pair().expect("socket pair");
+        client.write_all(&frame).expect("send request");
+        assert!(matches!(
+            handle_connection(server, token, key, challenges, approvals),
+            Handled::Served
+        ));
+
+        let mut prefix = [0u8; 4];
+        client.read_exact(&mut prefix).expect("read length");
+        let length = u32::from_be_bytes(prefix) as usize;
+        let mut frame = vec![0u8; 4 + length];
+        frame[..4].copy_from_slice(&prefix);
+        client.read_exact(&mut frame[4..]).expect("read body");
+        protocol::decode_response(&frame).expect("decode response")
+    }
+
+    /// `Proven` records the digest that was actually proven, and only that
+    /// one: approving A can never authorize a write for B, and an approval is
+    /// spent by its first consumer. This is the daemon half of TODO R.15; the
+    /// write that spends an approval arrives with TODO 3.4.
+    #[test]
+    fn a_verified_proof_records_exactly_the_digest_it_covered() {
+        let key = LockedKey::new(Zeroizing::new(vec![0x5Au8; KEY_LEN])).expect("key");
+        let token = SessionToken::generate().expect("token");
+        let mut challenges = presence::Challenges::new();
+        let mut approvals = presence::Approvals::new();
+        let approved = presence::RequestDigest::new([0xA1; 32]);
+        let other = presence::RequestDigest::new([0xB2; 32]);
+
+        assert_eq!(
+            prove_round_trip(&token, &key, approved, &mut challenges, &mut approvals),
+            Response::Proven
+        );
+        assert_eq!(approvals.pending(), 1, "exactly one digest was recorded");
+        assert_eq!(
+            approvals.take(&other, Instant::now()),
+            Err(presence::PresenceError::NotApproved),
+            "approving A must not authorize B"
+        );
+        assert_eq!(approvals.take(&approved, Instant::now()), Ok(()));
+        assert_eq!(
+            approvals.take(&approved, Instant::now()),
+            Err(presence::PresenceError::NotApproved),
+            "an approval authorizes exactly one write"
+        );
+
+        // A later proof records the digest it covered, not the old one.
+        assert_eq!(
+            prove_round_trip(&token, &key, other, &mut challenges, &mut approvals),
+            Response::Proven
+        );
+        assert_eq!(
+            approvals.take(&approved, Instant::now()),
+            Err(presence::PresenceError::NotApproved)
+        );
+        assert_eq!(approvals.take(&other, Instant::now()), Ok(()));
     }
 }

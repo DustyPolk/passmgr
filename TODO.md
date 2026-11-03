@@ -11,29 +11,25 @@ Rules that apply to every item:
 
 ## Phase R — review findings (fix first)
 
-- [ ] **R.15 `prove` answers "approved" without recording what was approved,
-      and the test that claims digest binding only re-tests the HMAC.**
-      `src/daemon.rs:607-627` spends the nonce, verifies
-      `HMAC(key, DOMAIN||nonce||digest)` over the client-supplied
-      `ProveRequest.digest`, returns `Response::Proven` (a unit variant,
-      `src/protocol/response.rs:31`) and keeps no record of that digest. The
-      daemon therefore learns only "a key holder MAC'd these 32 bytes"; it
-      never learns that a human approved the request it is about to perform.
-      `tests/daemon.rs:515-552` is named "A proof for one digest cannot
-      approve a different one" but computes the proof over digest `0x11` and
-      presents it with digest `0x12` — a plain MAC mismatch; it would stay
-      green if one `Proven` authorized any later write. Failure (latent: 3.4
-      owns the write): the agent files request R1, the human approves digest
-      D1, and the agent then submits R2 with digest D2; a daemon that treats
-      any recent `Proven` as approval mints R2. `PROGRESS.md` (3.3 entry)
-      already notes the separate-`prove` shape cannot authorize a write, but
-      nothing in this range can bind a digest to an approval. Fix: either
-      fold the proof into the write request so one request verifies and
-      writes, or store `(nonce, digest)` as a spent approval and require the
-      write to present the same digest; drop the misleading test comment.
-      Test: complete `prove` for digest A, submit a create whose canonical
-      digest is B, and assert it is refused and writes nothing; then assert
-      A-then-A succeeds exactly once.
+- [x] **R.15a `prove` answered "approved" without recording what was
+      approved.**
+      Split from R.15. `src/daemon.rs` now stores the verified digest as a
+      one-shot approval (`presence::Approvals`) before answering `proven`, so
+      the daemon learns exactly which request a human approved, not merely
+      that some key holder MAC'd 32 bytes. The store is in memory, expires
+      after 60 s, is capped at 16 (the oldest makes room, because only a key
+      holder can add one), and `take` consumes exactly one matching digest.
+      Done: `Approvals::{record,take}` in `src/presence.rs`, wired into
+      `handle_connection`; the misleading "cannot approve a different one"
+      comment in `tests/daemon.rs` now says it is a MAC mismatch; `MCP.md`,
+      `DECISIONS.md` and the protocol/client docs describe the approval.
+- [!] **R.15b The write must spend the approval exactly once.** Blocked on
+      TODO 3.4/4.9, which own the first grant write. Test: complete `prove`
+      for digest A, submit a create whose canonical digest is B, and assert it
+      is refused and writes nothing; then assert A-then-A succeeds exactly
+      once. The daemon half of the binding is already proved by
+      `a_verified_proof_records_exactly_the_digest_it_covered`, so this item
+      is the write path's obligation, not a new mechanism.
 
 - [ ] **R.16 Any session-token holder can occupy all 16 challenge slots and
       block human approval.**
@@ -151,9 +147,14 @@ approval flow", "Audit"). Follow it.
       (repeatable), `--command PATH` (repeatable; resolved to a canonical
       path at creation), `--expires 1h|30m|7d` (required, max 30 d),
       `--max-uses N`, `--allow-interpreter`. The token is written **only** to
-      `--out FILE` (created 0600 with `O_EXCL`), never to stdout. Tests: the
-      token is absent from stdout/stderr, the file mode is 0600, interpreter
-      commands are refused without the flag.
+      `--out FILE` (created 0600 with `O_EXCL`), never to stdout. The create
+      request (or, if the CLI writes the vault itself, the approval it mints)
+      must spend the digest-bound approval with `presence::Approvals::take`
+      for the canonical digest of exactly the fields it writes, before the
+      write; a digest mismatch writes nothing and is refused (TODO R.15b).
+      Tests: the token is absent from stdout/stderr, the file mode is 0600,
+      interpreter commands are refused without the flag, and R.15b's
+      A-then-B / A-then-A-exactly-once cases.
 - [ ] **3.5 `pm grant list|show|revoke` (+ `--json`).** list/show print
       metadata only, never tokens or hashes. revoke needs no password and takes
       effect on the next request. `revoke --all` exists. Tests for each.

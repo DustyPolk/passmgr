@@ -158,7 +158,11 @@ pub enum Request {
     /// Issue a single-use nonce for a human-presence proof. Answer: [`Response::Challenge`](crate::protocol::Response::Challenge).
     Challenge,
     /// Present a proof of vault-key knowledge for a challenge.
-    /// Answer: `proven`, or `denied` for every bad nonce or MAC.
+    ///
+    /// Answer: `proven` only after the daemon has recorded `digest` as a
+    /// one-shot approval, or `denied` for every bad nonce or MAC. `proven`
+    /// authorizes nothing by itself; the write for that request must present
+    /// the same digest and consumes the approval exactly once.
     Prove(ProveRequest),
 }
 

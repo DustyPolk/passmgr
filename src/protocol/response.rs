@@ -27,7 +27,9 @@ pub enum Response {
     Locked,
     /// A fresh, single-use nonce for a human-presence proof.
     Challenge(ChallengeNonce),
-    /// The presented proof was accepted and its nonce spent.
+    /// The presented proof was accepted and its nonce spent. The digest it
+    /// covered is now a one-shot approval: the write for exactly that request
+    /// may proceed once, and nothing else can use the answer as consent.
     Proven,
     /// The request was rejected. The error is a fixed code, never echo of the
     /// request or of vault data.

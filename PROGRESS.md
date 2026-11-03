@@ -1,3 +1,39 @@
+## 2026-11-03 — Record the digest a presence proof approved (TODO R.15a)
+
+- Split R.15: the daemon half is now fixed, the write half is R.15b, blocked
+  on the first grant write (3.4/4.9).
+- `src/presence.rs`: new `Approvals` store. `record(digest, now)` is called
+  only after a proof verifies; `take(digest, now)` consumes exactly one
+  matching digest and returns `NotApproved` for anything else without
+  disturbing the waiting approval. Entries expire after the existing
+  `CHALLENGE_LIFETIME` (60 s), are capped at `MAX_PENDING_APPROVALS` (16) and
+  the **oldest** makes room, because only a key holder can add one (unlike
+  the challenge pool R.16 has to protect). New `PresenceError::NotApproved`.
+- `src/daemon.rs`: `run` owns the store beside `Challenges`; `handle_connection`
+  records `prove.digest` before answering `proven`. So `Proven` now means "a
+  human approved this exact digest", and nothing else can consume it.
+- Docs: protocol `Prove`/`Response::Proven`, `client::prove`, `MCP.md`
+  approval flow, and the `DECISIONS.md` presence list now say that `proven`
+  authorizes nothing on its own and that the write must spend the approval
+  once. `TODO.md` 3.4 gained that obligation and R.15b's test.
+- Tests: `an_approval_is_bound_to_its_digest_and_spent_exactly_once` (A then
+  B refused, A then A exactly once), `an_approval_expires_after_sixty_seconds`,
+  `approvals_are_bounded_and_the_oldest_makes_room`, and the daemon-level
+  `a_verified_proof_records_exactly_the_digest_it_covered` (real prove frame
+  over a socket pair; inspects the store the daemon wrote). The old
+  "cannot approve a different one" comment in `tests/daemon.rs` now says it
+  is a MAC mismatch.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  the full `cargo test` are green (206 lib tests). `cargo audit` is not
+  installed; skipped.
+- **Next iteration must know:** R.16 (challenge-pool starvation) is next.
+  The approval store is deliberately global to the daemon, not per
+  connection, because the proof and the write arrive on different sockets;
+  do not move it into `handle_connection`. R.15b must call
+  `Approvals::take` *before* any vault write and only proceed on `Ok`.
+  `src/daemon.rs` is now ~950 lines and `src/presence.rs` ~715, including
+  tests: split before adding much more.
+
 ## 2026-11-03 — Review of 92448eda..a51e85fe
 
 - Findings: 4 — authorization/approval binding 1 (R.15), availability of the

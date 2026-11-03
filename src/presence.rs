@@ -16,7 +16,10 @@
 //!   useless afterwards, so the MAC can travel over the socket.
 //! - `digest` commits the proof to the exact request being approved (the
 //!   grant fields, in TODO 3.4), so a proof harvested for one approval cannot
-//!   authorize a different one.
+//!   authorize a different one. A successful verification stores that digest
+//!   as a one-shot approval ([`Approvals`]); the request that actually writes
+//!   must consume the same digest, so "a human proved something" can never be
+//!   read as "whatever you ask next is approved".
 //! - The domain prefix keeps this MAC from doubling as any other MAC computed
 //!   with the vault key.
 //!
@@ -218,12 +221,13 @@ impl fmt::Debug for Proof {
     }
 }
 
-/// Why a challenge could not be issued or accepted.
+/// Why a challenge or approval could not be issued or accepted.
 ///
-/// The variants are for the daemon's own logging and tests. A client only ever
-/// sees one `denied` answer: distinguishing "unknown", "expired" and "wrong
-/// proof" would tell a peer probing the socket which part of its guess was
-/// right, and the human has no use for the difference.
+/// The variants are for the daemon's own logging, tests and the write request
+/// that consumes an approval. A client only ever sees one `denied` answer for
+/// a bad proof: distinguishing "unknown", "expired" and "wrong proof" would
+/// tell a peer probing the socket which part of its guess was right, and the
+/// human has no use for the difference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresenceError {
     /// No challenge with this nonce is outstanding (never issued or already
@@ -233,6 +237,9 @@ pub enum PresenceError {
     ExpiredChallenge,
     /// [`MAX_PENDING_CHALLENGES`] unexpired nonces are already outstanding.
     TooManyPending,
+    /// No unconsumed approval matches this digest (never approved, already
+    /// consumed by an earlier write, or expired).
+    NotApproved,
     /// The operating system's CSPRNG failed.
     Random(String),
     /// The HMAC implementation refused the key length (never for HMAC-SHA256).
@@ -245,6 +252,7 @@ impl fmt::Display for PresenceError {
             Self::UnknownChallenge => f.write_str("unknown or already used challenge"),
             Self::ExpiredChallenge => f.write_str("challenge has expired"),
             Self::TooManyPending => f.write_str("too many outstanding challenges"),
+            Self::NotApproved => f.write_str("no approval for this request"),
             Self::Random(detail) => write!(f, "could not generate a challenge: {detail}"),
             Self::UnusableKey => f.write_str("the key cannot be used for HMAC-SHA256"),
         }
@@ -321,6 +329,90 @@ impl Challenges {
     fn prune(&mut self, now: Instant) {
         self.pending
             .retain(|pending| now.saturating_duration_since(pending.issued) < CHALLENGE_LIFETIME);
+    }
+}
+
+/// Most digests a human may have approved but no write has consumed yet.
+///
+/// Bounds both memory and the window in which an unconsumed approval still
+/// authorizes its write. Only a caller that can compute a valid proof can add
+/// one, so this cap cannot be used to starve a human (unlike the challenge
+/// pool); when it is full the **oldest** approval is dropped, because the one
+/// a human just made is the interesting one.
+pub const MAX_PENDING_APPROVALS: usize = 16;
+
+/// Digests a human proved and a write must still consume.
+///
+/// A successful `prove` calls [`Self::record`]; it does **not** authorize
+/// anything by itself. The request that performs the write must call
+/// [`Self::take`] with the digest of exactly what it is about to do, and may
+/// proceed only on `Ok`. The entry is removed on that one success, so the same
+/// approval cannot authorize a second write, and a probe with a different
+/// digest leaves the human's real approval untouched.
+///
+/// Like [`Challenges`], this lives only in daemon memory: after a restart the
+/// client cannot get a proof accepted anyway, and persisting approvals would
+/// add a file to protect for no benefit.
+#[derive(Debug, Default)]
+pub struct Approvals {
+    pending: Vec<Approved>,
+}
+
+#[derive(Debug)]
+struct Approved {
+    digest: RequestDigest,
+    issued: Instant,
+}
+
+impl Approvals {
+    /// No outstanding approvals.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that a human proved `digest` at `now`.
+    ///
+    /// Expired entries are pruned first; if the store is then full the oldest
+    /// entry makes room. `now` is injected so expiry and eviction are testable
+    /// without sleeping.
+    pub fn record(&mut self, digest: RequestDigest, now: Instant) {
+        self.prune(now);
+        if self.pending.len() >= MAX_PENDING_APPROVALS {
+            self.pending.remove(0);
+        }
+        self.pending.push(Approved {
+            digest,
+            issued: now,
+        });
+    }
+
+    /// Consume the one-shot approval for exactly `digest`.
+    ///
+    /// `Ok` means a human approved this exact request within
+    /// [`CHALLENGE_LIFETIME`] and this call spent the approval. Any other
+    /// digest is [`PresenceError::NotApproved`] and does not disturb the
+    /// approval that is waiting; expired approvals are pruned either way.
+    pub fn take(&mut self, digest: &RequestDigest, now: Instant) -> Result<(), PresenceError> {
+        self.prune(now);
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|approved| approved.digest == *digest)
+        else {
+            return Err(PresenceError::NotApproved);
+        };
+        self.pending.remove(index);
+        Ok(())
+    }
+
+    /// Number of approvals still stored (including expired, unpruned ones).
+    pub fn pending(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn prune(&mut self, now: Instant) {
+        self.pending
+            .retain(|approved| now.saturating_duration_since(approved.issued) < CHALLENGE_LIFETIME);
     }
 }
 
@@ -556,5 +648,68 @@ mod tests {
         let digest = test_digest(32);
         assert!(format!("{nonce:?}").contains(&nonce.to_hex()));
         assert!(format!("{digest:?}").contains(&digest.to_hex()));
+    }
+
+    #[test]
+    fn an_approval_is_bound_to_its_digest_and_spent_exactly_once() {
+        let now = Instant::now();
+        let approved = test_digest(0);
+        let other = test_digest(64);
+        let mut approvals = Approvals::new();
+        approvals.record(approved, now);
+
+        // A different request is refused and does not consume the human's
+        // approval: the write for the approved digest still works.
+        assert_eq!(approvals.take(&other, now), Err(PresenceError::NotApproved));
+        assert_eq!(approvals.pending(), 1);
+        assert_eq!(approvals.take(&approved, now), Ok(()));
+        assert_eq!(approvals.pending(), 0);
+
+        // The same approval cannot authorize a second write.
+        assert_eq!(
+            approvals.take(&approved, now),
+            Err(PresenceError::NotApproved)
+        );
+    }
+
+    #[test]
+    fn an_approval_expires_after_sixty_seconds() {
+        let now = Instant::now();
+        let digest = test_digest(0);
+        let mut approvals = Approvals::new();
+
+        approvals.record(digest, now);
+        assert_eq!(
+            approvals.take(&digest, now + Duration::from_secs(59)),
+            Ok(())
+        );
+
+        approvals.record(digest, now);
+        assert_eq!(
+            approvals.take(&digest, now + CHALLENGE_LIFETIME),
+            Err(PresenceError::NotApproved)
+        );
+        assert_eq!(approvals.pending(), 0, "an expired approval is pruned");
+    }
+
+    #[test]
+    fn approvals_are_bounded_and_the_oldest_makes_room() {
+        let now = Instant::now();
+        let mut approvals = Approvals::new();
+        let oldest = test_digest(0);
+        approvals.record(oldest, now);
+        for index in 1..MAX_PENDING_APPROVALS {
+            approvals.record(test_digest(index as u8), now);
+        }
+        let newest = test_digest(MAX_PENDING_APPROVALS as u8);
+        approvals.record(newest, now);
+
+        assert_eq!(approvals.pending(), MAX_PENDING_APPROVALS);
+        assert_eq!(
+            approvals.take(&oldest, now),
+            Err(PresenceError::NotApproved),
+            "the oldest approval made room",
+        );
+        assert_eq!(approvals.take(&newest, now), Ok(()));
     }
 }

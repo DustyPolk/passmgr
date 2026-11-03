@@ -393,6 +393,15 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   - Every rejection is `denied`: unknown, expired and already-spent nonces
     answer identically to a wrong MAC, so the socket is not an oracle for
     which part of a guess was right.
+  - A verified proof records the digest it covered as a **one-shot approval**
+    (`presence::Approvals`, TODO R.15a): in memory, 60 s, at most 16, and the
+    oldest makes room because only a key holder can add one. `proven`
+    authorizes nothing by itself; the request that writes must call
+    `Approvals::take` with the digest of exactly what it is about to do and
+    may proceed only on `Ok`, which spends the approval once. Approved A can
+    therefore never authorize B, and a stale `Proven` cannot be read as
+    consent for a later request. The first consumer is the grant write (TODO
+    3.4/4.9, tracked as R.15b).
   - At most 16 unspent nonces are held (in memory, never persisted);
     requesting one when full answers `busy`. Expired nonces are pruned on the
     next issue, so the window is one minute.
