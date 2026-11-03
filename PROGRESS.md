@@ -1,3 +1,58 @@
+## 2026-11-03 — Review of a51e85f..388faab
+
+Six commits (R.15a, R.16, R.17, R.18, 3.4a, 3.4b) reviewed against
+`PROMPT.md`, `MCP.md`, `DECISIONS.md`, `FORMAT.md`, `SECURITY.md` and the
+whole surrounding code. **2 findings**, both in `TODO.md` Phase R:
+
+- Authorization/availability **1** (R.19): `Challenges::verify_and_consume`
+  uses `swap_remove`, so after any non-last consume the next full pool
+  evicts the newest nonce instead of the oldest, contrary to R.16 and every
+  document that describes it. Confirmed with a standalone `Vec` probe. No
+  privilege escalation; it lets a flood destroy a nonce with a proof in
+  flight. Also a test gap (the new test never consumes) and drift in
+  `MCP.md`, `DECISIONS.md` and the `daemon.rs` comment.
+- Maintainability **1** (R.20): `src/store.rs` 1,868 and `src/vault.rs`
+  1,271 lines (also `src/protocol/mod.rs` 1,317, `tests/cli.rs` 1,463);
+  R.14 split `grant.rs` but this range still added +83 and +128 lines to the
+  two largest ones.
+- Secret exposure **0**, unsafe input handling **0**, crypto misuse **0**.
+
+Judged fine -- do not redo:
+
+- `crypto::encrypt_with_key`: key length and plaintext cap checked, template
+  header decoded, template authenticated with `key` via `decrypt_with_key`
+  before its salt/params are reused (the plaintext is dropped at once),
+  fresh nonce, `ciphertext_len` recomputed, and `seal` rejects a length
+  mismatch; container assembly is shared with `encrypt`.
+- `Vault::save_with_key`: requires the write lock, refuses a read-only or
+  containerless vault, reuses `write_container` (0600 temp, `persist`, dir
+  fsync). Leaving `self.source` stale after a save is harmless (same salt,
+  lock held) and fails closed as `VaultChanged`.
+- `store::encode`: every grant goes through `Grant::check_stored` before it
+  is written, so R.17 holds; the payload is already `Zeroizing<Vec<u8>>`
+  (checked: no plaintext leak on drop); `encode_grant`'s `to_str().expect`
+  is unreachable because `create` and `from_stored` both validate UTF-8.
+- `grant::request`: every variable-length field is length-prefixed under a
+  domain separator, with a pinned hex vector and tests for normalization,
+  reordering, boundary shifting, every field, the token hash and `Debug`
+  redaction. The 30-day lifetime and past-expiry rules are deliberately
+  deferred to `create_grant` (clock-dependent), not missing.
+- `daemon::prove`: the session token is checked before the body is used, the
+  nonce is spent by the attempt, and the approval records only the digest
+  that the MAC covered (tested in
+  `a_verified_proof_records_exactly_the_digest_it_covered`). No secret,
+  grant token or digest reaches stdout, stderr or the socket beyond what
+  the protocol intends; `Proof`, `TokenHash` and `Grant` `Debug` impls stay
+  redacted.
+- R.18's label table: 32 code points pinned independently in
+  `tests/grant.rs`, and `tests/docs.rs` pins `FORMAT.md`/`DECISIONS.md` to
+  `grant::LABEL_FORBIDDEN_CLASSES`.
+- Gate re-run here: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+  warnings` and `cargo test --lib` (221 passed) are green.
+
+Still open from earlier: R.15b (blocked) is correctly unchecked; 3.4c/3.4d
+remain the next work.
+
 ## 2026-11-03 — Re-encrypt with the unlocked key (TODO 3.4b)
 
 - `src/crypto.rs`: new `encrypt_with_key(plaintext, key, template)`. It checks

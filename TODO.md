@@ -125,6 +125,60 @@ Rules that apply to every item:
       the error names the class without echoing the label; `tests/docs.rs`
       pins both documents to the constant.
 
+- [ ] **R.19 Consuming a non-last challenge reorders the pool, so the next
+      full pool evicts the newest nonce, not the oldest.**
+      `Challenges::verify_and_consume` takes the nonce with
+      `self.pending.swap_remove(index)` (`src/presence.rs:340`), which moves
+      the last (newest) entry into the freed slot. The comment that promises
+      "`pending` is in issue order, so index 0 is the oldest"
+      (`src/presence.rs:312`) and the eviction itself
+      (`self.pending.remove(0)`, `src/presence.rs:316`) then evict the wrong
+      entry. Every description of the R.16 fix says oldest-first:
+      `src/presence.rs:60`, the `Prove` arm comment in `src/daemon.rs:605`,
+      `MCP.md:208` ("dropping the oldest") and `DECISIONS.md:421` ("the
+      **oldest** nonce is evicted").
+      Failure: whenever a non-last nonce is consumed -- a human proving
+      while an agent floods `challenge`, or two concurrent approval flows --
+      the newest nonce jumps to index 0; one further `challenge` from any
+      session-token holder then evicts it. That is precisely the case
+      oldest-first was chosen to avoid, so the flood can destroy a nonce
+      with a proof in flight and the human must re-run the whole TTY
+      approval. Reproduced with a standalone `Vec` probe: after consuming
+      index 1 of [2,4,6,8] the vec is [2,8,6] and the next `issue` evicts
+      8, the newest. No capability is widened (a proof still needs the
+      key), so this is an approval-path availability bug plus drift in a
+      checked-off item and three documents.
+      Fix: consume with order-preserving `self.pending.remove(index)` (the
+      pool holds 16 entries, so the memmove is irrelevant), or evict the
+      entry with the smallest `issued` stamp; then make the MCP.md and
+      DECISIONS.md wording true.
+      Test: fill the pool, consume a non-last nonce, issue one more, and
+      assert through `daemon::prove` that the oldest survivor was evicted
+      and the newest still verifies. The existing
+      `a_full_challenge_pool_evicts_the_oldest_instead_of_refusing`
+      (`src/presence.rs:645`) only covers a pool with no consumption.
+
+- [ ] **R.20 Four files are far over the ~1,000-line limit, and this range
+      grew two of them.**
+      `src/store.rs` is 1,868 lines, `src/vault.rs` 1,271,
+      `src/protocol/mod.rs` 1,317 and `tests/cli.rs` 1,463, against the
+      "keep files under ~1,000 lines" rule in `PROMPT.md`. R.14 split
+      `src/grant.rs` at 1,087 for exactly this reason, but the rule was not
+      applied again: this range added +83 lines to `src/store.rs` (grant
+      records in the codec and their tests) and +128 to `src/vault.rs`
+      (lock reuse, `save_with_key`).
+      Failure: the payload codec and the vault lifecycle -- the two places
+      where a future grant or key change is most security-relevant -- are
+      the hardest files to review, and their tests already live in a second
+      inline module.
+      Fix: split by concern, e.g. `src/store/payload.rs` (encode/decode and
+      the grant record codec) out of `store.rs`, and `src/vault/lock.rs`
+      (`lock_for_update`, `acquire_write_lock_with_timeout`,
+      `write_container`) out of `vault.rs`.
+      Test: a layout test that walks `src/**/*.rs` and `tests/*.rs` and
+      asserts each file stays under 1,000 lines, so the next growth is
+      caught in CI rather than by the next review.
+
 ## Phase 3 — grants and audit log
 
 The design for grants, approval and audit lives in `MCP.md` ("Grants and the
