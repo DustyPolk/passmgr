@@ -1,3 +1,34 @@
+## 2026-11-03 — Split the vault write lock from the vault lifecycle (TODO R.20b)
+
+- `src/vault.rs` 1,271 -> 358 lines: only the `Vault` lifecycle, `read_container`
+  and `insecure_permissions` remain. The write lock and atomic replacement
+  moved to `src/vault/lock.rs` (199): `LOCK_SUFFIX`, `lock_path`,
+  `acquire_write_lock`, `acquire_write_lock_with_timeout`, `write_container`,
+  `with_path`, plus their two tests.
+- The helpers are `pub(super)`; `src/vault.rs` re-exports `lock_path` and
+  `LOCK_SUFFIX` with `pub use self::lock::{lock_path, LOCK_SUFFIX}`, so
+  `passmgr::vault::lock_path` (used by `tests/cli.rs`) and every in-crate
+  caller keep the same path. `mod lock;` is private, so no new public surface.
+- The inline test module moved verbatim to `src/vault/tests.rs` (744), the same
+  `src/x.rs` + `src/x/` layout R.20a used for `store`. The code move alone left
+  `vault.rs` over 1,000 lines, so the tests had to move too. 22 of the 24 tests
+  moved unchanged (only indentation and one import differ, verified by a
+  normalized diff against `HEAD:src/vault.rs`); the two lock-only tests went to
+  `src/vault/lock.rs` instead. Lib test count is unchanged at 223.
+- `tests/layout.rs`: `src/vault.rs` removed from `PENDING_SPLITS` (now
+  `src/protocol/mod.rs`, `tests/cli.rs`); both guard tests pass, including the
+  one that fails if an allowlisted file is no longer oversized.
+- No behavior, crypto or format change. `git diff` of moved code is a pure move.
+- Gate: `fmt --check`, `clippy --all-targets -D warnings`, full `cargo test`
+  green (lib 223, cli 30, daemon 20, docs 11, grant 23, layout 2, run 13,
+  unlock 8, main 34, plus the concurrency/shutdown/single tests). `cargo audit`
+  not installed; skipped per instructions.
+- **Next iteration must know:** R.20c is next (`src/protocol/mod.rs`, 1,317).
+  Move the frame/body codec to `src/protocol/codec.rs` and the inline tests to
+  `src/protocol/tests.rs`, then drop the allowlist entry. Do not raise
+  `MAX_LINES` or add allowlist entries; split in the same commit if a file
+  grows past 1,000.
+
 ## 2026-11-03 — Split the store codec and add a layout guard (TODO R.20a)
 
 - Split R.20 (four files over the ~1,000-line rule) into R.20a-R.20d, one file

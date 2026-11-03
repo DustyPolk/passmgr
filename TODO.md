@@ -185,7 +185,7 @@ Rules that apply to every item:
       Test: the layout guard fails (`src/vault.rs` 1,271, `src/protocol/mod.rs`
       1,317, `tests/cli.rs` 1,463) when `PENDING_SPLITS` is emptied, passes
       with the post-split tree, and the lib suite (223) is unchanged.
-- [ ] **R.20b Split `src/vault.rs` (1,271 lines) by concern.**
+- [x] **R.20b Split `src/vault.rs` (1,271 lines) by concern.**
       Move the write-lock and atomic-write machinery (`acquire_write_lock`,
       `acquire_write_lock_with_timeout`, `write_container`, `with_path`) into
       `src/vault/lock.rs` (or a similarly named module), leaving the vault
@@ -195,6 +195,17 @@ Rules that apply to every item:
       Test: the layout guard passes without that entry and the existing lock /
       atomic-write unit tests plus `tests/unlock.rs` still pass; the split is
       behavior-preserving.
+      Done: `src/vault.rs` is now 358 lines (lifecycle, `read_container`,
+      `insecure_permissions`); the lock and atomic-write helpers moved to
+      `src/vault/lock.rs` (199) as `pub(super)`, with `pub use self::lock::{
+      lock_path, LOCK_SUFFIX }` so every caller's path is unchanged and
+      `tests/cli.rs` still uses `passmgr::vault::lock_path`. The inline test
+      module also moved, mechanically, to `src/vault/tests.rs` (744) -- the
+      same `src/x.rs` + `src/x/` layout R.20a used -- because the code move
+      alone left `vault.rs` over 1,000. Only the two lock-only tests
+      (`write_lock_is_exclusive_private_and_released_on_drop`,
+      `write_lock_refuses_a_symlink`) moved into `lock.rs`'s own test module;
+      the other 22 are unchanged apart from indentation and one import.
 - [ ] **R.20c Split `src/protocol/mod.rs` (1,317 lines).**
       Move the frame and body codec (`encode`, `decode`, `FrameDecoder`,
       `read_length`, `check_length`, `encode_body`, `decode_body`) into
