@@ -318,7 +318,12 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - The grant model lives in `src/grant.rs` (TODO 3.2a) and is pure: no I/O,
   no clock. `Grant::authorizes(&AccessRequest, now)` is the single decision
   point. It checks, in order: revoked, `now >= expires_at` (expiry is
-  exclusive), uses exhausted, missing capability, then scope and command.
+  exclusive), uses exhausted, missing capability, then scope and (for `run`
+  only) command. `AccessRequest` is an enum whose `List` and `Run` variants
+  both carry a `Target`, so no request can be authorized without a scope
+  check (TODO R.11). There is no target-less "may I list" request:
+  enumeration authorizes each candidate entry and filters, so the daemon
+  cannot trust a separate scope test that might be forgotten.
 - Scope matching: an entry is in scope when its id is listed, **or** when it
   carries **every** tag the grant lists. A grant must list at least one ref
   or tag. `pm list --tag` AND semantics are reused, so "all" is consistent.

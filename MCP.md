@@ -108,7 +108,10 @@ granted"), so an agent cannot probe which refs exist.
 ### `list_credentials`  (readOnlyHint, idempotentHint, openWorldHint=false)
 Input: `{ "tags"?: string[], "query"?: string }` (query = case-insensitive
 substring of service name). Output: `{ "entries": [Entry] }`, containing only
-entries **inside the grant's scope**.
+entries **inside the grant's scope**. Scope is checked for each candidate
+entry individually (`Grant::authorizes` with a `List` request naming it);
+there is no bulk "listing is allowed" decision, so an out-of-scope entry is
+never returned (it is reported exactly like a nonexistent ref).
 `Entry = { ref, service, username|null, tags[], fields[] (field names only),
 url|null, created|null, last_rotated|null }`.
 No grant: `isError` with "no active grant; call request_access".

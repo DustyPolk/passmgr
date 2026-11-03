@@ -14,7 +14,7 @@ Rules that apply to every item:
 From the review of `533b68d..92448ed` (2026-11-03). Fix these before
 continuing Phase 3; each names the test that must prove the fix.
 
-- [ ] **R.11 A list request can carry an out-of-scope target and still be
+- [x] **R.11 A list request can carry an out-of-scope target and still be
       authorized.** `Grant::authorizes` (`src/grant.rs:635`) returns `Ok(())`
       for `Capability::List` without reading `request.target` or
       `request.field`; `AccessRequest`'s fields are public
@@ -32,6 +32,9 @@ continuing Phase 3; each names the test that must prove the fix.
       Test: a list-only grant scoped to ref A must deny a List request with
       `target = B` (`OutOfScope`) and allow `target = A`; a field-restricted
       grant must deny `field: None` and a different field.
+      Done: `AccessRequest` is now an enum; `List`/`Run` both carry the
+      `Target`, `authorizes` scope-checks both, and `list()` (target-less) is
+      gone. `Denied::MissingTarget`/`MissingCommand` removed with it.
 - [ ] **R.12 A run's relay reaps the process-group leader, so `terminate` can
       signal a recycled group.** `src/runner.rs:316-318` calls
       `let _ = child.try_wait();` on every relay timeout, which reaps the

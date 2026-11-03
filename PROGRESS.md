@@ -1,3 +1,36 @@
+## 2026-11-03 — Scope-check list requests by construction (TODO R.11)
+
+- `src/grant.rs`: `AccessRequest` is now an enum, not a struct with public
+  optional fields. `AccessRequest::List { target, field }` and
+  `::Run { target, field, command }` both carry a `Target`, so a request that
+  names no credential cannot be built. `Grant::authorizes` checks scope for
+  **both** capabilities and checks the command only for `Run`;
+  `AccessRequest::capability()`/`target()` replace the old public fields.
+  `AccessRequest::list()` (target-less) is gone; enumeration must authorize
+  each candidate entry (documented in `MCP.md` and `DECISIONS.md`).
+- Removed `Denied::MissingTarget`/`MissingCommand`: the type now makes those
+  caller bugs unrepresentable. `scope_allows` stays public as a pure helper,
+  documented as never a substitute for `authorizes`.
+- Chose the enum over keeping the struct and adding `target: Option`: the
+  review's complaint was that a separate `scope_allows` call was forgettable;
+  a constructible target-less request leaves the same trap. Cost: a slightly
+  larger diff now, no callers existed yet.
+- Tests in `tests/grant.rs` (16 total): new
+  `list_requests_are_scope_checked_like_run_requests` (ref scope and tag
+  scope for `List`, deny `OutOfScope`) and `list_requests_respect_field_scope`
+  (allows the named field, denies another field and `None`); the old
+  missing-target/command assertions were deleted because the values no longer
+  compile. Both new tests fail with the previous "List => Ok(())" logic
+  (verified with a temporary patch, then reverted).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` green (all suites). `cargo audit` not installed; skipped.
+- **Next iteration must know:** `AccessRequest` construction changed shape;
+  anything written from the old struct literal must use `list`/`run` (no
+  callers yet). A field-restricted grant currently cannot list/describe any
+  entry (`field: None` is out of scope), so 4.4 must filter list output per
+  entry and 6.5 must decide how to show allowed field *names*; that is
+  deliberate and conservative until then. Next item is R.12 (relay reap).
+
 ## 2026-11-03 — Review of 533b68d..92448ed
 
 - 4 findings, all in `TODO.md` Phase R: 1 authorization (R.11), 1 unsafe

@@ -326,7 +326,7 @@ fn authorizes_requires_the_capability() {
     let target = Target::new(ref_id(1), &[]);
     let run_only = grant(Capabilities::RUN);
     assert_eq!(
-        run_only.authorizes(&AccessRequest::list(), NOW),
+        run_only.authorizes(&AccessRequest::list(target, None), NOW),
         Err(Denied::NotCapable(Capability::List))
     );
     let list_only = Grant::create(
@@ -343,7 +343,89 @@ fn authorizes_requires_the_capability() {
         list_only.authorizes(&run_request(&target, command), NOW),
         Err(Denied::NotCapable(Capability::Run))
     );
-    assert_eq!(list_only.authorizes(&AccessRequest::list(), NOW), Ok(()));
+    assert_eq!(
+        list_only.authorizes(&AccessRequest::list(target, None), NOW),
+        Ok(())
+    );
+}
+
+#[test]
+fn list_requests_are_scope_checked_like_run_requests() {
+    let in_scope = Target::new(ref_id(1), &[]);
+    let out_scope = Target::new(ref_id(2), &[]);
+    let list_only = Grant::create(
+        GrantSpec {
+            commands: Vec::new(),
+            ..spec(Capabilities::LIST)
+        },
+        TokenHash::of(TOKEN),
+        NOW,
+    )
+    .expect("grant");
+
+    assert_eq!(
+        list_only.authorizes(&AccessRequest::list(in_scope, None), NOW),
+        Ok(())
+    );
+    assert_eq!(
+        list_only.authorizes(&AccessRequest::list(out_scope, None), NOW),
+        Err(Denied::OutOfScope)
+    );
+
+    // Tag scope is enforced for list too, not just for run.
+    let tagged = Grant::create(
+        GrantSpec {
+            scope: Scope::new(Vec::new(), tags(&["prod"]), None).expect("scope"),
+            commands: Vec::new(),
+            ..spec(Capabilities::LIST)
+        },
+        TokenHash::of(TOKEN),
+        NOW,
+    )
+    .expect("grant");
+    assert_eq!(
+        tagged.authorizes(
+            &AccessRequest::list(Target::new(ref_id(9), &tags(&["prod"])), None),
+            NOW
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        tagged.authorizes(
+            &AccessRequest::list(Target::new(ref_id(9), &tags(&["dev"])), None),
+            NOW
+        ),
+        Err(Denied::OutOfScope)
+    );
+}
+
+#[test]
+fn list_requests_respect_field_scope() {
+    let in_scope = Target::new(ref_id(1), &[]);
+    let by_field = Grant::create(
+        GrantSpec {
+            scope: Scope::new(vec![ref_id(1)], Vec::new(), Some(vec!["token".into()]))
+                .expect("scope"),
+            commands: Vec::new(),
+            ..spec(Capabilities::LIST)
+        },
+        TokenHash::of(TOKEN),
+        NOW,
+    )
+    .expect("grant");
+
+    assert_eq!(
+        by_field.authorizes(&AccessRequest::list(in_scope, Some("token")), NOW),
+        Ok(())
+    );
+    assert_eq!(
+        by_field.authorizes(&AccessRequest::list(in_scope, Some("password")), NOW),
+        Err(Denied::OutOfScope)
+    );
+    assert_eq!(
+        by_field.authorizes(&AccessRequest::list(in_scope, None), NOW),
+        Err(Denied::OutOfScope)
+    );
 }
 
 #[test]
@@ -361,28 +443,9 @@ fn authorizes_enforces_ref_tag_field_and_command_scope() {
         grant.authorizes(&run_request(&in_scope, Path::new("/usr/bin/git")), NOW),
         Err(Denied::CommandNotAllowed)
     );
-    // A run request without a target or command is a caller bug, not an
-    // agent error, and is reported distinctly.
-    let no_target = AccessRequest {
-        capability: Capability::Run,
-        target: None,
-        field: None,
-        command: Some(command),
-    };
-    assert_eq!(
-        grant.authorizes(&no_target, NOW),
-        Err(Denied::MissingTarget)
-    );
-    let no_command = AccessRequest {
-        capability: Capability::Run,
-        target: Some(in_scope),
-        field: Some("password"),
-        command: None,
-    };
-    assert_eq!(
-        grant.authorizes(&no_command, NOW),
-        Err(Denied::MissingCommand)
-    );
+    // A request that names no target or no command is not representable: the
+    // `AccessRequest` variants carry them, so `authorizes` can never return
+    // `Ok(())` for a request without a scope check.
 
     let tagged = Grant::create(
         GrantSpec {

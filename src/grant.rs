@@ -382,33 +382,55 @@ impl fmt::Debug for Scope {
 
 /// One thing an agent asks to do, reduced to what a grant can decide.
 ///
+/// Every variant names the credential it touches, so [`Grant::authorizes`]
+/// cannot return `Ok(())` without a scope check. There is deliberately no
+/// target-less "may I list?" value: enumeration is authorized one candidate
+/// at a time (build a `List` request per credential), which forces the caller
+/// to filter instead of trusting a separate scope test.
+///
 /// `command` is the canonical absolute path (the daemon canonicalizes it
 /// first). `field` names the concrete field being used, or `None` for a
 /// whole-credential request.
 #[derive(Clone, Copy)]
-pub struct AccessRequest<'a> {
-    pub capability: Capability,
-    pub target: Option<Target<'a>>,
-    pub field: Option<&'a str>,
-    pub command: Option<&'a Path>,
+pub enum AccessRequest<'a> {
+    /// Read one credential's metadata: `list_credentials` /
+    /// `describe_credential`.
+    List {
+        target: Target<'a>,
+        field: Option<&'a str>,
+    },
+    /// Run a command with one credential's secret injected.
+    Run {
+        target: Target<'a>,
+        field: Option<&'a str>,
+        command: &'a Path,
+    },
 }
 
 impl<'a> AccessRequest<'a> {
-    pub fn list() -> Self {
-        Self {
-            capability: Capability::List,
-            target: None,
-            field: None,
-            command: None,
-        }
+    pub fn list(target: Target<'a>, field: Option<&'a str>) -> Self {
+        Self::List { target, field }
     }
 
     pub fn run(target: Target<'a>, field: Option<&'a str>, command: &'a Path) -> Self {
-        Self {
-            capability: Capability::Run,
-            target: Some(target),
+        Self::Run {
+            target,
             field,
-            command: Some(command),
+            command,
+        }
+    }
+
+    pub fn capability(&self) -> Capability {
+        match self {
+            Self::List { .. } => Capability::List,
+            Self::Run { .. } => Capability::Run,
+        }
+    }
+
+    /// The credential and field the request touches.
+    pub fn target(&self) -> (&Target<'a>, Option<&'a str>) {
+        match self {
+            Self::List { target, field } | Self::Run { target, field, .. } => (target, *field),
         }
     }
 }
@@ -427,10 +449,6 @@ pub enum Denied {
     OutOfScope,
     /// The request needs a command and the grant's allowlist lacks it.
     CommandNotAllowed,
-    /// Caller bug: a run request without a target.
-    MissingTarget,
-    /// Caller bug: a run request without a command.
-    MissingCommand,
 }
 
 impl fmt::Display for Denied {
@@ -444,8 +462,6 @@ impl fmt::Display for Denied {
             }
             Self::OutOfScope => f.write_str("not found or not granted"),
             Self::CommandNotAllowed => f.write_str("command is not allowed by this grant"),
-            Self::MissingTarget => f.write_str("grant check needs a credential"),
-            Self::MissingCommand => f.write_str("grant check needs a command"),
         }
     }
 }
@@ -613,38 +629,37 @@ impl Grant {
         self.commands.iter().any(|allowed| allowed == command)
     }
 
-    /// True when the target and field are inside the scope. Used for listing,
-    /// where no command is involved.
+    /// True when the target and field are inside the scope. A pure helper for
+    /// callers that have already passed [`Grant::authorizes`]; it is never a
+    /// substitute for that check.
     pub fn scope_allows(&self, target: &Target<'_>, field: Option<&str>) -> bool {
         self.scope.matches(target) && self.scope.matches_field(field)
     }
 
     /// Decide one request. Checks run in a fixed order so an expired, revoked
     /// grant always reports that first, and a missing capability never leaks
-    /// scope information.
+    /// scope information. Scope is checked for `list` and `run` alike, so no
+    /// granted request skips it; only `run` additionally needs an allowed
+    /// command.
     pub fn authorizes(
         &self,
         request: &AccessRequest<'_>,
         now: u64,
     ) -> std::result::Result<(), Denied> {
         self.check_active(now)?;
-        if !self.capabilities.contains(request.capability.flag()) {
-            return Err(Denied::NotCapable(request.capability));
+        if !self.capabilities.contains(request.capability().flag()) {
+            return Err(Denied::NotCapable(request.capability()));
         }
-        match request.capability {
-            Capability::List => Ok(()),
-            Capability::Run => {
-                let target = request.target.as_ref().ok_or(Denied::MissingTarget)?;
-                if !self.scope_allows(target, request.field) {
-                    return Err(Denied::OutOfScope);
-                }
-                let command = request.command.ok_or(Denied::MissingCommand)?;
-                if !self.allows_command(command) {
-                    return Err(Denied::CommandNotAllowed);
-                }
-                Ok(())
+        let (target, field) = request.target();
+        if !self.scope_allows(target, field) {
+            return Err(Denied::OutOfScope);
+        }
+        if let AccessRequest::Run { command, .. } = request {
+            if !self.allows_command(command) {
+                return Err(Denied::CommandNotAllowed);
             }
         }
+        Ok(())
     }
 
     /// Record one use. Refuses an inactive grant so a caller can never count a
