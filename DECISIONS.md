@@ -22,8 +22,8 @@ code does not implement yet.
   code.
 - Known, documented limit (do not "fix" by weakening anything): a same-user
   process can read a child's `/proc/<pid>/environ`, and an allowlisted
-  interpreter can exfiltrate. passmgr prevents accidents and makes deliberate
-  misuse require an explicit human grant.
+  interpreter or program runner can exfiltrate. passmgr prevents accidents and
+  makes deliberate misuse require an explicit human grant.
 - `SECURITY.md` is the canonical list of accepted limits and out-of-scope
   threats. A behavior change that alters one updates it in the same commit;
   `tests/docs.rs` pins the load-bearing statements (it also runs the real
@@ -526,14 +526,22 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   process can call the daemon, so only a check inside `pmd` counts. Planned
   with TODO 3.6/4.5; `src/protocol/mod.rs` today only requires an absolute
   path.
-- Interpreters and shells in a command allowlist are refused unless the human
-  passes `--allow-interpreter` (TODO 3.4d). Detection lives in
-  `grant/validate.rs::is_interpreter` and is name-based on the canonical file
-  name: a fixed list of shells/runners plus versioned `python`/`perl`/`ruby`/
-  `node`/`php`/`lua`/`pwsh`/`julia`/`Rscript` names whose suffix starts with a
-  digit or `.`. Over-refusal is preferred (`pythonista` is not an interpreter;
-  `python3.12` is), and `--allow-interpreter` is the human override. Refusal
-  happens before the password prompt, file creation or any daemon request.
+- A shell, interpreter or program runner in a command allowlist is refused
+  unless the human passes `--allow-interpreter` (TODO 3.4d, R.25). Detection
+  lives in `grant/validate.rs::is_program_runner` and is name-based on the
+  canonical file name: a fixed table of shells and launchers, editors and
+  pagers, tools with an exec option (`find`, `sed`, `tar`, `ssh`, `nc`),
+  aliases/plugins CLIs (`git`, `gh`, `docker`, `kubectl`, …), build runners
+  (`make`, `cargo`, `npm`, `go`, …), database clients (`psql`, `sqlite3`) and
+  versioned `python`/`perl`/`ruby`/`node`/`php`/`lua`/`pwsh`/`julia`/`Rscript`
+  names whose suffix starts with a digit or `.`. This is because a grant binds
+  only `argv[0]`, which makes `git`, `gh` or `find` as powerful as a shell.
+  Over-refusal is preferred (`pythonista` is not a runner; `python3.12` is),
+  and `--allow-interpreter` is the human override. The table is best-effort and
+  deliberately not treated as a boundary: allowing any program is trusting it
+  with the value. Refusal happens before the password prompt, file creation or
+  any daemon request; `src/grant.rs` and `tests/grant_cli.rs` (a fake `gh`) pin
+  both the table and the end-to-end refusal.
 - `pm grant create` mints a `GrantToken` of 32 random bytes, held in
   `Zeroizing`, with a redacting `Debug`. Its lowercase hex is written only to
   `--out` (opened `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, then `fsync`); an

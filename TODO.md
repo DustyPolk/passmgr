@@ -391,7 +391,7 @@ Rules that apply to every item:
       the fenced block from MCP.md and compares envelope and request key sets
       plus the whole value to the encoder (a nested example fails, verified).
 
-- [ ] **R.25 The interpreter gate is an incomplete name list, and the
+- [x] **R.25 The interpreter gate is an incomplete name list, and the
       documented `gh` example is itself a program runner.**
       `is_interpreter` (`src/grant/validate.rs:130-192`) refuses only the fixed
       names in `INTERPRETERS`/`VERSIONED_INTERPRETERS`; `gh` and `git` are
@@ -416,6 +416,30 @@ Rules that apply to every item:
       where `passmgr grant create --command /usr/bin/gh` exits 5 with the
       interpreter refusal before the password prompt and creates no token
       file, and the same command with `--allow-interpreter` succeeds.
+      Done: took the first fix (broaden the table), not a per-command
+      confirmation, because `Grant` has no place to record a per-command trust
+      decision and confirming every command would make every grant prompt
+      noisy. The table is now `PROGRAM_RUNNERS` in `src/grant/validate.rs` and
+      `is_interpreter` is `is_program_runner`: shells, launchers (`env`,
+      `xargs`, `sudo`, `timeout`, `tmux`, …), editors/pagers, tools with an
+      exec option (`find`, `sed`, `tar`, `ssh`, `nc`), alias/plugin CLIs
+      (`git`, `gh`, `docker`, `podman`, `kubectl`, `terraform`, …), build
+      runners (`make`, `cargo`, `npm`, `go`, …) and DB clients (`psql`,
+      `sqlite3`) are refused. Over-refusal stays preferred; the docs now say
+      the list is best-effort and that allowing any program is a trust
+      decision, since a grant binds only `argv[0]`. The flag keeps its name.
+      `README.md`, `--help`/`tests/fixtures/help.txt`, `SECURITY.md` limit 2,
+      `MCP.md` and `DECISIONS.md` are updated; the README/help example now
+      passes `--allow-interpreter` and explains that `gh` is a runner. Tests:
+      `src/grant/validate.rs::program_runners_are_recognised_by_file_name`
+      covers the
+      documented names and lookalike false positives;
+      `tests/grant_cli.rs::grant_create_refuses_a_program_runner_without_the_flag`
+      uses a fake executable named `gh` (exit 5, no prompt, no daemon, no
+      token file, no grant) and `…_accepts_a_program_runner_when_the_human_allows_it`
+      proves the override stores the canonical path;
+      `tests/docs.rs::security_documents_program_runner_exfiltration` and
+      `documented_grant_example_flags_a_program_runner` pin the prose.
 
 - [ ] **R.26 `pm grant create` prompts for the master password without ever
       showing the request the human is approving.**

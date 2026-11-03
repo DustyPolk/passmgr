@@ -104,8 +104,10 @@ Commands:
                                                   Lifetime, at most 30d.
                                --max-uses N       Optional use limit.
                                --allow-interpreter
-                                                  Permit shells/interpreters
-                                                  in the command allowlist.
+                                                  Permit a shell, interpreter
+                                                  or program runner in the
+                                                  command allowlist: it can
+                                                  run any command.
                                --out FILE         New token file (O_EXCL).
                              At least one --ref or --tag and one --command
                              are required. Refuses to overwrite --out.
@@ -161,7 +163,8 @@ Examples:
   passmgr run --env GH_TOKEN=pm://0123456789abcdef0123456789abcdef \
       -- gh auth status
   passmgr grant create --label 'deploy prod' --tag prod \
-      --command /usr/bin/gh --expires 1h --out /run/user/1000/gh.token
+      --command /usr/bin/gh --allow-interpreter --expires 1h \
+      --out /run/user/1000/gh.token
   passmgr grant list
   passmgr grant show 0123456789abcdef0123456789abcdef
   passmgr grant revoke 0123456789abcdef0123456789abcdef
@@ -179,6 +182,11 @@ Notes:
     by 'list' and 'get'. A reference identifies an entry for agents and tools
     without revealing any secret, and survives renames. 'show' accepts only a
     full reference, never a service name.
+  - A grant binds only the canonical executable path. A shell, interpreter or
+    program runner (git, gh, find, tar, ssh, docker, editors, pagers, make,
+    cargo, psql, ...) can run another program, so 'grant create' refuses one
+    unless you pass --allow-interpreter. The list is best-effort: allowing
+    any program trusts it with the value.
   - 'grant list' and 'grant show' print grant metadata only (id, label,
     scope, commands, uses, timestamps); a grant token or its hash is never
     printed. 'grant revoke' needs no password: taking access away is always

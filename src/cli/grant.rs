@@ -25,7 +25,7 @@ use passmgr::agent;
 use passmgr::crypto;
 use passmgr::grant::{
     Capabilities, Grant, GrantRequest, GrantSpec, GrantToken, MAX_GRANT_LIFETIME_SECS, Scope,
-    is_interpreter,
+    is_program_runner,
 };
 use passmgr::protocol::{
     GrantCreateRequest, GrantRevokeRequest, ProveRequest, Request, Response, ResponseError,
@@ -126,7 +126,7 @@ pub(crate) fn command_grant_create(
     vault_path: &Path,
 ) -> Result<(), Error> {
     let commands = resolve_commands(&options.commands)?;
-    if !options.allow_interpreter && commands.iter().any(|command| is_interpreter(command)) {
+    if !options.allow_interpreter && commands.iter().any(|command| is_program_runner(command)) {
         // Do not echo the path: it may have come from an agent suggestion and
         // this line is read by a human's terminal.
         return Err(Error::Refused(

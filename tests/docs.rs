@@ -109,16 +109,68 @@ fn limit_contracts_reject_the_phrase_from_another_section() {
     );
 }
 
-/// An allowlisted interpreter turns a grant into full access to the value.
+/// An allowlisted program that can run another turns a grant into full access
+/// to the value, and the name list cannot be complete (TODO R.25). The limit
+/// must name the class, keep the `-allow-interpreter` escape hatch, and admit
+/// what the list can and cannot do.
 #[test]
-fn security_documents_interpreter_exfiltration() {
+fn security_documents_program_runner_exfiltration() {
+    let limit = security_limit(2);
     assert!(
-        SECURITY.contains("--allow-interpreter"),
-        "SECURITY.md must document the interpreter allowlist rule"
+        limit.contains("argv[0]"),
+        "SECURITY.md limit 2 must explain that only argv[0] is checked"
+    );
+    for name in [
+        "gh",
+        "git",
+        "find -exec",
+        "tar --to-command",
+        "ssh",
+        "docker",
+    ] {
+        assert!(
+            limit.contains(name),
+            "SECURITY.md limit 2 must name {name} as a runner"
+        );
+    }
+    assert!(
+        limit.contains("--allow-interpreter"),
+        "SECURITY.md limit 2 must document the human override"
     );
     assert!(
-        SECURITY.contains("equivalent to handing the agent the secret"),
-        "SECURITY.md must state the consequence of an interpreter grant"
+        limit.contains("equivalent to handing the agent the secret"),
+        "SECURITY.md limit 2 must state the consequence of allowing a runner"
+    );
+    assert!(
+        limit.contains("best-effort, not a boundary"),
+        "SECURITY.md limit 2 must say the name table is not a boundary"
+    );
+    assert!(
+        limit.contains("allowlisting a program is trusting it with the value"),
+        "SECURITY.md limit 2 must state the residual trust decision"
+    );
+}
+
+/// `gh` is a program runner too (`gh alias set --shell`), so the grant example
+/// in the README may not allow it without the flag, and `--help` must describe
+/// the flag as covering more than shells and interpreters (TODO R.25).
+#[test]
+fn documented_grant_example_flags_a_program_runner() {
+    let example = fenced_block_after(README, "### Create a grant")
+        .expect("README.md must keep a grant create example");
+    assert!(
+        example.contains("--command /usr/bin/gh"),
+        "the README example is expected to allow gh: {example}"
+    );
+    assert!(
+        example.contains("--allow-interpreter"),
+        "a grant example that allows a runner must pass --allow-interpreter: {example}"
+    );
+
+    let help = plain(&help_text());
+    assert!(
+        help.contains("or program runner in the") && help.contains("'grant create' refuses one"),
+        "--help must say that the flag covers program runners"
     );
 }
 
@@ -312,6 +364,24 @@ fn docs_say_who_checks_vault_limits_before_the_proof() {
         REQUEST_SRC.contains("check_grant_writable") && REQUEST_SRC.contains("expiry rule alone"),
         "check_approvable's doc must say it covers the expiry rule only"
     );
+}
+
+/// First fenced block of any language after the line containing `marker`, with
+/// the fence lines stripped. `None` when either is missing, so deleting the
+/// example fails its contract instead of turning the contract vacuous.
+fn fenced_block_after(markdown: &str, marker: &str) -> Option<String> {
+    let mut lines = markdown.lines().skip_while(|line| !line.contains(marker));
+    lines
+        .by_ref()
+        .find(|line| line.trim_start().starts_with("```"))?;
+    let mut block = Vec::new();
+    for line in lines {
+        if line.trim_start().starts_with("```") {
+            return Some(block.join("\n"));
+        }
+        block.push(line.trim_end().to_owned());
+    }
+    None
 }
 
 /// First fenced ```json block after the line containing `marker`, with the

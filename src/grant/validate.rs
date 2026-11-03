@@ -118,16 +118,30 @@ fn escape_hidden(text: &str) -> String {
     escaped
 }
 
-/// Programs that run code, or a program named by their arguments, so a grant
-/// that allows one can execute anything the redactor cannot follow. A human
+/// Programs that can run another program, or code named by their arguments,
+/// so a grant that allows one is a grant to run whatever it can start. A human
 /// must pass `--allow-interpreter` to add one.
 ///
-/// Kept as a pure table next to the label rules, shared by the CLI and (from
-/// TODO 4.9) the MCP request path, so both refuse the same names. Matching is
-/// by file name only: `/usr/bin/python3.12` is an interpreter even though its
-/// path is not `/usr/bin/python`. The versioned bases accept a suffix that
-/// starts with a digit or a dot, so `pythonista` is not mistaken for Python.
-const INTERPRETERS: &[&str] = &[
+/// A grant binds a canonical absolute path and the daemon checks only
+/// `argv[0]`, so a shell is not special: `git -c alias.pwn='!sh' pwn`,
+/// `gh alias set --shell pwn '…'`, `find -exec`, `tar --to-command`, `sed`'s
+/// `e` command, `ssh`'s `ProxyCommand` and an editor's shell escape all reach
+/// a shell through an ordinary program. This table therefore covers the
+/// well-known ways out, not just language interpreters that run a script
+/// named by their arguments.
+///
+/// The table is best-effort, not a boundary: no list can name every program
+/// that can spawn another, so allowlisting any program is a decision to trust
+/// it with the value. Over-refusal is preferred — a false positive costs one
+/// flag, a false negative costs the secret.
+///
+/// Kept as a pure table next to the label rules so the CLI and (from TODO 4.9)
+/// the MCP request path refuse the same names. Matching is by file name only:
+/// `/usr/bin/python3.12` is a runner even though its path is not
+/// `/usr/bin/python`. The versioned bases accept a suffix that starts with a
+/// digit or a dot, so `pythonista` is not mistaken for Python.
+const PROGRAM_RUNNERS: &[&str] = &[
+    // Shells and shell-like command languages.
     "sh",
     "bash",
     "zsh",
@@ -139,56 +153,140 @@ const INTERPRETERS: &[&str] = &[
     "csh",
     "tcsh",
     "busybox",
+    "elvish",
+    "xonsh",
+    "yash",
+    "rc",
+    "es",
+    "osascript",
+    // Launchers whose arguments are a program, or that start one anyway.
     "env",
     "xargs",
+    "nohup",
+    "setsid",
+    "nice",
+    "ionice",
+    "timeout",
+    "stdbuf",
+    "flock",
+    "watch",
+    "time",
+    "su",
+    "sudo",
+    "doas",
+    "runuser",
+    "chroot",
+    "unshare",
+    "nsenter",
+    "systemd-run",
+    "script",
+    "expect",
+    "strace",
+    "ltrace",
+    "gdb",
+    "perf",
+    "parallel",
+    "tmux",
+    "screen",
+    // Editors, pagers and man, which all have a shell escape.
+    "vi",
+    "vim",
+    "nvim",
+    "view",
+    "ex",
+    "ed",
+    "emacs",
+    "nano",
+    "less",
+    "more",
+    "most",
+    "man",
+    // Tools with an exec option or a command language.
+    "find",
+    "sed",
     "awk",
     "gawk",
     "mawk",
-    "tclsh",
-    "wish",
-    "nodejs",
-    "osascript",
-    "cargo",
+    "nawk",
+    "tar",
+    "ssh",
+    "scp",
+    "sftp",
+    "rsync",
+    "socat",
+    "nc",
+    "ncat",
+    "netcat",
+    // Version control, container and infrastructure CLIs that run aliases,
+    // plugins or delegated commands.
+    "git",
+    "gh",
+    "glab",
+    "hub",
+    "docker",
+    "podman",
+    "kubectl",
+    "helm",
+    "terraform",
+    "ansible",
+    "ansible-playbook",
+    "vagrant",
+    // Build and test runners that execute project-defined commands.
     "make",
+    "cargo",
     "npm",
     "npx",
     "yarn",
     "pnpm",
     "deno",
     "bun",
+    "go",
+    "mvn",
+    "gradle",
+    "bazel",
+    "rake",
     "java",
     "dotnet",
-    "expect",
+    // Database clients with a shell meta-command (`\!`, `.shell`, `system`).
+    "psql",
+    "mysql",
+    "mariadb",
+    "sqlite3",
 ];
 
 /// Bases whose installed name carries a version, such as `python3.12`,
 /// `perl5.36`, `node18` or `pwsh7`.
-const VERSIONED_INTERPRETERS: &[&str] = &[
+const VERSIONED_PROGRAM_RUNNERS: &[&str] = &[
     "python",
     "perl",
     "ruby",
     "node",
     "php",
     "lua",
+    "luajit",
+    "tclsh",
+    "wish",
     "pwsh",
     "powershell",
     "julia",
     "Rscript",
+    "groovy",
 ];
 
-/// Whether `path` names a shell, interpreter or program runner.
+/// Whether `path` names a shell, interpreter or other program runner.
 ///
 /// The check is on the final path component, because that is what the daemon
-/// execs; a grant stores canonical absolute paths.
-pub fn is_interpreter(path: &Path) -> bool {
+/// execs; a grant stores canonical absolute paths. See [`PROGRAM_RUNNERS`]
+/// for why the list can never be complete.
+pub fn is_program_runner(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(is_interpreter_name)
+        .is_some_and(is_program_runner_name)
 }
 
-fn is_interpreter_name(name: &str) -> bool {
-    INTERPRETERS.contains(&name)
-        || VERSIONED_INTERPRETERS.iter().any(|base| {
+fn is_program_runner_name(name: &str) -> bool {
+    PROGRAM_RUNNERS.contains(&name)
+        || VERSIONED_PROGRAM_RUNNERS.iter().any(|base| {
             name == *base
                 || name.strip_prefix(base).is_some_and(|suffix| {
                     suffix
@@ -258,5 +356,77 @@ pub fn validate_field_name(name: &str) -> Result<()> {
         Err(Error::InvalidInput(format!(
             "invalid field name '{name}': expected 1-{MAX_FIELD_NAME_BYTES} characters of [a-z0-9_-]"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Program runners are recognised by their file name, including versioned
+    /// interpreters, while ordinary programs (and lookalike names) are not.
+    /// A grant binds only `argv[0]`, so the table has to cover more than
+    /// language interpreters: `gh` and `git` run shells through aliases
+    /// (TODO R.25), and `find`, `tar`, `ssh`, `sed`, editors and pagers each
+    /// have an exec option or a shell escape.
+    #[test]
+    fn program_runners_are_recognised_by_file_name() {
+        for path in [
+            // Shells.
+            "/bin/sh",
+            "/usr/bin/bash",
+            "/usr/bin/zsh",
+            "/usr/bin/busybox",
+            // Interpreters, including versioned spellings.
+            "/usr/bin/python3",
+            "/usr/bin/python3.12",
+            "/usr/local/bin/perl5.36",
+            "/usr/bin/node18",
+            "/usr/bin/ruby",
+            "/usr/bin/tclsh8.6",
+            "/usr/bin/wish",
+            // Launchers.
+            "/usr/bin/env",
+            "/usr/bin/xargs",
+            "/usr/bin/timeout",
+            "/usr/bin/sudo",
+            "/usr/bin/tmux",
+            // Tools with an exec option or a shell escape.
+            "/usr/bin/find",
+            "/usr/bin/sed",
+            "/usr/bin/tar",
+            "/usr/bin/ssh",
+            "/usr/bin/nc",
+            "/usr/bin/vim",
+            "/usr/bin/less",
+            "/usr/bin/man",
+            // CLIs that run aliases, plugins or project commands.
+            "/usr/bin/gh",
+            "/usr/bin/git",
+            "/usr/bin/docker",
+            "/usr/bin/podman",
+            "/usr/bin/kubectl",
+            "/usr/bin/terraform",
+            "/usr/bin/make",
+            "/usr/bin/cargo",
+            "/usr/bin/npm",
+            "/usr/bin/go",
+            "/usr/bin/psql",
+            "/usr/bin/sqlite3",
+        ] {
+            assert!(is_program_runner(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/usr/bin/curl",
+            "/usr/bin/jq",
+            "/usr/bin/tree",
+            "/usr/bin/envoy",
+            "/usr/bin/pythonista",
+            "/usr/bin/shadow",
+            "/usr/bin/maker",
+            "/opt/tools/tar.gz",
+        ] {
+            assert!(!is_program_runner(Path::new(path)), "{path}");
+        }
     }
 }

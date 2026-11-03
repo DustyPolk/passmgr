@@ -1,3 +1,40 @@
+## 2026-11-03 — Refuse program runners, not just interpreters (TODO R.25)
+
+- `grant/validate.rs`: `INTERPRETERS`/`VERSIONED_INTERPRETERS` became
+  `PROGRAM_RUNNERS`/`VERSIONED_PROGRAM_RUNNERS` and `is_interpreter` became
+  `is_program_runner`. The table now covers what a grant's `argv[0]`-only
+  binding makes dangerous: shells, launchers (`env`, `xargs`, `sudo`,
+  `timeout`, `tmux`, `strace`, …), editors/pagers/man, tools with an exec
+  option (`find`, `sed`, `tar`, `ssh`, `scp`, `nc`, …), alias/plugin CLIs
+  (`git`, `gh`, `docker`, `podman`, `kubectl`, `helm`, `terraform`, `ansible`,
+  …), build runners (`make`, `cargo`, `npm`, `go`, `mvn`, `bazel`, …) and DB
+  clients (`psql`, `mysql`, `sqlite3`). `gh`/`git` are no longer treated as
+  safe; matching is still file-name based with the same versioned-suffix rule.
+- Chose the broad table over a per-command confirmation: a grant has nowhere
+  to record per-command trust, and confirming every command would turn every
+  grant into a wall of y/N prompts. The table is documented as best-effort,
+  not a boundary — allowing any program is trusting it with the value.
+- Docs: README's grant example now passes `--allow-interpreter` (with an
+  explanation that `gh` itself is a runner), `--help` (and the byte-exact
+  `tests/fixtures/help.txt`) describe the flag and the example the same way,
+  `SECURITY.md` limit 2 is rewritten around `argv[0]`, `MCP.md` and
+  `DECISIONS.md` name runners and the residual trust.
+- Tests: unit table of every documented runner name plus lookalikes
+  (`pythonista`, `shadow`, `envoy`, `tar.gz`); e2e with a fake executable
+  named `gh` proving exit 5, no master-password prompt, no daemon session and
+  no token file, and that `--allow-interpreter` stores the canonical path and
+  prints neither token nor secret; docs contracts pin the prose and the
+  README example.
+- Gate: fmt, clippy -D warnings, full `cargo test` (including the Argon2 CLI
+  suite) pass. `cargo audit` not installed, skipped as instructed.
+- **Next iteration must know:** the refusal is CLI-only and the grant stores
+  no "runner allowed" bit, so `grant show` cannot reveal that a human opted
+  into a runner — worth a small follow-up if the approval UX (R.26) starts
+  rendering one. `psql`/`mysql`/`sqlite3` are now runners, which matters for
+  the Phase 7 presets. Versioned names are matched only for the versioned
+  bases (`git-lfs`, `ssh-keygen`, `bash-completion` are plain exact names and
+  not matched); that is the accepted best-effort gap.
+
 ## 2026-11-03 — Review of 4662526..4a16226
 
 - 5 findings: 2 authorization (R.25, R.26; R.25 also exposes injected

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use passmgr::crypto::{self, KdfParams};
 use passmgr::grant::{
-    Capabilities, Grant, GrantSpec, MAX_GRANTS, Scope, TokenHash, is_interpreter,
+    Capabilities, Grant, GrantSpec, MAX_GRANTS, Scope, TokenHash, is_program_runner,
 };
 use passmgr::socket::RuntimePaths;
 use passmgr::store::{self, Credential};
@@ -106,6 +106,15 @@ impl Fixture {
 
     fn temp_path(&self, name: &str) -> PathBuf {
         self.runtime().join(name)
+    }
+
+    /// A stand-in program with the given name, executable so command
+    /// resolution accepts it. No test ever runs it.
+    fn fake_program(&self, name: &str) -> String {
+        let path = self.temp_path(name);
+        fs::write(&path, b"#!/bin/sh\nexit 0\n").expect("write fake program");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod fake program");
+        path.to_str().expect("path is UTF-8").to_owned()
     }
 
     fn run_pty(&self, args: &[&str], input: &str) -> PtyOutput {
@@ -363,7 +372,106 @@ fn grant_create_refuses_an_interpreter_without_the_flag() {
     assert!(output.stderr.contains("interpreter"), "{}", output.stderr);
     assert!(!output.stderr.contains("Master Password"));
     assert!(!out.exists(), "a refused grant must not leave a token file");
-    assert!(is_interpreter(Path::new("/bin/sh")));
+    assert!(is_program_runner(Path::new("/bin/sh")));
+}
+
+/// A grant binds only `argv[0]`, so allowing `gh` would allow a shell through
+/// `gh alias set --shell`. A program runner that is not a shell is refused
+/// exactly like a shell, before the password prompt, any daemon request and
+/// any token file (TODO R.25).
+#[test]
+fn grant_create_refuses_a_program_runner_without_the_flag() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    let runner = fixture.fake_program("gh");
+    let out = fixture.temp_path("gh.token");
+    let output = fixture.run_pty(
+        &[
+            "--db",
+            fixture.db(),
+            "grant",
+            "create",
+            "--label",
+            "deploy prod",
+            "--tag",
+            "prod",
+            "--command",
+            &runner,
+            "--expires",
+            "1h",
+            "--out",
+            out.to_str().expect("path is UTF-8"),
+        ],
+        &format!("{MASTER}\n"),
+    );
+
+    assert_eq!(output.status.code(), Some(5), "{}", output.stderr);
+    assert!(
+        output.stderr.contains("program runner"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("--allow-interpreter"),
+        "a refusal must say how a human overrides it: {}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains("Master Password"));
+    assert!(!out.exists(), "a refused grant must not leave a token file");
+    assert!(
+        passmgr::session::load(&fixture.daemon_paths())
+            .ok()
+            .is_none(),
+        "a refused grant must not start a daemon"
+    );
+    let vault = Vault::open(&fixture.vault, MASTER).expect("open vault");
+    assert!(vault.grants().is_empty());
+}
+
+/// The same runner is accepted once the human passes `--allow-interpreter`:
+/// the flag is the decision, not the name list.
+#[test]
+fn grant_create_accepts_a_program_runner_when_the_human_allows_it() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    fixture.unlock();
+    let runner = fixture.fake_program("gh");
+    let out = fixture.temp_path("gh-allowed.token");
+    let output = fixture.run_pty(
+        &[
+            "--db",
+            fixture.db(),
+            "grant",
+            "create",
+            "--label",
+            "deploy prod",
+            "--tag",
+            "prod",
+            "--command",
+            &runner,
+            "--allow-interpreter",
+            "--expires",
+            "1h",
+            "--out",
+            out.to_str().expect("path is UTF-8"),
+        ],
+        &format!("{MASTER}\n"),
+    );
+    assert_ok(&output);
+
+    let token = fs::read_to_string(&out).expect("token file");
+    assert_eq!(token.trim_end().len(), 64);
+    for text in [&output.stdout, &output.stderr] {
+        assert!(!text.contains(token.trim_end()));
+        assert!(!text.contains(SECRET));
+    }
+
+    let vault = Vault::open(&fixture.vault, MASTER).expect("open vault");
+    assert_eq!(vault.grants().len(), 1);
+    assert_eq!(
+        vault.grants()[0].commands(),
+        [fs::canonicalize(&runner).expect("canonical runner")]
+    );
 }
 
 /// Agent context is refused with exit 5, even on a terminal.

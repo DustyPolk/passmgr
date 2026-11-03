@@ -164,7 +164,7 @@ Rules, enforced by the **daemon** (the MCP server is untrusted plumbing):
 - Encoded or transformed copies (lower/upper hex, standard and URL-safe
   base64, percent-encoding, case changes) are **not redacted yet**; TODO 4.6
   adds them. Until then an allowlisted encoder can exfiltrate a value, which
-  is why the command allowlist and the interpreter confirmation matter. Do
+  is why the command allowlist and the program-runner confirmation matter. Do
   not describe or test encoding redaction as if it worked today.
 - Secrets shorter than 8 bytes are refused for agent runs. Redaction cannot
   protect them, and they would mangle output.
@@ -262,10 +262,14 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   the same keys and no `token`, `token_hash` or secret field. `pm grant
   revoke` needs no password and no terminal, and like `pm run` it refuses
   `--db`/`PASSMGR_DB`: it always acts on the running daemon's vault.
-- Interpreters and shells (`sh`, `bash`, `zsh`, `fish`, `dash`, `env`, `xargs`,
-  `python*`, `node`, `perl`, `ruby`, `busybox`, …) in a command allowlist let
-  the agent exfiltrate secrets in ways redaction cannot catch. Approval shows a
-  red warning and requires an explicit `--allow-interpreter`.
+- Interpreters, shells and program runners (`sh`, `bash`, `zsh`, `fish`,
+  `dash`, `env`, `xargs`, `python*`, `node`, `perl`, `ruby`, `busybox`, `git`,
+  `gh`, `find`, `sed`, `tar`, `ssh`, `docker`, `podman`, `kubectl`, `make`,
+  `cargo`, editors, pagers, …) in a command allowlist let the agent run code,
+  so it can exfiltrate secrets in ways redaction cannot catch. Approval shows a
+  red warning and requires an explicit `--allow-interpreter`. The name list is
+  best-effort: a grant binds only `argv[0]`, so allowing any program is a
+  decision to trust what it can run.
 - Claiming a token: when the MCP server creates a request, it also makes a
   random 32-byte claim secret and sends only its hash. After approval,
   `request_access`/`access_status` call `request_claim` with the secret. The

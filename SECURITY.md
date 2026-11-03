@@ -98,18 +98,25 @@ Consequences:
   not close this class of attack: a same-user process can still read
   `/proc/<pid>/mem`, open the temp file, or attach to the child when permitted.
 
-### 2. An interpreter or shell in a command allowlist can exfiltrate
+### 2. A shell, interpreter or program runner in a command allowlist can exfiltrate
 
-A grant that allows `bash`, `sh`, `python`, `node`, `perl` and similar
-programs is equivalent to handing the agent the secret: the interpreter can
-read the injected variable, transform it, and write it anywhere. Redaction
-cannot follow a transformation (see limit 3).
+A grant binds a canonical absolute path and the daemon checks only `argv[0]`,
+so any allowed program that can execute another one is equivalent to handing
+the agent the secret: a shell or language runtime obviously, but equally `git`
+(`git -c alias.pwn='!cmd' pwn`), `gh` (`gh alias set --shell pwn ...`), `find
+-exec`, `tar --to-command`, `sed`'s `e` command, `ssh`'s `ProxyCommand`, an
+editor or pager with a shell escape, `docker`/`podman`/`kubectl`, `make`,
+`cargo`, `npm`, `psql`, `sqlite3` and many others. The program can read the
+injected variable, transform it, and write it anywhere, and redaction cannot
+follow a transformation (see limit 3).
 
-Mitigations: interpreters and shells are refused in a grant's command
-allowlist unless the human passes `--allow-interpreter`; grant the
-specific binary a workflow needs, not a general-purpose interpreter. Passing
-`--allow-interpreter` is a deliberate decision to trust the agent with the
-value.
+Mitigations: a name table of well-known shells, interpreters and program
+runners is refused in a grant's command allowlist unless the human passes
+`--allow-interpreter`; grant the specific binary a workflow needs. The table
+is best-effort, not a boundary: it can never enumerate every program that can
+spawn another, so allowlisting a program is trusting it with the value.
+Passing `--allow-interpreter` is a deliberate decision to trust the agent with
+that program's full reach.
 
 ### 3. Redaction is output-only and best-effort
 

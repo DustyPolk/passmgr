@@ -218,16 +218,27 @@ is created at a terminal, while the unlock daemon is running:
 ```bash
 passmgr unlock
 passmgr grant create --label 'deploy prod' --tag prod \
-    --command /usr/bin/gh --expires 1h --out ./deploy.token
+    --command /usr/bin/gh --allow-interpreter \
+    --expires 1h --out ./deploy.token
 ```
 
 `--ref` (a `pm://` reference) and `--tag` choose the entries a grant covers and
 are repeatable; tags must all match. `--command` is repeatable and each path
 is resolved and canonicalized before it is stored. `--expires` accepts minutes
 (`30m`), hours (`1h`) or days (`7d`) up to 30 days, and `--max-uses` adds an
-optional use limit. Shells and interpreters are refused unless
-`--allow-interpreter` is given: a grant that allows one can run arbitrary code,
-so the redactor no longer bounds what it can do with the secret.
+optional use limit.
+
+A grant binds only that executable, and the daemon checks only it. Any allowed
+program that can start another one is therefore a way to run arbitrary code
+with the secret: a shell or language runtime, but equally `git`
+(`git -c alias.pwn='!cmd' pwn`), `gh` (`gh alias set --shell pwn ...`), `find
+-exec`, `tar --to-command`, `ssh`'s `ProxyCommand`, `sed`'s `e` command, an
+editor's shell escape, `docker`, `make`, `cargo`, `psql` and many more. Such a
+program is refused unless you pass `--allow-interpreter`. The list behind that
+refusal is best-effort and cannot name every program that can spawn another,
+so allowlisting any program is trusting it with the value: pass the flag only
+when you trust everything it can run. The example above allows `gh` on purpose,
+for a workflow that drives the GitHub CLI.
 
 The master password is prompted once. The CLI derives the vault key, proves it
 to the daemon for this exact request, and the daemon accepts that request once;
