@@ -411,8 +411,9 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   `revoked_at` with `Vault::save_with_key`, which reuses the container's salt
   and KDF parameters so the hot key stays valid. Revoking an already-revoked
   id is a successful no-op (`revoked: 0`), an unknown id is `not_found`, and
-  `--all` targets only active grants, so the count never includes grants that
-  were already revoked. The CLI maps a `not_found` answer to exit 3 only when
+  `--all` targets only grants that are active at the daemon's captured `now`
+  (one `Grant::status` predicate, shared with `grant list`/`show`), so expired,
+  exhausted and already-revoked grants are left untouched and never counted. The CLI maps a `not_found` answer to exit 3 only when
   it named an id; `--all` has no id to name, so that answer becomes a daemon
   error (exit 1) and never a panic, since any same-user process may replace
   the socket (TODO R.27).

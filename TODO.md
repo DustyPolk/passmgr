@@ -492,7 +492,7 @@ Rules that apply to every item:
       and exits 1. The new test fails against the old `expect` (exit 101 and
       `not_found implies an id`).
 
-- [ ] **R.28 `grant revoke --all` revokes expired and exhausted grants while
+- [x] **R.28 `grant revoke --all` revokes expired and exhausted grants while
       the help, decisions and test say "active".**
       `revoke_grants` (`src/daemon.rs:743-748`) filters only
       `!grant.is_revoked()`, so expired and exhausted grants are included and
@@ -511,6 +511,13 @@ Rules that apply to every item:
       Test: a `revoke_grants` unit test with an explicit `now` and one active,
       one expired and one exhausted grant, asserting the chosen contract,
       the count, and each grant's `revoked_at`/status.
+      Done: code now matches the docs. `GrantStatus` and `Grant::status(now)`
+      live in `src/grant.rs`; `Grant::is_active(now)` and the private
+      `check_active` both use that one classifier, and `grant list`/`show`
+      print `GrantStatus::name()`. `revoke_grants` filters with
+      `grant.is_active(now)`, so expired and exhausted grants are untouched
+      and never counted. The unit test in `src/daemon/tests.rs` fails against
+      the old `!is_revoked()` filter (it would report 3 and revoke all 3).
 
 - [ ] **R.29 `--out` paths are echoed with raw control characters.**
       The success line at `src/cli/grant.rs:226` interpolates

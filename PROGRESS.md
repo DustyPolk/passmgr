@@ -1,3 +1,32 @@
+## 2026-11-03 — `revoke --all` touches only active grants (TODO R.28)
+
+- One predicate now decides "active": `GrantStatus` (`Active`, `Expired`,
+  `Exhausted`, `Revoked`) and `Grant::status(now)` live in `src/grant.rs`.
+  `Grant::is_active(now)` and the private `check_active` both go through it,
+  so authorization, `grant list`/`show` and `revoke --all` cannot disagree.
+  `GrantStatus::name()` owns the words "active"/"expired"/"exhausted"/
+  "revoked"; the CLI's duplicate `grant_status` helper is gone.
+- `revoke_grants` (`src/daemon.rs`) filters `grant.is_active(now)` instead of
+  `!grant.is_revoked()`. `--all` therefore leaves expired and exhausted grants
+  untouched and reports only the grants it actually revoked. Matching the docs
+  was chosen over redefining "active" to mean "not revoked": a human needs the
+  count to mean "grants that were in force".
+- Docs: `DECISIONS.md` and the `grant_revoke` section of `MCP.md` now state
+  that expired, exhausted and already-revoked grants are untouched and never
+  counted; `src/cli/help.rs` already said "every active grant" and is now true.
+- Test: `src/daemon/tests.rs::revoke_all_leaves_expired_and_exhausted_grants_alone`
+  builds one active, one expired and one exhausted grant in a real vault with
+  an explicit `now`, calls `revoke_grants(..., All, now)`, and asserts the
+  count is 1, the active grant is `Revoked` with `revoked_at == Some(now)`, and
+  the others keep their `Expired`/`Exhausted` status and `revoked_at == None`.
+  It fails against the previous filter (count 3, all revoked).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  the full `cargo test` pass. `cargo audit` is not installed; skipped as
+  instructed.
+- **Next iteration must know:** R.29 (`--out` escaping, `src/cli/grant.rs`) is
+  the next Phase R item. `src/grant.rs` is at ~981 lines; adding another
+  model concern should split its tests into `src/grant/tests.rs` first. The
+  CLI's `grant list`/`show` output text is unchanged by this item.
 ## 2026-11-03 — Do not panic when `revoke --all` gets `not_found` (TODO R.27)
 
 - `src/cli/grant.rs` (`command_grant_revoke`): the

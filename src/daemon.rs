@@ -743,7 +743,7 @@ fn revoke_grants(
         GrantRevokeRequest::All => vault
             .grants()
             .iter()
-            .filter(|grant| !grant.is_revoked())
+            .filter(|grant| grant.is_active(now))
             .map(|grant| grant.id())
             .collect(),
     };

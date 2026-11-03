@@ -354,7 +354,7 @@ pub(crate) fn command_grant_list(
             "- {} ({}) [{}]",
             grant.id(),
             grant.label(),
-            grant_status(grant, now)
+            grant.status(now).name()
         )
         .expect("writing to a String cannot fail");
         writeln!(
@@ -389,7 +389,7 @@ pub(crate) fn command_grant_show(
     use std::fmt::Write as _;
 
     let mut output = format!("Grant {} ({})\n", grant.id(), grant.label());
-    writeln!(output, "  status: {}", grant_status(grant, now))
+    writeln!(output, "  status: {}", grant.status(now).name())
         .expect("writing to a String cannot fail");
     writeln!(output, "  scope: {}", describe_scope(grant.scope()))
         .expect("writing to a String cannot fail");
@@ -496,20 +496,6 @@ pub(crate) fn command_grant_revoke(
     Ok(())
 }
 
-/// The human-readable status: revoked wins over expiry, which wins over
-/// exhaustion, so a revoked grant never shows as merely expired.
-fn grant_status(grant: &Grant, now: u64) -> &'static str {
-    if grant.is_revoked() {
-        "revoked"
-    } else if now >= grant.expires_at_unix() {
-        "expired"
-    } else if grant.uses_left() == Some(0) {
-        "exhausted"
-    } else {
-        "active"
-    }
-}
-
 fn describe_scope(scope: &Scope) -> String {
     let mut parts = Vec::new();
     if !scope.refs().is_empty() {
@@ -586,7 +572,7 @@ fn grant_metadata(grant: &Grant, now: u64) -> serde_json::Value {
         "uses_left": grant.uses_left(),
         "revoked_at": grant.revoked_at_unix().map(timestamp::to_json),
         "last_used": grant.last_used_unix().map(timestamp::to_json),
-        "status": grant_status(grant, now),
+        "status": grant.status(now).name(),
     })
 }
 
@@ -886,19 +872,19 @@ mod tests {
     fn grant_status_puts_revoked_before_expired_and_exhausted() {
         let now = 1_700_000_000;
         let active = sample_grant(now);
-        assert_eq!(grant_status(&active, now), "active");
+        assert_eq!(active.status(now).name(), "active");
 
         let mut expired = sample_grant(now);
-        assert_eq!(grant_status(&expired, now + 3_600), "expired");
+        assert_eq!(expired.status(now + 3_600).name(), "expired");
 
         let mut exhausted = sample_grant(now);
         exhausted.mark_used(now).expect("first use");
         exhausted.mark_used(now).expect("second use");
-        assert_eq!(grant_status(&exhausted, now), "exhausted");
+        assert_eq!(exhausted.status(now).name(), "exhausted");
 
         // Revoking an expired grant still reads as revoked, not expired.
         expired.revoke(now + 10).expect("revoke");
-        assert_eq!(grant_status(&expired, now + 3_600), "revoked");
+        assert_eq!(expired.status(now + 3_600).name(), "revoked");
     }
 
     #[test]

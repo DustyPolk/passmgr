@@ -489,6 +489,37 @@ pub struct GrantSpec {
     pub max_uses: Option<u32>,
 }
 
+/// A grant's state at one wall-clock instant.
+///
+/// One classifier for every caller: authorization, `grant list`/`show` and
+/// `revoke --all` all go through [`Grant::status`], so a grant can never be
+/// "active" for one caller and not for another. Revoked wins over expired,
+/// which wins over exhausted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GrantStatus {
+    Active,
+    Expired,
+    Exhausted,
+    Revoked,
+}
+
+impl GrantStatus {
+    /// True only for [`GrantStatus::Active`].
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Active)
+    }
+
+    /// The word `grant list`/`grant show` print, and the `--json` `status`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Expired => "expired",
+            Self::Exhausted => "exhausted",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
 /// A stored authorization.
 #[derive(Clone)]
 pub struct Grant {
@@ -769,6 +800,26 @@ impl Grant {
         self.revoked_at.is_some()
     }
 
+    /// Classify the grant at `now`. The order is fixed: a revoked grant never
+    /// shows as merely expired, and an expired grant never shows as merely
+    /// exhausted.
+    pub fn status(&self, now: u64) -> GrantStatus {
+        if self.revoked_at.is_some() {
+            GrantStatus::Revoked
+        } else if now >= self.expires_at {
+            GrantStatus::Expired
+        } else if self.max_uses.is_some_and(|max| self.uses >= max) {
+            GrantStatus::Exhausted
+        } else {
+            GrantStatus::Active
+        }
+    }
+
+    /// True exactly when a request at `now` would get past the active check.
+    pub fn is_active(&self, now: u64) -> bool {
+        self.status(now).is_active()
+    }
+
     pub fn token_hash(&self) -> &TokenHash {
         &self.token_hash
     }
@@ -841,16 +892,12 @@ impl Grant {
     fn check_active(&self, now: u64) -> std::result::Result<(), Denied> {
         // Callers reach here only through `mark_used`, which bounds `now`
         // first; the comparison is still safe for any `u64`.
-        if self.revoked_at.is_some() {
-            return Err(Denied::Revoked);
+        match self.status(now) {
+            GrantStatus::Active => Ok(()),
+            GrantStatus::Revoked => Err(Denied::Revoked),
+            GrantStatus::Expired => Err(Denied::Expired),
+            GrantStatus::Exhausted => Err(Denied::UsedUp),
         }
-        if now >= self.expires_at {
-            return Err(Denied::Expired);
-        }
-        if self.max_uses.is_some_and(|max| self.uses >= max) {
-            return Err(Denied::UsedUp);
-        }
-        Ok(())
     }
 }
 

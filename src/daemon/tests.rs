@@ -415,3 +415,71 @@ fn a_grant_frame_with_a_forged_command_does_not_spend_the_approval() {
     );
     assert_eq!(approvals.take(&approved.digest(), Instant::now()), Ok(()));
 }
+
+/// `revoke --all` targets only grants that are active at the daemon's captured
+/// `now`: expired and exhausted grants are left untouched and never counted
+/// (TODO R.28).
+#[test]
+fn revoke_all_leaves_expired_and_exhausted_grants_alone() {
+    use crate::grant::{Capabilities, Grant, GrantSpec, GrantStatus, Scope, TokenHash};
+    use crate::store::EntryId;
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("vault.dat");
+    let master = "test master password";
+    let now = 1_700_000_000u64;
+    let entry = EntryId::generate().expect("entry id");
+
+    let make = |label: &str, created: u64, expires_at: u64, max_uses: Option<u32>| {
+        Grant::create(
+            GrantSpec {
+                label: label.to_owned(),
+                scope: Scope::new(vec![entry], Vec::new(), None).expect("scope"),
+                commands: vec![std::path::PathBuf::from("/usr/bin/true")],
+                capabilities: Capabilities::RUN,
+                expires_at,
+                max_uses,
+            },
+            TokenHash::of(label.as_bytes()),
+            created,
+        )
+        .expect("grant")
+    };
+
+    let active = make("active", now, now + 3_600, Some(2));
+    let expired = make("expired", now - 7_200, now - 1, Some(2));
+    let mut exhausted = make("exhausted", now, now + 3_600, Some(1));
+    exhausted.mark_used(now).expect("use the only slot");
+    let (active_id, expired_id, exhausted_id) = (active.id(), expired.id(), exhausted.id());
+
+    let mut vault = Vault::open_for_add(&path, master).expect("create vault");
+    vault.add_grant(active).unwrap();
+    vault.add_grant(expired).unwrap();
+    vault.add_grant(exhausted).unwrap();
+    vault.save(master).unwrap();
+    drop(vault);
+
+    let container = std::fs::read(&path).expect("read vault");
+    let key = crate::crypto::unlock_key(&container, master).expect("derive key");
+    let key = LockedKey::new(key).expect("lock key");
+
+    let revoked = revoke_grants(&path, &key, GrantRevokeRequest::All, now).expect("revoke");
+    assert_eq!(revoked, 1, "only the active grant may be counted");
+
+    let vault = Vault::open_with_key(&path, key.as_slice()).expect("reopen");
+    let active = vault.grant(active_id).expect("active grant");
+    assert_eq!(active.status(now), GrantStatus::Revoked);
+    assert_eq!(active.revoked_at_unix(), Some(now));
+
+    let expired = vault.grant(expired_id).expect("expired grant");
+    assert_eq!(expired.status(now), GrantStatus::Expired);
+    assert_eq!(expired.revoked_at_unix(), None, "expired is left untouched");
+
+    let exhausted = vault.grant(exhausted_id).expect("exhausted grant");
+    assert_eq!(exhausted.status(now), GrantStatus::Exhausted);
+    assert_eq!(
+        exhausted.revoked_at_unix(),
+        None,
+        "exhausted is left untouched"
+    );
+}

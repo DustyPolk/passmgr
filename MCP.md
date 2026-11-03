@@ -251,7 +251,9 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   timestamp wins, so revoking twice changes nothing), saves it with the same
   salt and KDF parameters, and answers `{"type":"grant_revoked","revoked":N}`
   with the number of grants it newly revoked. An unknown id is `not_found`;
-  `--all` with nothing active answers `revoked: 0`. No proof is required:
+  `--all` targets only grants active at that instant, so expired, exhausted and
+  already-revoked grants are left untouched, and `--all` with nothing active
+  answers `revoked: 0`. No proof is required:
   revocation only removes access, so an agent may revoke for itself, and the
   next request that checks the grant sees it revoked (the daemon re-reads the
   vault for every request). The answer carries no id, label or hash.
