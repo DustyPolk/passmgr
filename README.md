@@ -228,6 +228,12 @@ is resolved and canonicalized before it is stored. `--expires` accepts minutes
 (`30m`), hours (`1h`) or days (`7d`) up to 30 days, and `--max-uses` adds an
 optional use limit.
 
+Before anything is written or the daemon is contacted, `grant create` prints
+the request it is about to approve — label, scope, canonical commands,
+capabilities, expiry and use limit — with a warning for every allowed program
+runner, then asks for an explicit `y` or `yes`. Anything else, including an
+empty line, cancels with exit code 2 and writes nothing.
+
 A grant binds only that executable, and the daemon checks only it. Any allowed
 program that can start another one is therefore a way to run arbitrary code
 with the secret: a shell or language runtime, but equally `git`
@@ -240,10 +246,11 @@ so allowlisting any program is trusting it with the value: pass the flag only
 when you trust everything it can run. The example above allows `gh` on purpose,
 for a workflow that drives the GitHub CLI.
 
-The master password is prompted once. The CLI derives the vault key, proves it
-to the daemon for this exact request, and the daemon accepts that request once;
-only then does the CLI write the grant into the vault with the same key. The
-raw 32-byte token is written only to `--out`, as a new file with mode 0600,
+After the confirmation, the master password is prompted once. The CLI derives
+the vault key, proves it to the daemon for this exact request, and the daemon
+accepts that request once; only then does the CLI write the grant into the
+vault with the same key. The raw 32-byte token is written only to `--out`, as
+a new file with mode 0600,
 and never to stdout; an existing file is refused, and a failed command removes
 the file it created. A vault that cannot hold another grant is refused before
 the approval is spent. The vault stores only the token's SHA-256 hash.

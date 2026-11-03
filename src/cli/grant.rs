@@ -16,7 +16,7 @@
 //! re-encrypt the vault with the key it already holds.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,7 +25,7 @@ use passmgr::agent;
 use passmgr::crypto;
 use passmgr::grant::{
     Capabilities, Grant, GrantRequest, GrantSpec, GrantToken, MAX_GRANT_LIFETIME_SECS, Scope,
-    is_program_runner,
+    escape_hidden, is_program_runner,
 };
 use passmgr::protocol::{
     GrantCreateRequest, GrantRevokeRequest, ProveRequest, Request, Response, ResponseError,
@@ -136,27 +136,15 @@ pub(crate) fn command_grant_create(
         ));
     }
 
-    // Creating a grant is a human act. Checked before the password prompt or
-    // any file is created: a refusal must cost neither.
+    // Creating a grant is a human act. Checked before the approval summary,
+    // the password prompt or any file is created: a refusal must cost nothing.
     agent::check_human(agent_mode)
         .map_err(|refusal| Error::Refused(refusal.message_for("create a grant")))?;
     warn_insecure(vault_path)?;
 
-    let paths = socket::RuntimePaths::resolve();
-    let session_token = load_session(&paths)?;
-
-    // Created before the prompt so an existing `--out` fails without asking
-    // for the password, and removed by the guard if anything later fails.
-    let mut out = TokenFile::create(&options.out)?;
-
-    let container = vault::read_container(vault_path)?;
-    let master = prompt_master(false)?;
-    // Derive and authenticate once. The same key proves the approval and
-    // writes the grant, so the vault is never decrypted a second time.
-    let key = crypto::unlock_key(&container, &master)?;
-    drop(master);
-    drop(container);
-
+    // Build the exact request first, then show the human what approving it
+    // would mean (TODO R.26). Everything here is metadata the agent supplied
+    // or the vault already stores; no credential value is involved.
     let now = unix_now()?;
     let token = GrantToken::generate()?;
     let scope = Scope::new(options.references, options.tags, None)?;
@@ -172,6 +160,32 @@ pub(crate) fn command_grant_create(
         token.hash(),
     )?;
     request.check_approvable(now)?;
+
+    // Nothing below this line runs unless the human typed an explicit yes: a
+    // `n` must leave no token file and must not contact the daemon.
+    print_approval_prompt(&request, now);
+    if !passmgr::terminal::prompt_yes_no("Approve this grant? [y/N] ")? {
+        return Err(Error::InvalidInput(
+            "grant creation cancelled; nothing was written".to_owned(),
+        ));
+    }
+
+    let paths = socket::RuntimePaths::resolve();
+    let session_token = load_session(&paths)?;
+
+    // Created after the human said yes and before the password prompt, so an
+    // existing `--out` fails without asking for the password; the guard
+    // removes the file if anything later fails.
+    let mut out = TokenFile::create(&options.out)?;
+
+    let container = vault::read_container(vault_path)?;
+    let master = prompt_master(false)?;
+    // Derive and authenticate once. The same key proves the approval and
+    // writes the grant, so the vault is never decrypted a second time.
+    let key = crypto::unlock_key(&container, &master)?;
+    drop(master);
+    drop(container);
+
     let grant = request.clone().create_grant(now)?;
 
     let mut vault = vault::Vault::open_with_key(vault_path, &key)?;
@@ -228,6 +242,86 @@ pub(crate) fn command_grant_create(
         options.out.display()
     );
     Ok(())
+}
+
+/// Show the human the request they are about to approve, on stderr.
+///
+/// Only metadata goes to the terminal: label, scope, commands, capabilities,
+/// expiry and use limit. The strings are untrusted (an agent suggested the
+/// label and paths), so each is escaped and none can drive the terminal.
+/// Every program runner that `--allow-interpreter` let through gets its own
+/// warning, because allowing one is allowing whatever it can start (TODO
+/// R.25).
+fn print_approval_prompt(request: &GrantRequest, now: u64) {
+    eprint!("{}", describe_request(request, now));
+    let color = std::io::stderr().is_terminal();
+    for warning in runner_warnings(request) {
+        eprintln!("{}", render_warning(&warning, color));
+    }
+}
+
+/// The request in the form the human reads before approving it.
+fn describe_request(request: &GrantRequest, now: u64) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::from("Grant request:\n");
+    writeln!(output, "  label: {}", escape_hidden(request.label()))
+        .expect("writing to a String cannot fail");
+    writeln!(output, "  scope: {}", describe_scope(request.scope()))
+        .expect("writing to a String cannot fail");
+    writeln!(output, "  commands:").expect("writing to a String cannot fail");
+    for command in request.commands() {
+        writeln!(output, "    {}", escape_hidden(command))
+            .expect("writing to a String cannot fail");
+    }
+    writeln!(
+        output,
+        "  capabilities: {}",
+        request.capabilities().names().join(", ")
+    )
+    .expect("writing to a String cannot fail");
+    writeln!(
+        output,
+        "  {}",
+        describe_expires_at(request.expires_at(), now)
+    )
+    .expect("writing to a String cannot fail");
+    writeln!(
+        output,
+        "  max uses: {}",
+        request
+            .max_uses()
+            .map(|uses| uses.to_string())
+            .unwrap_or_else(|| "unlimited".to_owned())
+    )
+    .expect("writing to a String cannot fail");
+    output
+}
+
+/// A warning line for every command that can run another program.
+fn runner_warnings(request: &GrantRequest) -> Vec<String> {
+    request
+        .commands()
+        .iter()
+        .filter(|command| is_program_runner(Path::new(command)))
+        .map(|command| {
+            format!(
+                "WARNING: '{}' is a shell, interpreter or program runner: \
+                 it can run any command with the credentials this grant covers",
+                escape_hidden(command)
+            )
+        })
+        .collect()
+}
+
+/// Bold red when the human's terminal can show it, plain text otherwise: a
+/// piped summary or a captured log must not gain escape sequences.
+fn render_warning(text: &str, color: bool) -> String {
+    if color {
+        format!("\x1b[1;31m{text}\x1b[0m")
+    } else {
+        text.to_owned()
+    }
 }
 
 /// `passmgr grant list [--json]`: metadata for every stored grant.
@@ -432,7 +526,10 @@ fn describe_uses(grant: &Grant) -> String {
 }
 
 fn describe_expiry(grant: &Grant, now: u64) -> String {
-    let expires_at = grant.expires_at_unix();
+    describe_expires_at(grant.expires_at_unix(), now)
+}
+
+fn describe_expires_at(expires_at: u64, now: u64) -> String {
     if expires_at <= now {
         format!("expired: {}", timestamp::format_utc(expires_at))
     } else {
@@ -650,6 +747,76 @@ mod tests {
         std::fs::write(&path, b"keep me").unwrap();
         assert!(TokenFile::create(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
+    }
+
+    fn sample_request(now: u64, commands: &[&str]) -> GrantRequest {
+        GrantRequest::new(
+            GrantSpec {
+                label: "deploy prod".into(),
+                scope: Scope::new(
+                    vec![
+                        passmgr::store::EntryId::from_hex("00112233445566778899aabbccddeeff")
+                            .expect("entry id"),
+                    ],
+                    vec!["prod".into()],
+                    None,
+                )
+                .expect("scope"),
+                commands: commands.iter().map(PathBuf::from).collect(),
+                capabilities: Capabilities::RUN,
+                expires_at: now + 3_600,
+                max_uses: Some(2),
+            },
+            passmgr::grant::TokenHash::of(b"approval-canary-token"),
+        )
+        .expect("request")
+    }
+
+    /// The human approves exactly what the summary shows: the label, scope,
+    /// commands, capabilities, expiry and use limit. No secret exists at this
+    /// point, and the request's token hash has no accessor here.
+    #[test]
+    fn the_approval_summary_names_every_value_being_approved() {
+        let now = 1_700_000_000;
+        let summary = describe_request(&sample_request(now, &["/usr/bin/gh"]), now);
+        assert!(summary.starts_with("Grant request:\n"), "{summary}");
+        assert!(summary.contains("  label: deploy prod"), "{summary}");
+        assert!(
+            summary.contains("refs: pm://00112233445566778899aabbccddeeff"),
+            "{summary}"
+        );
+        assert!(summary.contains("tags: prod"), "{summary}");
+        assert!(
+            summary.contains("  commands:\n    /usr/bin/gh\n"),
+            "{summary}"
+        );
+        assert!(summary.contains("  capabilities: run"), "{summary}");
+        assert!(
+            summary.contains("expires: 2023-11-14T23:13:20Z (in 1h 0m)"),
+            "{summary}"
+        );
+        assert!(summary.contains("  max uses: 2"), "{summary}");
+        assert!(!summary.contains("approval-canary-token"), "{summary}");
+    }
+
+    #[test]
+    fn only_program_runners_produce_a_warning() {
+        let now = 1_700_000_000;
+        let warnings = runner_warnings(&sample_request(now, &["/usr/bin/gh"]));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("WARNING: '/usr/bin/gh'"),
+            "{warnings:?}"
+        );
+        assert!(warnings[0].contains("can run any command"), "{warnings:?}");
+
+        assert!(runner_warnings(&sample_request(now, &["/usr/bin/true", "/bin/echo"])).is_empty());
+    }
+
+    #[test]
+    fn a_warning_is_only_coloured_for_a_terminal() {
+        assert_eq!(render_warning("WARNING", false), "WARNING");
+        assert_eq!(render_warning("WARNING", true), "\x1b[1;31mWARNING\x1b[0m");
     }
 
     fn sample_grant(now: u64) -> Grant {

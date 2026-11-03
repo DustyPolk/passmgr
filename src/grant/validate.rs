@@ -19,7 +19,7 @@ use crate::protocol::MAX_PATH_BYTES;
 /// The error names the whole class rather than echoing the offending code
 /// point (or the label), because the label is untrusted text that later gets
 /// printed to a terminal. A bad command is echoed back, but escaped (see
-/// [`escape_hidden`]) so its own characters cannot forge the error line.
+/// [`escape_quoted`]) so its own characters cannot forge the error line.
 pub const LABEL_FORBIDDEN_CLASSES: &str =
     "control, bidi, zero-width/format, line-separator or variation-selector";
 
@@ -99,17 +99,32 @@ fn is_hidden_or_reordering(character: char) -> bool {
     )
 }
 
-/// Render untrusted path text for an error message.
+/// Render untrusted path text for a quoted error message.
 ///
 /// Every character [`is_hidden_or_reordering`] refuses is written as its
 /// `\u{..}` escape, so a command such as `/usr/bin/gh\u{1b}[2K\r` is named in
 /// the error without moving the cursor or erasing the line around it. The
 /// quote and backslash are escaped too, so the quoted form cannot be closed
 /// early. Everything visible (including non-ASCII scripts) is kept as is.
-fn escape_hidden(text: &str) -> String {
+fn escape_quoted(text: &str) -> String {
+    escape(text, true)
+}
+
+/// Render untrusted text for display, escaping only what a terminal acts on.
+///
+/// Unlike [`escape_quoted`], visible characters — including quotes and
+/// backslashes — are kept exactly as written, so a human approval summary
+/// shows `Bob's token` and not `Bob\'s token`. A validated label or command
+/// cannot contain a hidden character, but escaping here means a caller cannot
+/// print one even if that validation is ever loosened.
+pub fn escape_hidden(text: &str) -> String {
+    escape(text, false)
+}
+
+fn escape(text: &str, quoted: bool) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
-        if is_hidden_or_reordering(character) || matches!(character, '\\' | '\'') {
+        if is_hidden_or_reordering(character) || (quoted && matches!(character, '\\' | '\'')) {
             escaped.extend(character.escape_debug());
         } else {
             escaped.push(character);
@@ -321,19 +336,19 @@ pub(super) fn validate_commands(commands: Vec<PathBuf>) -> Result<Vec<PathBuf>> 
             return Err(Error::InvalidInput(format!(
                 "grant command '{}' must not contain {LABEL_FORBIDDEN_CLASSES} \
                  characters",
-                escape_hidden(text)
+                escape_quoted(text)
             )));
         }
         if !command.is_absolute() {
             return Err(Error::InvalidInput(format!(
                 "grant command '{}' must be an absolute path",
-                escape_hidden(text)
+                escape_quoted(text)
             )));
         }
         if text.len() > MAX_PATH_BYTES {
             return Err(Error::InvalidInput(format!(
                 "grant command '{}' exceeds {MAX_PATH_BYTES} bytes",
-                escape_hidden(text)
+                escape_quoted(text)
             )));
         }
     }
@@ -428,5 +443,19 @@ mod tests {
         ] {
             assert!(!is_program_runner(Path::new(path)), "{path}");
         }
+    }
+
+    /// The display form keeps visible text exactly as written — a human must
+    /// see the label they approved, quotes and backslashes included — while a
+    /// hidden character a terminal would act on is shown as an escape.
+    #[test]
+    fn display_escaping_keeps_visible_text_and_escapes_hidden_text() {
+        assert_eq!(escape_hidden("Bob's token"), "Bob's token");
+        assert_eq!(escape_hidden(r"C:\vault"), r"C:\vault");
+        assert_eq!(
+            escape_hidden("/usr/bin/gh\u{1b}[2K\r"),
+            r"/usr/bin/gh\u{1b}[2K\r"
+        );
+        assert_eq!(escape_hidden("a\u{202e}b"), r"a\u{202e}b");
     }
 }

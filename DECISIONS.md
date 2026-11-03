@@ -542,6 +542,19 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   with the value. Refusal happens before the password prompt, file creation or
   any daemon request; `src/grant.rs` and `tests/grant_cli.rs` (a fake `gh`) pin
   both the table and the end-to-end refusal.
+- `pm grant create` shows the request and asks the human to confirm it before
+  anything else happens (TODO R.26). The summary is stderr-only metadata:
+  escaped label, scope, canonical commands, capabilities, expiry and use
+  limit, plus one red warning per allowed program runner (bold ANSI only when
+  stderr is a terminal, so a piped log gains no escapes). Confirmation reads
+  one line and accepts only `y`/`yes`, case-insensitive; a blank line, any
+  other word or EOF exits 2 with "cancelled; nothing was written". Ordering
+  is deliberate: request build and validation, then summary and confirmation,
+  then `load_session`, the token file, the password prompt and the daemon. A
+  `n` therefore leaves no file, and an existing `--out` is still refused
+  before the password. Display text uses `grant::escape_hidden`, which
+  escapes only hidden characters so `Bob's token` keeps its apostrophe; error
+  messages keep the quoted variant that also escapes quotes and backslashes.
 - `pm grant create` mints a `GrantToken` of 32 random bytes, held in
   `Zeroizing`, with a redacting `Debug`. Its lowercase hex is written only to
   `--out` (opened `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, then `fsync`); an

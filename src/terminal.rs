@@ -57,6 +57,26 @@ pub fn prompt_password(prompt: &str) -> Result<Zeroizing<String>> {
     Ok(line)
 }
 
+/// Print `prompt` to stderr and read one line from stdin as a yes/no answer.
+///
+/// Only an explicit `y` or `yes` (case-insensitive, surrounding whitespace
+/// ignored) is a yes. An empty line, any other word and end of input are all
+/// a no: approving a grant must take a deliberate keystroke, never the
+/// absence of one.
+pub fn prompt_yes_no(prompt: &str) -> Result<bool> {
+    eprint!("{prompt}");
+    io::stderr().flush()?;
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    Ok(is_yes(&line))
+}
+
+/// The pure answer test behind [`prompt_yes_no`].
+pub fn is_yes(answer: &str) -> bool {
+    let answer = answer.trim();
+    answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes")
+}
+
 #[cfg(unix)]
 struct EchoGuard {
     fd: libc::c_int,
@@ -91,6 +111,32 @@ impl Drop for EchoGuard {
         // `self.original` is an initialized termios structure.
         unsafe {
             libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_yes;
+
+    #[test]
+    fn only_an_explicit_yes_is_yes() {
+        for yes in ["y", "Y", "yes", "YES", "Yes", " y ", "yes\r\n"] {
+            assert!(is_yes(yes), "{yes:?} must be a yes");
+        }
+        for no in [
+            "",
+            "\n",
+            "n",
+            "no",
+            "nope",
+            "ye",
+            "yess",
+            "ok",
+            "1",
+            "yes please",
+        ] {
+            assert!(!is_yes(no), "{no:?} must not be a yes");
         }
     }
 }

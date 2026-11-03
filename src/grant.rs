@@ -881,6 +881,7 @@ mod validate;
 pub use capabilities::{Capabilities, Capability};
 pub use request::GrantRequest;
 pub use token::{GRANT_TOKEN_BYTES, GrantToken};
+pub use validate::escape_hidden;
 pub use validate::{LABEL_FORBIDDEN_CLASSES, is_program_runner, validate_field_name};
 
 #[cfg(test)]

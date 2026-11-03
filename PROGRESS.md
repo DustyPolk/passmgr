@@ -1,3 +1,43 @@
+## 2026-11-03 — Show and confirm a grant before creating it (TODO R.26)
+
+- `pm grant create` now builds the `GrantRequest` first and prints it to
+  stderr before anything else: label, scope, canonical commands,
+  capabilities, expiry and use limit, plus one warning per allowed program
+  runner. The human must answer `y`/`yes`; anything else exits 2 with
+  "cancelled; nothing was written". The confirmation sits before
+  `load_session`, `TokenFile::create`, the master-password prompt and the
+  daemon, so a `n` leaves no file, no socket traffic and no spent approval.
+- `terminal::prompt_yes_no`/`is_yes` are the new prompt: only an explicit yes
+  (case-insensitive, trimmed) approves; a blank line, another word or EOF is
+  no.
+- `grant::escape_hidden` (new, display form) escapes only hidden characters,
+  so `Bob's token` keeps its apostrophe; the quoted error form that also
+  escapes `\` and `'` is now the private `escape_quoted`. The summary and
+  warning carry metadata only; no credential value exists at that point.
+- The runner warning is bold red only when stderr is a TTY, so piped or
+  captured output gains no escape sequences. A command path with a hidden
+  character is still refused by `resolve_commands` before the summary, and
+  the error names it as text (`\u{1b}`), never as bytes.
+- Tests: two new PTY tests — cancelling keeps vault, token file and daemon
+  untouched; a hidden-character command is refused before the summary — plus
+  ordering/content assertions in the existing create and `--allow-interpreter`
+  tests. Unit tests cover `is_yes`, warning colouring, summary contents and
+  display escaping.
+- `tests/grant_cli.rs` grew past 1,000 lines, so its fixture moved to
+  `tests/grant_support/mod.rs` and the list/show/revoke tests to
+  `tests/grant_manage_cli.rs`; no test content changed.
+- Docs: README, `--help`/`tests/fixtures/help.txt`, the `MCP.md` runner bullet
+  and `DECISIONS.md` now describe the summary and the confirmation order.
+- Gate: `cargo fmt --check`, `clippy -D warnings` and the full `cargo test`
+  pass. `cargo audit` is not installed; skipped as instructed.
+- **Next iteration must know:** approving still only proves presence, not
+  comprehension — the human must read the summary, and the digest binds the
+  same request. The `--out` path is deliberately not in the summary; R.29
+  still has to escape it in the success line and the overwrite error. Because
+  the summary comes before `load_session`, approving with no daemon running
+  shows "no passmgr daemon is running" (exit 1) after the yes; that ordering
+  is what makes `n` provably socket-free.
+
 ## 2026-11-03 — Refuse program runners, not just interpreters (TODO R.25)
 
 - `grant/validate.rs`: `INTERPRETERS`/`VERSIONED_INTERPRETERS` became

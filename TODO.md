@@ -441,8 +441,11 @@ Rules that apply to every item:
       `tests/docs.rs::security_documents_program_runner_exfiltration` and
       `documented_grant_example_flags_a_program_runner` pin the prose.
 
-- [ ] **R.26 `pm grant create` prompts for the master password without ever
-      showing the request the human is approving.**
+- [x] **R.26 `pm grant create` prompts for the master password without ever
+      showing the request the human is approving.** (done: the summary and an
+      explicit y/N now come before the token file, the password and any daemon
+      contact; the summary is stderr-only metadata and stays plain when not a
+      TTY.)
       `command_grant_create` checks the TTY, creates the token file and calls
       `prompt_master(false)` at `src/cli/grant.rs:153`; the `GrantRequest` is
       built at `src/cli/grant.rs:163-176`, and its label, refs/tags, commands,

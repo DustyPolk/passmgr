@@ -115,7 +115,9 @@ Commands:
                                                   run any command.
                                --out FILE         New token file (O_EXCL).
                              At least one --ref or --tag and one --command
-                             are required. Refuses to overwrite --out.
+                             are required. The request is printed first and
+                             needs an explicit 'y' or 'yes'; anything else
+                             cancels. Refuses to overwrite --out.
   grant list [--json]        List stored grants: id, label, scope,
                              allowlisted commands, uses, expiry and status.
                              Metadata only; a token or its hash is never

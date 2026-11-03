@@ -266,10 +266,12 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   `dash`, `env`, `xargs`, `python*`, `node`, `perl`, `ruby`, `busybox`, `git`,
   `gh`, `find`, `sed`, `tar`, `ssh`, `docker`, `podman`, `kubectl`, `make`,
   `cargo`, editors, pagers, …) in a command allowlist let the agent run code,
-  so it can exfiltrate secrets in ways redaction cannot catch. Approval shows a
-  red warning and requires an explicit `--allow-interpreter`. The name list is
-  best-effort: a grant binds only `argv[0]`, so allowing any program is a
-  decision to trust what it can run.
+  so it can exfiltrate secrets in ways redaction cannot catch. `pm grant
+  create` prints the whole request first (label, scope, commands, expiry, use
+  limit) and a red warning per allowed runner, then requires an explicit `y`
+  or `yes`; anything else writes nothing. Allowing one still requires
+  `--allow-interpreter`. The name list is best-effort: a grant binds only
+  `argv[0]`, so allowing any program is a decision to trust what it can run.
 - Claiming a token: when the MCP server creates a request, it also makes a
   random 32-byte claim secret and sends only its hash. After approval,
   `request_access`/`access_status` call `request_claim` with the secret. The
