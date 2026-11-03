@@ -1,3 +1,69 @@
+## 2026-11-02 — Unlock daemon core and `pmd` (TODO 2.4a)
+
+- Split the original 2.4 into **2.4a** (this entry), **2.4b** (`pm unlock` /
+  `pm lock` CLI) and **2.4c** (idle timeout), so each stays one iteration.
+- New `src/daemon.rs` (`#[cfg(unix)]`, registered in `src/lib.rs`) and
+  `src/bin/pmd.rs`. The daemon holds **only the derived 32-byte key**, never
+  the decrypted vault: `Vault::open_with_key` decrypts on demand when `run`
+  lands (2.6) and the plaintext is dropped immediately. Decided against
+  keeping a decrypted `Vault` in memory for the daemon's whole lifetime.
+- Key handover: `pmd` reads exactly `KEY_LEN` bytes from stdin (the inherited
+  pipe from `unlock`, 2.4b) and then requires EOF; short, long or trailing data
+  is refused. The key is never in argv or the environment. `LockedKey` keeps
+  it in a stable `Zeroizing<Vec<u8>>`, `mlock`s it best-effort, and `munlock`s
+  before zeroizing on drop. `Debug` prints only `mlock` state, no bytes.
+- Hardening: `RLIMIT_CORE` 0 (fail closed) and Linux
+  `prctl(PR_SET_DUMPABLE, 0)` (fail closed); `setsid()` best effort. On macOS
+  there is no `prctl`, so core dumps are disabled but same-user `ptrace`
+  exposure remains — TODO 2.7 must record that limit in `SECURITY.md`.
+- Startup order: harden -> install SIGTERM/SIGINT handlers -> `setsid` ->
+  verify the key against the vault -> bind the socket. A wrong key therefore
+  never creates a socket or makes `pmd` look alive. The `DaemonSocket` is held
+  for the whole loop (instance `flock` stays held) and dropped on lock/signal,
+  removing the socket.
+- Loop: non-blocking `accept_peer()` with a 200 ms sleep, so
+  `SIGTERM`/`SIGINT` (handler only stores an `AtomicBool`) exits/wipes within
+  ~200 ms. One request per connection, 5 s read/write timeout. `ping` ->
+  `pong`; `lock` -> `locked` then wipe/exit; `run` -> `unsupported` (2.6);
+  malformed, truncated, oversized, empty and unknown-type frames ->
+  `bad_request`. `PeerRejected`/`PeerCheckFailed` are ignored and the owner
+  keeps being served. No request can return a secret value.
+- Protocol: added `Response { Pong, Locked, Error(ResponseError) }`,
+  `ResponseError { BadRequest, Unsupported }` with stable codes
+  `bad_request` / `unsupported`, `encode_response` / `decode_response`, and
+  `ProtocolError::UnknownResponse`. The response schema is fixed and has no
+  value field. Unknown response types/codes are rejected; echoed type names
+  are truncated to 32 chars.
+- Crypto reuse for the handover: split `decrypt` into
+  `derive_vault_key(container, password, out)` and
+  `decrypt_with_key(container, key)`, with `unlock_key(...)` deriving and
+  authenticating in one step. `Vault::open_with_key` added. No parameter,
+  format or ciphertext change: existing vaults still open unchanged.
+- Tests: 11 new crypto/vault/protocol unit tests (key derive/decrypt split,
+  wrong key, length checks, no key echo, response round-trip/fixed shape,
+  unknown type/code, malformed frames, arbitrary bytes) and 5 `daemon.rs` unit
+  tests (short/trailing key, length check, no bytes in `Debug`, no echo).
+  New `tests/daemon.rs` (6 e2e tests, fast Argon2 params): ping/lock removes
+  the socket and exits 0; SIGTERM and SIGINT exit cleanly and remove it;
+  empty/oversized/truncated/unknown/`run` requests rejected without a crash
+  and the daemon still serves; wrong key exits non-zero with no socket; a
+  second daemon is refused while the first keeps serving; the generated
+  secret appears in no response bytes, stdout/stderr, cmdline, or readable
+  `/proc/<pid>/environ` (dumpable=0 usually makes the last unreadable).
+- No new dependency (`libc` and `zeroize` already present). No network, store
+  or audit-log change.
+- Gate: `cargo fmt --check` clean; `cargo clippy --all-targets -- -D warnings`
+  clean; `cargo test` 156 passed (104 lib, 19 bin, 27 e2e CLI, 6 daemon e2e;
+  CLI e2e is Argon2id-bound and serialized, ~148 s). `cargo audit` still not
+  installed (`error: no such command: audit`).
+- **Next iteration must know:** next is **2.4b** (`unlock`/`lock` CLI). Spawn
+  `pmd` with the key on a pipe, wait for a `ping`/`pong` readiness check, and
+  refuse `unlock` unless stdin and stdout are TTYs and no agent marker is set.
+  Do not add any request that returns plaintext. Idle timeout is still absent
+  (2.4c), so a daemon stays unlocked until `lock` or a signal. `mlock` failure
+  is intentionally non-fatal and currently silent; if that matters, surface a
+  warning without key material.
+
 ## 2026-11-02 — Peer credential check (TODO 2.3)
 
 - `src/socket.rs` now verifies the connecting user before any request byte is

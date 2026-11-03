@@ -24,6 +24,19 @@ impl Vault {
         Ok(Self { path, credentials })
     }
 
+    /// Open and decrypt an existing vault with an already-derived key.
+    ///
+    /// Used by the unlock daemon, which holds only the 32-byte key (never the
+    /// master password). The key must come from [`crypto::unlock_key`] for
+    /// this vault file.
+    pub fn open_with_key(path: impl AsRef<Path>, key: &[u8]) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let container = read_container(&path)?;
+        let plaintext = crypto::decrypt_with_key(&container, key)?;
+        let credentials = store::decode(&plaintext)?;
+        Ok(Self { path, credentials })
+    }
+
     /// Open a vault, starting with an empty one if the file does not exist.
     ///
     /// Errors other than "not found" (notably authentication failures) are
@@ -263,6 +276,30 @@ mod tests {
 
         assert!(matches!(
             Vault::open(&path, "wrong password"),
+            Err(Error::AuthenticationFailed)
+        ));
+    }
+
+    #[test]
+    fn opens_with_a_derived_key_instead_of_the_password() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "test master password";
+
+        let mut vault = Vault::open_for_add(&path, master).unwrap();
+        vault
+            .add(credential("example.com", "user", "secret"))
+            .unwrap();
+        vault.save(master).unwrap();
+
+        let container = fs::read(&path).unwrap();
+        let key = crypto::unlock_key(&container, master).unwrap();
+        let loaded = Vault::open_with_key(&path, key.as_slice()).unwrap();
+        assert_eq!(loaded.get("example.com").unwrap().password(), "secret");
+
+        // A key that was not derived for this vault does not open it.
+        assert!(matches!(
+            Vault::open_with_key(&path, &[0u8; crypto::KEY_LEN]),
             Err(Error::AuthenticationFailed)
         ));
     }

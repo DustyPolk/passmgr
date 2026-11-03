@@ -275,6 +275,41 @@ pub fn encrypt(plaintext: &[u8], master_password: &str, params: KdfParams) -> Re
 /// Decrypt a complete vault container. The returned plaintext is wiped when
 /// dropped.
 pub fn decrypt(container: &[u8], master_password: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let mut key = Zeroizing::new(vec![0u8; KEY_LEN]);
+    derive_vault_key(container, master_password, key.as_mut_slice())?;
+    decrypt_with_key(container, key.as_slice())
+}
+
+/// Derive the vault key into `out` (exactly [`KEY_LEN`] bytes).
+///
+/// The key is *not* verified against the container here: pair it with
+/// [`decrypt_with_key`], which authenticates. `out` is caller-owned so a
+/// daemon can keep the key at one stable heap address (see `daemon`).
+///
+/// The KDF parameters and salt come from the authenticated vault header, so a
+/// key derived here only opens this container.
+pub fn derive_vault_key(container: &[u8], master_password: &str, out: &mut [u8]) -> Result<()> {
+    if container.len() > MAX_VAULT_BYTES {
+        return Err(Error::MalformedVault("vault file is too large".into()));
+    }
+    let key: &mut [u8; KEY_LEN] = out
+        .try_into()
+        .map_err(|_| Error::Crypto(format!("vault key must be exactly {KEY_LEN} bytes")))?;
+    let header = Header::decode(container)?;
+    derive_key(master_password, &header.salt, header.params, key)
+}
+
+/// Decrypt a container with an already-derived key.
+///
+/// This skips Argon2: the caller must have obtained `key` from
+/// [`derive_vault_key`] (or [`unlock_key`]) for this exact container. The
+/// returned plaintext is wiped when dropped.
+pub fn decrypt_with_key(container: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    if key.len() != KEY_LEN {
+        return Err(Error::Crypto(format!(
+            "vault key must be exactly {KEY_LEN} bytes"
+        )));
+    }
     if container.len() > MAX_VAULT_BYTES {
         return Err(Error::MalformedVault("vault file is too large".into()));
     }
@@ -287,12 +322,8 @@ pub fn decrypt(container: &[u8], master_password: &str) -> Result<Zeroizing<Vec<
         ));
     }
 
-    let mut key = Zeroizing::new([0u8; KEY_LEN]);
-    derive_key(master_password, &header.salt, header.params, &mut key)?;
-    let cipher = Aes256Gcm::new_from_slice(key.as_slice())
+    let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| Error::Crypto("failed to initialize AES-256-GCM".into()))?;
-    drop(key);
-
     let plaintext = cipher
         .decrypt(
             Nonce::from_slice(&header.nonce),
@@ -309,6 +340,22 @@ pub fn decrypt(container: &[u8], master_password: &str) -> Result<Zeroizing<Vec<
         ));
     }
     Ok(Zeroizing::new(plaintext))
+}
+
+/// Derive the vault key from the master password and prove that it
+/// authenticates `container` before returning it.
+///
+/// This is the handover primitive for the unlock daemon: the human process
+/// derives the key once, and a daemon that only ever holds the key (never the
+/// master password) can decrypt the vault on demand. The returned key is
+/// wiped when dropped.
+pub fn unlock_key(container: &[u8], master_password: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let mut key = Zeroizing::new(vec![0u8; KEY_LEN]);
+    derive_vault_key(container, master_password, key.as_mut_slice())?;
+    // Authenticate before handing the key out: a wrong password must fail
+    // here, not later in the daemon.
+    drop(decrypt_with_key(container, key.as_slice())?);
+    Ok(key)
 }
 
 #[cfg(test)]
@@ -337,6 +384,51 @@ mod tests {
         let container = encrypt(b"secret", "right password", fast_params()).unwrap();
         let err = decrypt(&container, "wrong password").unwrap_err();
         assert!(matches!(err, Error::AuthenticationFailed));
+    }
+
+    #[test]
+    fn derived_key_decrypts_without_the_password() {
+        let container = encrypt(b"secret", "right password", fast_params()).unwrap();
+        let key = unlock_key(&container, "right password").unwrap();
+        assert_eq!(key.len(), KEY_LEN);
+        let plaintext = decrypt_with_key(&container, key.as_slice()).unwrap();
+        assert_eq!(&*plaintext, b"secret");
+    }
+
+    #[test]
+    fn a_wrong_key_is_rejected_by_authentication() {
+        let container = encrypt(b"secret", "password", fast_params()).unwrap();
+        let mut wrong = vec![0u8; KEY_LEN];
+        // Derive a valid key for a *different* salt/password.
+        let other = encrypt(b"other", "password", fast_params()).unwrap();
+        wrong.copy_from_slice(unlock_key(&other, "password").unwrap().as_slice());
+        assert!(matches!(
+            decrypt_with_key(&container, &wrong).unwrap_err(),
+            Error::AuthenticationFailed
+        ));
+    }
+
+    #[test]
+    fn key_lengths_are_enforced() {
+        let container = encrypt(b"secret", "password", fast_params()).unwrap();
+        assert!(matches!(
+            decrypt_with_key(&container, &[0u8; KEY_LEN - 1]).unwrap_err(),
+            Error::Crypto(_)
+        ));
+        let mut short = [0u8; KEY_LEN - 1];
+        assert!(matches!(
+            derive_vault_key(&container, "password", &mut short).unwrap_err(),
+            Error::Crypto(_)
+        ));
+    }
+
+    #[test]
+    fn unlock_key_rejects_a_wrong_password() {
+        let container = encrypt(b"secret", "password", fast_params()).unwrap();
+        assert!(matches!(
+            unlock_key(&container, "not the password").unwrap_err(),
+            Error::AuthenticationFailed
+        ));
     }
 
     #[test]

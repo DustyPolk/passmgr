@@ -109,10 +109,26 @@ come first.
       `DaemonSocket::accept_peer()` rejects with `SocketError::PeerRejected`
       before reading; unsupported Unix targets fail closed. Linux pid is
       informational; macOS reports no pid.)
-- [ ] **2.4 `pm unlock` / `pm lock`, idle timeout, SIGTERM/SIGINT wipe.** Key held
-      only in daemon memory; `mlock` best-effort; `prctl(PR_SET_DUMPABLE, 0)` on
-      Linux. Tests: idle timeout fires, `lock` wipes (subsequent request fails),
-      signal handler exits cleanly and removes the socket.
+- [x] **2.4a Daemon core + `pmd` binary.** Reusable `src/daemon.rs` that holds the
+      derived 32-byte vault key (not the decrypted vault), `mlock`s it,
+      zeroizes it on drop, sets `prctl(PR_SET_DUMPABLE, 0)` and disables core
+      dumps, installs SIGTERM/SIGINT handlers, and serves length-prefixed
+      `ping`/`lock` requests over `accept_peer()` (length-prefixed responses too).
+      `pmd` reads the key from stdin (never argv) and takes `--vault` and
+      `--runtime-dir`. Tests: ping/lock round-trip, lock removes the socket and
+      stops the process, SIGTERM and SIGINT exit cleanly and remove the socket,
+      malformed/oversized messages are rejected without a crash, a wrong key
+      does not start, a second instance is refused, `run` is refused for now,
+      and the secret never appears in socket bytes or daemon stderr.
+- [ ] **2.4b `pm unlock` / `pm lock` CLI.** `unlock` is human-only (TTY on stdin
+      and stdout, refused in agent context with exit 5), prompts once, derives
+      and verifies the key, spawns `pmd` detached with the key over stdin, waits
+      for readiness, then exits. `lock` sends the lock request and reports.
+      Tests: non-TTY/agent refusal, unlock then lock end-to-end, no key or
+      secret in argv/stdout/stderr.
+- [ ] **2.4c Idle timeout.** Default 15 minutes, configurable; daemon exits and
+      wipes the key after inactivity, refreshed by successful requests. Test:
+      short timeout exits, activity before the deadline keeps it alive.
 - [ ] **2.5 Session token file** (`$XDG_RUNTIME_DIR/passmgr/session`, 0600) written
       at unlock; requests carry it; mismatch rejected. Test: wrong token rejected,
       token file mode is 0600.

@@ -5,6 +5,8 @@
 
 pub mod agent;
 pub mod crypto;
+#[cfg(unix)]
+pub mod daemon;
 pub mod error;
 pub mod password;
 pub mod protocol;

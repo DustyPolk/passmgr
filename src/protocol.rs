@@ -102,6 +102,52 @@ pub struct RunRequest {
     pub command: Vec<String>,
 }
 
+/// A daemon response.
+///
+/// Responses carry status only. There is deliberately no field that can hold
+/// a secret value, and none may be added: any same-user process can connect to
+/// the socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Response {
+    /// The daemon is alive and the key is loaded.
+    Pong,
+    /// The daemon wiped its key and is shutting down.
+    Locked,
+    /// The request was rejected. The error is a fixed code, never echo of the
+    /// request or of vault data.
+    Error(ResponseError),
+}
+
+/// Fixed, non-secret error codes a daemon may return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseError {
+    /// Malformed, truncated, oversized or unknown request.
+    BadRequest,
+    /// A well-formed request this build does not implement yet (`run` before
+    /// TODO 2.6).
+    Unsupported,
+}
+
+impl ResponseError {
+    /// The stable wire code.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::BadRequest => "bad_request",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    fn from_code(code: &str) -> Result<Self, ProtocolError> {
+        match code {
+            "bad_request" => Ok(Self::BadRequest),
+            "unsupported" => Ok(Self::Unsupported),
+            other => Err(ProtocolError::UnknownResponse(
+                other.chars().take(MAX_TYPE_CHARS).collect(),
+            )),
+        }
+    }
+}
+
 /// Why a frame or request was rejected.
 ///
 /// The messages contain only structural information (lengths, a truncated
@@ -122,6 +168,8 @@ pub enum ProtocolError {
     UnsupportedVersion(u64),
     /// The `request.type` is not a request this version implements.
     UnknownRequest(String),
+    /// The `response.type` (or its error code) is not one this version knows.
+    UnknownResponse(String),
     /// The request is structurally valid JSON but fails validation.
     InvalidRequest(String),
     /// A [`FrameDecoder`] was given more bytes than it will buffer.
@@ -153,6 +201,7 @@ impl fmt::Display for ProtocolError {
                 "unsupported protocol version {version} (this build speaks version {PROTOCOL_VERSION})"
             ),
             Self::UnknownRequest(kind) => write!(f, "unknown request type {kind:?}"),
+            Self::UnknownResponse(kind) => write!(f, "unknown response type or code {kind:?}"),
             Self::InvalidRequest(detail) => write!(f, "invalid request: {detail}"),
             Self::BufferFull { buffered, max } => {
                 write!(
@@ -199,6 +248,89 @@ pub fn decode(frame: &[u8]) -> Result<Request, ProtocolError> {
         });
     }
     decode_body(body)
+}
+
+/// Encode one response as a complete length-prefixed frame.
+pub fn encode_response(response: &Response) -> Result<Vec<u8>, ProtocolError> {
+    let body = match response {
+        Response::Pong => json!({ "version": PROTOCOL_VERSION, "response": { "type": "pong" } }),
+        Response::Locked => {
+            json!({ "version": PROTOCOL_VERSION, "response": { "type": "locked" } })
+        }
+        Response::Error(error) => json!({
+            "version": PROTOCOL_VERSION,
+            "response": { "type": "error", "code": error.code() },
+        }),
+    };
+    let body =
+        serde_json::to_vec(&body).map_err(|err| ProtocolError::MalformedJson(err.to_string()))?;
+    if body.len() > MAX_MESSAGE_BYTES {
+        return Err(ProtocolError::MessageTooLarge {
+            length: body.len(),
+            max: MAX_MESSAGE_BYTES,
+        });
+    }
+    let mut frame = Vec::with_capacity(LENGTH_PREFIX_BYTES + body.len());
+    frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&body);
+    Ok(frame)
+}
+
+/// Decode exactly one complete length-prefixed response frame.
+///
+/// Rejects the same structural problems as [`decode`] and unknown response
+/// types or error codes. Error messages never echo request or vault data.
+pub fn decode_response(frame: &[u8]) -> Result<Response, ProtocolError> {
+    let (body, rest) = split_frame(frame)?;
+    if !rest.is_empty() {
+        return Err(ProtocolError::TrailingBytes {
+            trailing: rest.len(),
+        });
+    }
+
+    let value: Value = serde_json::from_slice(body)
+        .map_err(|err| ProtocolError::MalformedJson(err.to_string()))?;
+    let envelope = value
+        .as_object()
+        .ok_or_else(|| ProtocolError::MalformedJson("top-level value must be an object".into()))?;
+    let version = envelope
+        .get("version")
+        .ok_or_else(|| ProtocolError::MalformedJson("missing 'version'".into()))?
+        .as_u64()
+        .ok_or_else(|| {
+            ProtocolError::MalformedJson("'version' must be a non-negative integer".into())
+        })?;
+    if version != u64::from(PROTOCOL_VERSION) {
+        return Err(ProtocolError::UnsupportedVersion(version));
+    }
+    let response = envelope
+        .get("response")
+        .ok_or_else(|| ProtocolError::MalformedJson("missing 'response'".into()))?
+        .as_object()
+        .ok_or_else(|| ProtocolError::MalformedJson("'response' must be an object".into()))?;
+    let kind = response
+        .get("type")
+        .ok_or_else(|| ProtocolError::MalformedJson("missing 'response.type'".into()))?
+        .as_str()
+        .ok_or_else(|| ProtocolError::MalformedJson("'response.type' must be a string".into()))?;
+
+    match kind {
+        "pong" => Ok(Response::Pong),
+        "locked" => Ok(Response::Locked),
+        "error" => {
+            let code = response
+                .get("code")
+                .ok_or_else(|| ProtocolError::MalformedJson("missing 'response.code'".into()))?
+                .as_str()
+                .ok_or_else(|| {
+                    ProtocolError::MalformedJson("'response.code' must be a string".into())
+                })?;
+            ResponseError::from_code(code).map(Response::Error)
+        }
+        other => Err(ProtocolError::UnknownResponse(
+            other.chars().take(MAX_TYPE_CHARS).collect(),
+        )),
+    }
 }
 
 /// Incremental frame reader for a byte stream (a socket read loop).
@@ -832,5 +964,117 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("run.ref"), "unexpected message: {text}");
         assert!(!text.contains(secret_like));
+    }
+
+    #[test]
+    fn round_trips_every_response() {
+        for response in [
+            Response::Pong,
+            Response::Locked,
+            Response::Error(ResponseError::BadRequest),
+            Response::Error(ResponseError::Unsupported),
+        ] {
+            let encoded = encode_response(&response).expect("encode response");
+            assert_eq!(
+                decode_response(&encoded).expect("decode response"),
+                response
+            );
+        }
+    }
+
+    #[test]
+    fn response_frames_have_a_fixed_shape_with_no_value_fields() {
+        let pong = encode_response(&Response::Pong).expect("encode");
+        let pong_body = br#"{"response":{"type":"pong"},"version":1}"#;
+        assert_eq!(&pong[..4], &(pong_body.len() as u32).to_be_bytes());
+        assert_eq!(&pong[4..], pong_body);
+
+        let error = encode_response(&Response::Error(ResponseError::BadRequest)).expect("encode");
+        assert_eq!(
+            &error[4..],
+            br#"{"response":{"code":"bad_request","type":"error"},"version":1}"#
+        );
+    }
+
+    #[test]
+    fn unknown_response_types_and_codes_are_rejected() {
+        let long = "x".repeat(MAX_TYPE_CHARS * 4);
+        let unknown_type = frame(&format!(
+            r#"{{"version":1,"response":{{"type":"{long}"}}}}"#
+        ));
+        match decode_response(&unknown_type) {
+            Err(ProtocolError::UnknownResponse(echoed)) => {
+                assert_eq!(echoed.chars().count(), MAX_TYPE_CHARS);
+            }
+            other => panic!("expected unknown response type, got {other:?}"),
+        }
+
+        let unknown_code = frame(&format!(
+            r#"{{"version":1,"response":{{"type":"error","code":"{long}"}}}}"#
+        ));
+        assert!(matches!(
+            decode_response(&unknown_code),
+            Err(ProtocolError::UnknownResponse(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_response_frames_are_rejected() {
+        let cases = [
+            frame(r#"{"version":2,"response":{"type":"pong"}}"#),
+            frame(r#"{"response":{"type":"pong"}}"#),
+            frame(r#"{"version":1}"#),
+            frame(r#"{"version":1,"response":"pong"}"#),
+            frame(r#"{"version":1,"response":{}}"#),
+            frame(r#"{"version":1,"response":{"type":7}}"#),
+            frame(r#"{"version":1,"response":{"type":"error"}}"#),
+            frame(r#"{"version":1,"response":{"type":"error","code":7}}"#),
+            frame("not json"),
+            vec![0, 0, 0, 10, b'{'],
+        ];
+        for bytes in cases {
+            assert!(
+                decode_response(&bytes).is_err(),
+                "accepted malformed frame: {bytes:?}"
+            );
+        }
+
+        let mut trailing = encode_response(&Response::Pong).expect("encode");
+        trailing.push(b'x');
+        assert_eq!(
+            decode_response(&trailing),
+            Err(ProtocolError::TrailingBytes { trailing: 1 })
+        );
+    }
+
+    #[test]
+    fn responses_never_repeat_a_body_field_value() {
+        // A daemon bug that slipped a value into a response must not turn into
+        // an echoed secret in logs: decoding ignores unknown fields and the
+        // error text never repeats them.
+        let secret_like = "SUPER_SECRET_VALUE_123";
+        let body = format!(
+            r#"{{"version":1,"response":{{"type":"error","code":"nope","value":"{secret_like}"}}}}"#
+        );
+        let error = decode_response(&frame(&body)).expect_err("unknown code");
+        let text = error.to_string();
+        assert!(!text.contains(secret_like), "unexpected message: {text}");
+    }
+
+    #[test]
+    fn arbitrary_bytes_are_rejected_as_responses_without_panicking() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for length in 0..=96 {
+            for _ in 0..32 {
+                let mut bytes = vec![0u8; length];
+                for byte in &mut bytes {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    *byte = state as u8;
+                }
+                let _ = decode_response(&bytes);
+            }
+        }
     }
 }
