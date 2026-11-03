@@ -115,6 +115,7 @@ fn exchange_frame(
 ) -> Response {
     let (server, mut client) = UnixStream::pair().expect("socket pair");
     client.write_all(frame).expect("send request");
+    let watermarks = GrantWatermarks::new();
     let handled = handle_connection(
         server,
         token,
@@ -122,6 +123,7 @@ fn exchange_frame(
         Path::new("/nonexistent/passmgr-test-vault"),
         challenges,
         approvals,
+        &watermarks,
     );
     assert!(
         !matches!(handled, Handled::Locked(_) | Handled::Run(..)),
@@ -463,7 +465,14 @@ fn revoke_all_leaves_expired_and_exhausted_grants_alone() {
     let key = crate::crypto::unlock_key(&container, master).expect("derive key");
     let key = LockedKey::new(key).expect("lock key");
 
-    let revoked = revoke_grants(&path, &key, GrantRevokeRequest::All, now).expect("revoke");
+    let revoked = revoke_grants(
+        &path,
+        &key,
+        &GrantWatermarks::new(),
+        GrantRevokeRequest::All,
+        now,
+    )
+    .expect("revoke");
     assert_eq!(revoked, 1, "only the active grant may be counted");
 
     let vault = Vault::open_with_key(&path, key.as_slice()).expect("reopen");
@@ -540,9 +549,17 @@ fn revocation_does_not_lose_to_a_concurrent_vault_write() {
     // The test plays the concurrent run: it takes the write lock *before* the
     // revocation can read, then replaces the container.
     let mut writer = Vault::open_with_key_for_update(&path, key.as_slice()).expect("lock vault");
+    let watermarks = GrantWatermarks::new();
     let outcome = std::thread::scope(|scope| {
-        let revocation =
-            scope.spawn(|| revoke_grants(&path, &key, GrantRevokeRequest::Id(target_id), now));
+        let revocation = scope.spawn(|| {
+            revoke_grants(
+                &path,
+                &key,
+                &watermarks,
+                GrantRevokeRequest::Id(target_id),
+                now,
+            )
+        });
         // Long enough for the revocation thread to start and reach the lock.
         // If it had read before locking, the change below would be invisible
         // to it and its byte comparison would fail.

@@ -237,6 +237,11 @@ version and returns `LegacyVault`; it never writes to a legacy file.
 - Atomic replacement is a file-system behavior, not part of the format: a new
   container is written to a temporary file in the same directory and renamed
   over the target.
+- The file is not tamper-evident against being replaced by an older container
+  the same user saved: it decrypts and authenticates normally. A running `pmd`
+  remembers, per grant id, the furthest `uses` and any revocation it has seen
+  and refuses a `run` that regresses (`SECURITY.md` limit 7); a restart forgets
+  that mark.
 
 ## Compatibility notes
 

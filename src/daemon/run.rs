@@ -19,6 +19,7 @@ use crate::runner;
 use crate::store::EntryId;
 use crate::vault::Vault;
 
+use super::watermark::GrantWatermarks;
 use super::{LockedKey, unix_now, write_run_frame};
 
 /// Read buffer for one connection. A request is bounded by
@@ -60,6 +61,7 @@ pub(super) fn serve_run(
     vault_path: &Path,
     key: &LockedKey,
     cancel: &AtomicBool,
+    watermarks: &GrantWatermarks,
 ) {
     // The daemon may have started shutting down between accepting this
     // request and spawning the worker. Decrypting and spawning after a
@@ -96,7 +98,7 @@ pub(super) fn serve_run(
         return;
     };
 
-    let secret = match record_use(vault_path, key, request, id, &program, now) {
+    let secret = match record_use(vault_path, key, watermarks, request, id, &program, now) {
         Ok(secret) => secret,
         Err(RecordError::Denied) => {
             let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::Denied));
@@ -181,9 +183,16 @@ fn client_closed(fd: RawFd) -> bool {
 /// The vault is read **under the write lock**, so the grant that is authorized
 /// and marked is the one on disk: a concurrent run recording its own use (or a
 /// revocation) can never turn this into `internal` (TODO R.39).
+///
+/// A vault whose grant state went backwards (an older copy was put back) is
+/// refused with `Denied` before anything is authorized or spawned, so a
+/// rollback cannot resurrect a spent use or a cleared revocation while this
+/// daemon is serving (TODO R.44). The mark is only raised after a successful
+/// save, so a failed write does not claim a use the vault never recorded.
 fn record_use(
     vault_path: &Path,
     key: &LockedKey,
+    watermarks: &GrantWatermarks,
     request: &protocol::RunRequest,
     id: EntryId,
     program: &Path,
@@ -193,6 +202,11 @@ fn record_use(
     for _ in 0..USE_RECORD_ATTEMPTS {
         let mut vault = Vault::open_with_key_for_update(vault_path, key.as_slice())
             .map_err(|_| RecordError::Internal)?;
+        if watermarks.check(vault.grants()).is_err() {
+            // Fail closed without consuming anything: the file on disk has
+            // regressed, so the daemon cannot trust its grant state.
+            return Err(RecordError::Denied);
+        }
         let Some(grant) = vault
             .grants()
             .iter()
@@ -238,6 +252,7 @@ fn record_use(
             // from scratch instead of merging.
             continue;
         }
+        watermarks.record(vault.grants());
         // Copy only the one value, then drop the decrypted vault (which
         // zeroizes the rest) before the child can run.
         let Some(credential) = vault.get_by_ref(id) else {

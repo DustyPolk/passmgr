@@ -77,6 +77,7 @@
 //! a session left alone does not keep the key in memory indefinitely.
 
 mod run;
+mod watermark;
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -98,6 +99,7 @@ use crate::token::{SessionToken, TOKEN_BYTES};
 use crate::vault::Vault;
 
 use run::{read_request, serve_run};
+use watermark::GrantWatermarks;
 
 /// How long the accept loop sleeps between non-blocking accepts.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -436,6 +438,10 @@ pub fn run(
     // per connection) because the proof arrives on the human's connection and
     // the write that spends it arrives on another one.
     let mut approvals = presence::Approvals::new();
+    // The furthest grant progress this process has seen. In memory on purpose:
+    // a marker file can be rolled back like the vault, and only the running
+    // daemon can notice a rollback (SECURITY.md limit 7, TODO R.44).
+    let watermarks = GrantWatermarks::new();
 
     let mut last_activity = Instant::now();
     // A `lock` connection whose answer is deferred until the key is gone.
@@ -445,6 +451,7 @@ pub fn run(
     // `cancel` lives outside the scope so a worker closure may borrow it.
     let cancel = AtomicBool::new(false);
     let cancel_ref = &cancel;
+    let watermarks_ref = &watermarks;
     let fatal = std::thread::scope(|scope| {
         let mut runs: Vec<std::thread::ScopedJoinHandle<'_, ()>> = Vec::new();
         let mut fatal = None;
@@ -483,6 +490,7 @@ pub fn run(
                         vault_path,
                         &mut challenges,
                         &mut approvals,
+                        watermarks_ref,
                     ) {
                         // `lock`: stop accepting, but answer only after the
                         // workers are joined and the key is zeroized below.
@@ -519,7 +527,14 @@ pub fn run(
                             let spawned = std::thread::Builder::new()
                                 .name("passmgr-run".into())
                                 .spawn_scoped(scope, move || {
-                                    serve_run(stream, &request, vault_path, key, cancel_ref);
+                                    serve_run(
+                                        stream,
+                                        &request,
+                                        vault_path,
+                                        key,
+                                        cancel_ref,
+                                        watermarks_ref,
+                                    );
                                 });
                             match spawned {
                                 Ok(handle) => {
@@ -607,6 +622,7 @@ fn handle_connection(
     vault_path: &Path,
     challenges: &mut presence::Challenges,
     approvals: &mut presence::Approvals,
+    watermarks: &GrantWatermarks,
 ) -> Handled {
     let authorized = match read_request(&mut stream) {
         Ok(authorized) => authorized,
@@ -706,7 +722,7 @@ fn handle_connection(
             let Some(now) = unix_now() else {
                 return reject(&mut stream, ResponseError::Internal);
             };
-            let response = match revoke_grants(vault_path, key, revoke, now) {
+            let response = match revoke_grants(vault_path, key, watermarks, revoke, now) {
                 Ok(revoked) => Response::GrantRevoked { revoked },
                 Err(error) => Response::Error(error),
             };
@@ -730,9 +746,15 @@ fn handle_connection(
 /// [`Vault::save_with_key`] so the salt and KDF parameters (and therefore the
 /// key itself) stay valid. When no grant needs changing, nothing is written at
 /// all.
+///
+/// Revocation is the one write **not** refused on a vault whose grant state
+/// regressed (TODO R.44): a rollback must not be able to disable the kill
+/// switch, and a revocation only ever removes access. Recording it never
+/// lowers the watermark.
 fn revoke_grants(
     path: &Path,
     key: &LockedKey,
+    watermarks: &GrantWatermarks,
     request: GrantRevokeRequest,
     now: u64,
 ) -> Result<u32, ResponseError> {
@@ -771,6 +793,7 @@ fn revoke_grants(
     vault
         .save_with_key(key.as_slice())
         .map_err(|_| ResponseError::Internal)?;
+    watermarks.record(vault.grants());
     Ok(revoked)
 }
 

@@ -979,7 +979,7 @@ Rules that apply to every item:
       fenced README block and `--help`'s Examples section; it fails on the
       old quickstart (verified).
 
-- [ ] **R.44 Copying an older `vault.dat` back undoes revocation and resets
+- [x] **R.44 Copying an older `vault.dat` back undoes revocation and resets
       `max_uses`.**
       `pmd` re-reads the vault file on every request
       (`src/daemon/run.rs:153-154`, `revoke_grants` in `src/daemon.rs`) and
@@ -997,6 +997,10 @@ Rules that apply to every item:
       which in `DECISIONS.md`.
       Test: the sequence above ends in `Denied` (mitigated), or a
       `tests/docs.rs` contract pins the documented limit.
+      Done: took the high-water-mark option (`src/daemon/watermark.rs`): a
+      regressed `run` is `Denied` while one `pmd` serves; revocation is exempt
+      so the kill switch still works. The mark is not persisted; `SECURITY.md`
+      limit 7 (out of scope is now 8) documents the restart residual.
 
 - [ ] **R.45 Grant expiry is checked with a `now` read before the vault-lock
       wait.**

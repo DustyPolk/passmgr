@@ -1,3 +1,30 @@
+## 2026-11-03 — Refuse a rolled-back vault while pmd serves (TODO R.44)
+
+- New `src/daemon/watermark.rs`: `GrantWatermarks` keeps, per grant id and
+  only for this process, the furthest `uses` and whether a revocation was
+  seen. `check` runs under the vault write lock before authorization and
+  refuses a grant whose `uses` fell or whose revocation cleared; `record`
+  only raises the mark and runs only after a save that succeeded.
+- `record_use` answers `denied` on a regressed vault before marking or
+  spawning. `revoke_grants` is deliberately exempt from the check (a rollback
+  must not disable the kill switch) and records after its save.
+- Tests: 7 unit tests in `watermark.rs`; two e2e tests in
+  `tests/daemon_run.rs` (a spent `max_uses` and a cleared revocation both end
+  in `Denied` after a snapshot is restored, and revoking the rolled-back vault
+  still works); `tests/docs.rs` pins the new SECURITY limit.
+- Decision: in-memory, not persisted — a marker file is rollbackable like the
+  vault, so it would add an artifact without a boundary. The restart residual
+  is SECURITY.md limit 7 ("Out of scope" is now 8); FORMAT.md notes the file
+  is not rollback-evident, and DECISIONS.md records the choice.
+- Gate: fmt, clippy `-D warnings` and the full test suite pass. `cargo audit`
+  skipped (not installed).
+- **Next iteration must know:** R.45 is next. `handle_connection` and
+  `revoke_grants` now take `&GrantWatermarks`; `exchange_frame` in
+  `src/daemon/tests.rs` creates a fresh one per call. The mark lives per
+  daemon process, so a restarted `pmd` accepts a rolled-back fixture (not
+  pinned by a test, on purpose). Restoring a legitimate backup needs
+  `pm lock`/restart or runs answer `denied` until one.
+
 ## 2026-11-03 — Make every documented grant example runnable (TODO R.43)
 
 - `README.md`'s quickstart under "Use a credential without reading it" allowed

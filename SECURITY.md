@@ -83,9 +83,11 @@ inherits every limit below.
   `run` requires a token whose grant covers the credential and command.
   Grants can be listed and revoked; revocation needs no password or TTY
   because it only removes access, and the daemon persists it in the vault
-  with the key it already holds. The hash-chained audit log that records
-  every allowed and denied use without values or tokens is designed in
-  `MCP.md` but still open (TODO 3.8–3.9); today no audit record is written.
+  with the key it already holds. A running `pmd` also remembers the furthest
+  `uses` and any revocation it has seen per grant id, so putting an older
+  vault back cannot undo either (limit 7). The hash-chained audit log that
+  records every allowed and denied use without values or tokens is designed
+  in `MCP.md` but still open (TODO 3.8–3.9); today no audit record is written.
 
 ## Known limits
 
@@ -190,7 +192,30 @@ still write process memory to unencrypted swap or a hibernation image. Use
 encrypted swap and disable hibernation on a machine that holds credentials you
 care about.
 
-### 7. Out of scope
+### 7. An older `vault.dat` can be put back
+
+The vault is an ordinary 0600 file owned by you, and grant state (`uses`,
+`revoked_at`) lives inside it. Any process running as the same user can copy
+it and later put an older copy back. That older container still opens with the
+daemon's key, because the header it authenticates keeps the same salt and KDF
+parameters.
+
+A running `pmd` remembers, in memory and for its own lifetime, the furthest
+`uses` and any revocation it has seen for each grant id, and answers a `run`
+that would go backwards with `denied` before it authorizes or spawns anything.
+A rollback therefore cannot resurrect a spent use or clear a revocation while
+that daemon is serving. Revocation itself is still accepted against a
+rolled-back vault, so the kill switch keeps working; it can only remove access.
+
+The mark is deliberately **not** persisted: a same-user process can roll back a
+marker file exactly as easily as the vault, so a marker would not be a
+boundary, and it would be one more artifact to protect. A `pmd` restart starts
+with an empty mark and accepts the file it finds, so restoring a backup while a
+daemon is running needs a `pm lock`/restart (or it answers `denied` until one).
+This is the same class as limit 1 -- a hostile same-user process -- and is not
+defended against beyond the running daemon's memory.
+
+### 8. Out of scope
 
 passmgr does not and cannot protect against:
 

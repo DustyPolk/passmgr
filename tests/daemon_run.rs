@@ -192,6 +192,97 @@ fn run_stops_at_a_use_limited_grant() {
     assert!(wait_for_exit(&mut child, WAIT).success());
 }
 
+/// R.44: the vault is an ordinary file, so an attacker running as the same
+/// user can put an older copy back. That copy still opens with the daemon's
+/// key, but the daemon remembers that this grant already spent its one use and
+/// refuses instead of running it again.
+#[test]
+fn restoring_an_older_vault_cannot_restore_a_spent_use() {
+    let fixture = Fixture::with_max_uses(1);
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+    let snapshot = fs::read(&fixture.vault).expect("snapshot vault");
+
+    let (frames, _) = read_run(
+        &socket,
+        &fixture.token,
+        &fixture.run_request("API_KEY", &["/bin/true"]),
+    );
+    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+
+    fs::write(&fixture.vault, &snapshot).expect("restore older vault");
+    let (frames, raw) = read_run(
+        &socket,
+        &fixture.token,
+        &fixture.run_request("API_KEY", &["/bin/true"]),
+    );
+    assert_eq!(frames, vec![RunFrame::Error(ResponseError::Denied)]);
+    assert!(
+        !raw.windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+/// R.44: a rollback must not clear a revocation either -- and it must not be
+/// able to disable the kill switch, so revoking the rolled-back vault still
+/// works and is recorded.
+#[test]
+fn restoring_an_older_vault_cannot_clear_a_revocation() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+    let snapshot = fs::read(&fixture.vault).expect("snapshot vault");
+
+    assert_eq!(
+        request(
+            &socket,
+            &fixture.token,
+            &Request::GrantRevoke(GrantRevokeRequest::All)
+        ),
+        Response::GrantRevoked { revoked: 1 }
+    );
+    let (frames, _) = read_run(
+        &socket,
+        &fixture.token,
+        &fixture.run_request("API_KEY", &["/bin/true"]),
+    );
+    assert_eq!(frames, vec![RunFrame::Error(ResponseError::Denied)]);
+
+    fs::write(&fixture.vault, &snapshot).expect("restore older vault");
+    let (frames, raw) = read_run(
+        &socket,
+        &fixture.token,
+        &fixture.run_request("API_KEY", &["/bin/true"]),
+    );
+    assert_eq!(frames, vec![RunFrame::Error(ResponseError::Denied)]);
+    assert!(
+        !raw.windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
+
+    // The kill switch still works on the rolled-back file.
+    assert_eq!(
+        request(
+            &socket,
+            &fixture.token,
+            &Request::GrantRevoke(GrantRevokeRequest::All)
+        ),
+        Response::GrantRevoked { revoked: 1 }
+    );
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

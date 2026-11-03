@@ -237,6 +237,39 @@ fn security_documents_that_redaction_is_not_a_sandbox() {
     );
 }
 
+/// TODO R.44: a same-user process can put an older `vault.dat` back, and that
+/// copy opens with the daemon's key. The limit must name the in-memory mark,
+/// its lifetime, and the restart residual, so a later edit cannot quietly
+/// turn "revocation always holds" back into a promise the file cannot keep.
+#[test]
+fn security_documents_the_vault_rollback_limit() {
+    let limit = security_limit(7);
+    assert!(
+        limit.contains("older copy"),
+        "SECURITY.md limit 7 must say an older vault copy can be put back"
+    );
+    assert!(
+        limit.contains("in memory") && limit.contains("for its own lifetime"),
+        "SECURITY.md limit 7 must say the mark is in memory and lasts one daemon"
+    );
+    assert!(
+        limit.contains("with denied"),
+        "SECURITY.md limit 7 must say a regressed run is denied"
+    );
+    assert!(
+        limit.contains("not") && limit.contains("persisted"),
+        "SECURITY.md limit 7 must say the mark is deliberately not persisted"
+    );
+    assert!(
+        limit.contains("restart") && limit.contains("empty mark"),
+        "SECURITY.md limit 7 must give the restart residual"
+    );
+    assert!(
+        limit.contains("kill switch keeps working"),
+        "SECURITY.md limit 7 must say revocation still works after a rollback"
+    );
+}
+
 /// TODO R.32: the "Current status" section described the pre-3.6 state, so a
 /// reviewer could treat `run` as session-token gated (the hole 3.6 closed)
 /// and expect an audit log that does not exist yet. Pin the implemented flow

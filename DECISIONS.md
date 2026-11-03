@@ -328,6 +328,17 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   opaque `denied`. The use is written to the vault before the secret is copied
   or the child is spawned; a spawn failure therefore still consumes a use.
   This favors never exceeding `max_uses` over not charging a failed exec.
+- Grant progress is monotonic while one `pmd` serves (TODO R.44). The vault
+  is an ordinary file and a same-user process can put an older copy back;
+  that copy still opens with the daemon's key. `pmd` keeps an in-memory,
+  per-grant-id high-water mark of `uses` and revocation, checked under the
+  vault write lock before a `run` is authorized and raised only after a
+  successful save. A vault with fewer uses, or one that cleared a seen
+  revocation, is refused `denied`; a failed write does not raise the mark.
+  Revocation is exempt from the check (it can only remove access, and the
+  kill switch must survive a rollback) but still raises the mark. The mark is
+  not persisted: a marker file is rollbackable like the vault, and a restart
+  accepts the file as it finds it (`SECURITY.md` limit 7).
 - An `unauthorized` request does not refresh the idle timer.
 - Idle timeout: default 900 s (`pmd --idle-timeout SECS`,
   `passmgr unlock --idle-timeout SECS`); zero is refused. Activity means a
