@@ -126,9 +126,14 @@ come first.
       for readiness, then exits. `lock` sends the lock request and reports.
       Tests: non-TTY/agent refusal, unlock then lock end-to-end, no key or
       secret in argv/stdout/stderr.
-- [ ] **2.4c Idle timeout.** Default 15 minutes, configurable; daemon exits and
+- [x] **2.4c Idle timeout.** Default 15 minutes, configurable; daemon exits and
       wipes the key after inactivity, refreshed by successful requests. Test:
       short timeout exits, activity before the deadline keeps it alive.
+      (`pmd --idle-timeout SECS`; `passmgr unlock --idle-timeout SECS`
+      (also `=SECS`) passes it through. Activity = a request decoded after the
+      peer check; malformed frames are answered but never refresh. Zero is
+      refused. Not an authorization boundary until 2.5/3.1: any same-user
+      process can `ping` to keep the daemon alive; documented in `daemon.rs`.)
 - [ ] **2.5 Session token file** (`$XDG_RUNTIME_DIR/passmgr/session`, 0600) written
       at unlock; requests carry it; mismatch rejected. Test: wrong token rejected,
       token file mode is 0600.

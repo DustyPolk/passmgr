@@ -129,8 +129,14 @@ pub fn lock(paths: &RuntimePaths) -> Result<()> {
 /// A daemon that is already running is not reused: the caller checks for that
 /// first, and a child that loses the instance lock exits, which is reported
 /// here as a failure. `pmd` itself calls `setsid`, so it survives the caller
-/// exiting.
-pub fn spawn_daemon(vault: &Path, paths: &RuntimePaths, key: &[u8]) -> Result<u32> {
+/// exiting. `idle_timeout` is passed through as `--idle-timeout`; it is a
+/// duration, never a secret.
+pub fn spawn_daemon(
+    vault: &Path,
+    paths: &RuntimePaths,
+    key: &[u8],
+    idle_timeout: Duration,
+) -> Result<u32> {
     if key.len() != KEY_LEN {
         return Err(Error::Daemon(format!(
             "internal error: the vault key must be {KEY_LEN} bytes"
@@ -149,6 +155,8 @@ pub fn spawn_daemon(vault: &Path, paths: &RuntimePaths, key: &[u8]) -> Result<u3
         .arg(vault)
         .arg("--runtime-dir")
         .arg(paths.dir())
+        .arg("--idle-timeout")
+        .arg(idle_timeout.as_secs().to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::from(child_log))
@@ -406,8 +414,13 @@ mod tests {
     #[test]
     fn spawn_refuses_a_key_of_the_wrong_length_before_spawning() {
         let (_directory, paths) = runtime_paths();
-        let error = spawn_daemon(Path::new("/nonexistent/vault.dat"), &paths, &[0u8; 4])
-            .expect_err("short key");
+        let error = spawn_daemon(
+            Path::new("/nonexistent/vault.dat"),
+            &paths,
+            &[0u8; 4],
+            crate::daemon::DEFAULT_IDLE_TIMEOUT,
+        )
+        .expect_err("short key");
         assert!(matches!(error, Error::Daemon(_)));
         assert!(error.to_string().contains("32 bytes"), "{error}");
     }

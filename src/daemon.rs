@@ -21,16 +21,22 @@
 //!
 //! # Lifetime
 //!
-//! One request per connection. `SIGTERM`/`SIGINT` (or a successful `lock`)
-//! wipe the key, remove the socket and exit. Until TODO 2.4c there is no idle
-//! timeout yet; the key stays until an explicit signal.
+//! One request per connection. `SIGTERM`/`SIGINT`, a successful `lock`, or
+//! [`DEFAULT_IDLE_TIMEOUT`] (configurable) without a successfully handled
+//! request wipe the key, remove the socket and exit.
+//!
+//! The idle timeout is a second line of defense, not an authorization
+//! boundary: until session tokens (TODO 2.5) and grants (TODO 3.1) restrict
+//! requests, any same-user process can send `ping` and keep the daemon alive.
+//! It still guarantees that a session left alone does not keep the key in
+//! memory indefinitely.
 
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
@@ -42,6 +48,10 @@ use crate::vault::Vault;
 /// How long the accept loop sleeps between non-blocking accepts.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
+/// The default idle timeout: how long the daemon keeps the key without a
+/// successfully handled request.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 /// How long a single client gets to send a complete request.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -51,6 +61,22 @@ const READ_CHUNK: usize = 4096;
 
 /// Set from the `SIGTERM`/`SIGINT` handler, which may only touch atomics.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Parse an idle timeout in whole seconds.
+///
+/// Zero is refused: such a daemon would exit before serving anything, which
+/// is a configuration mistake rather than a useful "never keep the key"
+/// setting. There is no upper bound; a very large value is the caller's
+/// explicit choice.
+pub fn parse_idle_timeout(text: &str) -> Result<Duration, String> {
+    let seconds: u64 = text
+        .parse()
+        .map_err(|_| format!("idle timeout must be a whole number of seconds, got '{text}'"))?;
+    if seconds == 0 {
+        return Err("idle timeout must be at least 1 second".to_owned());
+    }
+    Ok(Duration::from_secs(seconds))
+}
 
 /// Why the daemon could not start, or had to stop.
 ///
@@ -279,12 +305,21 @@ pub fn shutdown_requested() -> bool {
     SHUTDOWN.load(Ordering::SeqCst)
 }
 
-/// Run the daemon until `lock`, `SIGTERM` or `SIGINT`.
+/// Run the daemon until `lock`, `SIGTERM`/`SIGINT`, or an idle timeout.
 ///
 /// The key is verified against the vault *before* the socket is bound, so a
 /// caller with the wrong key can never make `pmd` look alive. `key` stays
 /// borrowed: the caller drops (and therefore zeroizes) it after this returns.
-pub fn run(vault_path: &Path, runtime_dir: &Path, key: &LockedKey) -> Result<(), DaemonError> {
+///
+/// `idle_timeout` is measured from the last successfully decoded request
+/// (one that passed the peer check), not from the last byte received: a
+/// malformed or half-sent frame must not extend the key's lifetime.
+pub fn run(
+    vault_path: &Path,
+    runtime_dir: &Path,
+    key: &LockedKey,
+    idle_timeout: Duration,
+) -> Result<(), DaemonError> {
     harden_process()?;
     install_signal_handlers()?;
     detach_session();
@@ -295,14 +330,23 @@ pub fn run(vault_path: &Path, runtime_dir: &Path, key: &LockedKey) -> Result<(),
     let socket = DaemonSocket::bind_at(RuntimePaths::at(runtime_dir))?;
     socket.listener().set_nonblocking(true)?;
 
+    let mut last_activity = Instant::now();
     while !shutdown_requested() {
+        if last_activity.elapsed() >= idle_timeout {
+            // Out of activity: wipe the key, unlink the socket and exit.
+            break;
+        }
         match socket.accept_peer() {
             Ok((mut stream, _peer)) => {
                 let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
                 let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
-                if handle_connection(&mut stream) {
+                match handle_connection(&mut stream) {
                     // `lock`: response is written, now wipe on the way out.
-                    break;
+                    Handled::Locked => break,
+                    // Only a request that was decoded and answered counts as
+                    // activity; garbage must not keep the key alive.
+                    Handled::Served => last_activity = Instant::now(),
+                    Handled::Rejected => {}
                 }
             }
             Err(SocketError::Io { source, .. }) if source.kind() == io::ErrorKind::WouldBlock => {
@@ -319,27 +363,42 @@ pub fn run(vault_path: &Path, runtime_dir: &Path, key: &LockedKey) -> Result<(),
     Ok(())
 }
 
-/// Serve one connection. Returns `true` when the client asked to lock.
+/// What one connection amounted to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Handled {
+    /// A well-formed request was decoded and answered. Refreshes the idle
+    /// timer (the `lock` case is reported separately).
+    Served,
+    /// Nothing usable arrived; the client got `bad_request`.
+    Rejected,
+    /// A `lock` request was answered: wipe and stop.
+    Locked,
+}
+
+/// Serve one connection.
 ///
 /// Nothing here can panic on attacker input: every parse failure becomes
 /// `bad_request`, and write failures (client vanished) are ignored so one
 /// aborted client cannot take the daemon down.
-fn handle_connection(stream: &mut UnixStream) -> bool {
+fn handle_connection(stream: &mut UnixStream) -> Handled {
     let request = read_request(stream);
-    let response = match request {
-        Ok(Request::Ping) => Response::Pong,
-        Ok(Request::Lock) => Response::Locked,
+    let (response, handled) = match request {
+        Ok(Request::Ping) => (Response::Pong, Handled::Served),
+        Ok(Request::Lock) => (Response::Locked, Handled::Locked),
         // `run` exists in the protocol but is TODO 2.6. Refuse it explicitly
         // rather than pretending a generic parse error.
-        Ok(Request::Run(_)) => Response::Error(ResponseError::Unsupported),
-        Err(_) => Response::Error(ResponseError::BadRequest),
+        Ok(Request::Run(_)) => (Response::Error(ResponseError::Unsupported), Handled::Served),
+        Err(_) => (
+            Response::Error(ResponseError::BadRequest),
+            Handled::Rejected,
+        ),
     };
 
     if let Ok(frame) = protocol::encode_response(&response) {
         let _ = stream.write_all(&frame);
         let _ = stream.flush();
     }
-    response == Response::Locked
+    handled
 }
 
 /// Read one framed request from a stream, without unbounded allocation.
@@ -436,5 +495,16 @@ mod tests {
         let mut reader = &b"short"[..];
         let error = read_key_from(&mut reader).unwrap_err();
         assert!(!error.to_string().contains("short"));
+    }
+
+    #[test]
+    fn idle_timeout_parser_accepts_positive_seconds_only() {
+        assert_eq!(parse_idle_timeout("60").unwrap(), Duration::from_secs(60));
+        assert_eq!(parse_idle_timeout("1").unwrap(), Duration::from_secs(1));
+        assert_eq!(DEFAULT_IDLE_TIMEOUT, Duration::from_secs(900));
+
+        for bad in ["0", "", "-1", "1.5", "15m", " 60"] {
+            assert!(parse_idle_timeout(bad).is_err(), "'{bad}' must be rejected");
+        }
     }
 }

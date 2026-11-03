@@ -69,12 +69,17 @@ impl Fixture {
     }
 
     fn spawn(&self) -> Child {
+        self.spawn_with(&[])
+    }
+
+    fn spawn_with(&self, extra: &[&str]) -> Child {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pmd"));
         command
             .arg("--vault")
             .arg(&self.vault)
             .arg("--runtime-dir")
             .arg(&self.runtime)
+            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -91,7 +96,13 @@ impl Fixture {
     /// readiness fails, the child is killed and reaped before panicking.
     #[allow(clippy::zombie_processes)] // the `return child` path transfers ownership
     fn start(&self) -> Child {
-        let mut child = self.spawn();
+        self.start_with(&[])
+    }
+
+    /// `start`, with extra `pmd` arguments (for example `--idle-timeout`).
+    #[allow(clippy::zombie_processes)] // the `return child` path transfers ownership
+    fn start_with(&self, extra: &[&str]) -> Child {
+        let mut child = self.spawn_with(extra);
         let deadline = Instant::now() + WAIT;
         loop {
             if let Ok(Response::Pong) = try_request(&self.socket(), &Request::Ping) {
@@ -228,6 +239,91 @@ fn malformed_oversized_and_unknown_requests_are_rejected_without_a_crash() {
     assert_eq!(request(&socket, &Request::Ping), Response::Pong);
     assert_eq!(request(&socket, &Request::Lock), Response::Locked);
     assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+#[test]
+fn idle_timeout_wipes_the_key_and_stops_the_daemon() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start_with(&["--idle-timeout", "1"]);
+    assert_eq!(request(&fixture.socket(), &Request::Ping), Response::Pong);
+
+    // No `lock`, no signal: the daemon must stop on its own.
+    let status = wait_for_exit(&mut child, WAIT);
+    assert!(status.success(), "pmd exit status: {status:?}");
+    assert!(
+        !fixture.socket().exists(),
+        "an idle shutdown must remove the socket"
+    );
+}
+
+#[test]
+fn successful_requests_refresh_the_idle_timeout() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start_with(&["--idle-timeout", "2"]);
+    let socket = fixture.socket();
+
+    // Keep pinging for longer than the timeout. Every answered request resets
+    // the clock, so the daemon must still be alive at the end.
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline {
+        assert_eq!(request(&socket, &Request::Ping), Response::Pong);
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "activity before the deadline must keep the daemon alive"
+    );
+
+    // Now go quiet: it must expire.
+    let status = wait_for_exit(&mut child, WAIT);
+    assert!(status.success(), "pmd exit status: {status:?}");
+    assert!(!fixture.socket().exists());
+}
+
+#[test]
+fn malformed_requests_do_not_refresh_the_idle_timeout() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start_with(&["--idle-timeout", "2"]);
+    let socket = fixture.socket();
+
+    // Send rejected requests for longer than the timeout. They are answered
+    // (with `bad_request`) but are not activity, so the daemon must still
+    // expire on schedule.
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(4);
+    let mut rejected = 0;
+    while Instant::now() < deadline {
+        let Ok(mut stream) = UnixStream::connect(&socket) else {
+            break;
+        };
+        stream.set_read_timeout(Some(WAIT)).expect("read timeout");
+        let sent = stream
+            .write_all(b"not a frame")
+            .and_then(|()| stream.shutdown(std::net::Shutdown::Write));
+        let mut bytes = Vec::new();
+        if sent.is_err() || stream.read_to_end(&mut bytes).is_err() {
+            // The daemon expired between our connect and the request.
+            break;
+        }
+        match protocol::decode_response(&bytes) {
+            Ok(Response::Error(ResponseError::BadRequest)) => rejected += 1,
+            _ => break,
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(rejected >= 2, "expected repeated rejected requests");
+
+    let status = wait_for_exit(&mut child, WAIT);
+    assert!(status.success(), "pmd exit status: {status:?}");
+    assert!(!fixture.socket().exists());
+    // Rejected traffic must not have extended the key's lifetime: if it had,
+    // the loop above would have kept the daemon alive past its deadline and
+    // the exit would only come seconds later.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "rejected requests extended the idle timeout (stopped after {:?})",
+        started.elapsed()
+    );
 }
 
 #[test]

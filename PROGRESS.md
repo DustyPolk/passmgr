@@ -1,3 +1,50 @@
+## 2026-11-02 — Idle timeout for the unlock daemon (TODO 2.4c)
+
+- `src/daemon.rs`: new `DEFAULT_IDLE_TIMEOUT = 15 * 60` s, shared
+  `parse_idle_timeout(&str)` (whole seconds, zero refused, no upper bound) and
+  `run(vault, runtime_dir, key, idle_timeout)`. The accept loop checks
+  `last_activity.elapsed() >= idle_timeout` at the top of every iteration
+  (200 ms poll, so it stops within ~200 ms of the deadline unless a client is
+  mid-request; a stalled request can delay it by at most the 5 s read
+  timeout). Exiting drops `LockedKey` (zeroize + `munlock`) and then
+  `DaemonSocket` (unlink + instance-lock release), and exits 0, exactly like
+  `lock`/SIGTERM.
+- Activity is defined as a **successfully decoded request after the peer
+  check**, not raw bytes or connections. `handle_connection` now returns
+  `Handled::{Served, Rejected, Locked}`: `Ping`/`Run` (well-formed) refresh the
+  timer, a parse failure answers `bad_request` without refreshing, and `Lock`
+  stops the daemon. This stops garbage traffic from keeping the key alive.
+- Config surface: `pmd --idle-timeout SECS` (help updated) and
+  `passmgr unlock --idle-timeout SECS` / `--idle-timeout=SECS`, parsed by the
+  shared `parse_idle_timeout` and passed through `client::spawn_daemon(...)`
+  as an extra argument. `None` means the default, applied in `command_unlock`.
+  Unlock's stdout now reports the effective timeout as a `Duration` (`900s`).
+  `Command::Unlock` carries `idle_timeout: Option<Duration>`; non-Unix builds
+  keep a stub parser that accepts a bare `unlock` and refuses the flag.
+- Security note recorded in the `daemon.rs` module docs: the idle timeout is a
+  second line of defense, **not** an authorization boundary. Until the session
+  token (2.5) and grants (3.1) land, any same-user process can send `ping` and
+  keep the daemon alive. It still guarantees that an untouched session does
+  not hold the key forever.
+- Tests: 1 new lib test (`parse_idle_timeout` accepts positive whole seconds,
+  default is 900 s, rejects `0`/empty/negative/fraction/unit/whitespace), 1 new
+  CLI parse test (default `None`, both flag forms, zero/word/missing value
+  rejected), 3 new `tests/daemon.rs` e2e tests (short timeout exits and removes
+  the socket; pings every 250 ms for 4 s keep it alive past a 2 s timeout, then
+  it expires; rejected frames every 200 ms for up to 4 s do not refresh, with
+  an elapsed-time bound so a refresh bug fails), and 1 new `tests/unlock.rs` pty
+  test proving `unlock --idle-timeout 1` reaches the daemon (prints `after 1s`,
+  process disappears and socket is removed without `lock`).
+- Gate: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+  clean; `cargo test` passes: 112 lib, 20 bin, 27 CLI, 9 daemon, 7 unlock. The
+  CLI suite is Argon2-bound (~150 s). `cargo audit` is still not installed
+  here (`no such command: audit`); run it where available.
+- No new dependency, no crypto/vault-format change, no protocol change.
+- Next: **2.5 session token file** — write a random token to
+  `$XDG_RUNTIME_DIR/passmgr/session` (0600) at unlock, have requests carry it,
+  reject mismatches. Keep the token out of argv, the environment and all
+  output. Do not weaken the peer-uid check and do not add a plaintext request.
+
 ## 2026-11-02 — `pm unlock` / `pm lock` CLI (TODO 2.4b)
 
 - New `src/client.rs` (`#[cfg(unix)]`): the client half of the daemon protocol

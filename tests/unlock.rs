@@ -98,6 +98,16 @@ impl Fixture {
         self.unlock_on_pty_with(&[], "unlock", MASTER)
     }
 
+    /// `unlock` with extra arguments (for example `--idle-timeout`) on a pty.
+    #[cfg(target_os = "linux")]
+    fn unlock_on_pty_args(&self, args: &[&str]) -> PtyOutput {
+        let database = self.vault.to_str().expect("vault path is UTF-8");
+        let mut values = vec!["--db", database];
+        values.extend_from_slice(args);
+        let command = self.command(&values);
+        run_on_pty(command, &format!("{MASTER}\n"))
+    }
+
     #[cfg(target_os = "linux")]
     fn unlock_on_pty_with(
         &self,
@@ -129,7 +139,7 @@ impl Fixture {
         while self.socket().exists() {
             assert!(
                 Instant::now() < deadline,
-                "the daemon socket still exists after lock"
+                "the daemon socket still exists after the daemon stopped"
             );
             std::thread::sleep(Duration::from_millis(25));
         }
@@ -343,6 +353,43 @@ fn unlock_then_lock_round_trip_never_prints_a_secret() {
         passmgr::client::ping(&fixture.daemon_paths()).is_err(),
         "the daemon must be gone after lock"
     );
+}
+
+/// `unlock --idle-timeout` reaches the daemon: it wipes its key and stops
+/// without `pm lock` or a signal.
+#[cfg(target_os = "linux")]
+#[test]
+fn unlock_passes_the_idle_timeout_to_the_daemon() {
+    let fixture = Fixture::new();
+    let unlocked = fixture.unlock_on_pty_args(&["unlock", "--idle-timeout", "1"]);
+    assert_eq!(
+        unlocked.status.code(),
+        Some(0),
+        "stderr: {}",
+        unlocked.stderr
+    );
+    assert!(
+        unlocked.stdout.contains("after 1s"),
+        "stdout was: {}",
+        unlocked.stdout
+    );
+    let pid = daemon_pid(&unlocked);
+
+    let started = Instant::now();
+    loop {
+        // SAFETY: `pid` was printed by the daemon spawned for this test.
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
+        if !alive {
+            break;
+        }
+        assert!(
+            started.elapsed() < WAIT,
+            "the daemon did not expire within {WAIT:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    fixture.wait_socket_gone();
+    assert!(passmgr::client::ping(&fixture.daemon_paths()).is_err());
 }
 
 /// A second unlock must not prompt or start a second daemon.

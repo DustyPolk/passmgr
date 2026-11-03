@@ -68,14 +68,16 @@ Commands:
                              Metadata only, no password. --json prints the
                              entry object directly.
   generate [options]         Generate a secure random password.
-  unlock                     Derive the vault key and start the unlock daemon.
+  unlock [--idle-timeout SECS]
+                             Derive the vault key and start the unlock daemon.
                              Human use only: stdin and stdout must both be a
                              terminal and no agent environment marker may be
                              set, otherwise the command is refused with exit
                              code 5. The master password is prompted once;
                              the derived key reaches the daemon through a
                              pipe, never through argv or this process's
-                             output.
+                             output. The daemon wipes its key and stops
+                             after SECS without activity (default: 900).
   lock                       Ask the unlock daemon to wipe its key and stop.
                              Requires no terminal: it only shuts the daemon
                              down, so an agent may use it.
@@ -110,7 +112,7 @@ Examples:
   passmgr list --tag prod
   passmgr list --json
   passmgr show pm://0123456789abcdef0123456789abcdef
-  passmgr unlock
+  passmgr unlock --idle-timeout 300
   passmgr lock
   passmgr --db ~/.secrets/work.dat list
 
@@ -143,7 +145,8 @@ Notes:
     memory, so later commands do not prompt again. The daemon listens on a
     socket inside $XDG_RUNTIME_DIR/passmgr that only the owning user can
     connect to, and it has no request that returns plaintext. It stops on
-    'lock' or on SIGTERM/SIGINT.
+    'lock', on SIGTERM/SIGINT, or after the idle timeout (default 15 minutes,
+    set with 'unlock --idle-timeout SECS').
   - Vaults are encrypted with Argon2id and AES-256-GCM.
   - The legacy C vault format is not readable; this version uses a new format.
 "#;
@@ -193,7 +196,7 @@ fn run() -> Result<(), CliError> {
         Command::Edit(options) => command_edit(options, &path)?,
         Command::List { json, tags } => command_list(json, &tags, &path)?,
         Command::Show { reference, json } => command_show(&reference, json, &path)?,
-        Command::Unlock => command_unlock(agent_mode, &path)?,
+        Command::Unlock { idle_timeout } => command_unlock(agent_mode, &path, idle_timeout)?,
         Command::Lock => command_lock()?,
     }
     Ok(())
@@ -210,13 +213,25 @@ struct Parsed {
 #[derive(Debug)]
 enum Command {
     Add(AddOptions),
-    Get { service: String, reveal: bool },
+    Get {
+        service: String,
+        reveal: bool,
+    },
     Delete(String),
     Edit(EditOptions),
-    List { json: bool, tags: Vec<String> },
-    Show { reference: String, json: bool },
+    List {
+        json: bool,
+        tags: Vec<String>,
+    },
+    Show {
+        reference: String,
+        json: bool,
+    },
     Generate(GenerateOptions),
-    Unlock,
+    Unlock {
+        /// `None` means [`passmgr::daemon::DEFAULT_IDLE_TIMEOUT`].
+        idle_timeout: Option<std::time::Duration>,
+    },
     Lock,
     Help,
     Version,
@@ -355,10 +370,7 @@ fn parse_command(command: OsString, rest: Vec<OsString>) -> Result<Command, Stri
             require_no_arguments("version", &rest)?;
             Ok(Command::Version)
         }
-        "unlock" => {
-            require_no_arguments("unlock", &rest)?;
-            Ok(Command::Unlock)
-        }
+        "unlock" => parse_unlock(rest),
         "lock" => {
             require_no_arguments("lock", &rest)?;
             Ok(Command::Lock)
@@ -385,6 +397,49 @@ fn require_no_arguments(command: &str, args: &[OsString]) -> Result<(), String> 
         Ok(())
     } else {
         Err(format!("'{command}' takes no arguments"))
+    }
+}
+
+#[cfg(unix)]
+fn parse_unlock(args: Vec<OsString>) -> Result<Command, String> {
+    let mut idle_timeout = None;
+    let mut index = 0;
+
+    while index < args.len() {
+        let text = args[index]
+            .to_str()
+            .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
+        match text {
+            "--idle-timeout" => {
+                let value = flag_value(&args, index, "--idle-timeout")?;
+                idle_timeout = Some(passmgr::daemon::parse_idle_timeout(&value)?);
+                index += 2;
+                continue;
+            }
+            other if other.starts_with("--idle-timeout=") => {
+                let value = &other["--idle-timeout=".len()..];
+                idle_timeout = Some(passmgr::daemon::parse_idle_timeout(value)?);
+            }
+            other => {
+                return Err(format!(
+                    "unexpected argument '{other}' for 'unlock' (only --idle-timeout is accepted)"
+                ));
+            }
+        }
+        index += 1;
+    }
+
+    Ok(Command::Unlock { idle_timeout })
+}
+
+#[cfg(not(unix))]
+fn parse_unlock(args: Vec<OsString>) -> Result<Command, String> {
+    if args.is_empty() {
+        Ok(Command::Unlock { idle_timeout: None })
+    } else {
+        // The daemon does not exist here; refuse the flag rather than accept
+        // a setting that can never take effect.
+        Err(format!("'unlock' {} on this platform", DAEMON_UNSUPPORTED))
     }
 }
 
@@ -986,7 +1041,12 @@ const DAEMON_UNSUPPORTED: &str = "the unlock daemon is supported on Unix systems
 
 /// `passmgr unlock`: derive the key at a human terminal and start `pmd`.
 #[cfg(unix)]
-fn command_unlock(agent_mode: bool, path: &Path) -> Result<(), Error> {
+fn command_unlock(
+    agent_mode: bool,
+    path: &Path,
+    idle_timeout: Option<std::time::Duration>,
+) -> Result<(), Error> {
+    let idle_timeout = idle_timeout.unwrap_or(passmgr::daemon::DEFAULT_IDLE_TIMEOUT);
     // Starting the daemon is where a session begins, so it must be the
     // human's decision. Checked before any prompt: a refusal must not cost a
     // master-password prompt, and no environment variable can override it.
@@ -1013,11 +1073,12 @@ fn command_unlock(agent_mode: bool, path: &Path) -> Result<(), Error> {
     drop(master);
     drop(container);
 
-    let pid = passmgr::client::spawn_daemon(path, &runtime, &key)?;
+    let pid = passmgr::client::spawn_daemon(path, &runtime, &key, idle_timeout)?;
     drop(key);
     stdout_write(format_args!(
         "Vault unlocked. The unlock daemon is running (pid {pid}).\n\
-         Run 'passmgr lock' to stop it.\n"
+         It stops after {idle_timeout:?} without activity.\n\
+         Run 'passmgr lock' to stop it now.\n"
     ))
 }
 
@@ -1032,7 +1093,11 @@ fn command_lock() -> Result<(), Error> {
 }
 
 #[cfg(not(unix))]
-fn command_unlock(_agent_mode: bool, _path: &Path) -> Result<(), Error> {
+fn command_unlock(
+    _agent_mode: bool,
+    _path: &Path,
+    _idle_timeout: Option<std::time::Duration>,
+) -> Result<(), Error> {
     Err(Error::Daemon(DAEMON_UNSUPPORTED.to_owned()))
 }
 
@@ -1334,12 +1399,44 @@ mod tests {
         assert!(matches!(parse(&["add", "--help"]).unwrap(), Command::Help));
         assert!(matches!(parse(&["get", "--help"]).unwrap(), Command::Help));
         assert!(matches!(parse(&["--version"]).unwrap(), Command::Version));
-        assert!(matches!(parse(&["unlock"]).unwrap(), Command::Unlock));
+        assert!(matches!(
+            parse(&["unlock"]).unwrap(),
+            Command::Unlock { .. }
+        ));
         assert!(matches!(parse(&["lock"]).unwrap(), Command::Lock));
         assert!(parse(&["unlock", "extra"]).is_err());
         assert!(parse(&["lock", "extra"]).is_err());
         assert!(parse(&["unknown"]).is_err());
         assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn parses_the_unlock_idle_timeout() {
+        let Command::Unlock { idle_timeout } = parse(&["unlock"]).unwrap() else {
+            panic!("expected unlock command");
+        };
+        assert_eq!(idle_timeout, None, "default is applied at spawn time");
+
+        #[cfg(unix)]
+        {
+            let Command::Unlock { idle_timeout } =
+                parse(&["unlock", "--idle-timeout", "60"]).unwrap()
+            else {
+                panic!("expected unlock command");
+            };
+            assert_eq!(idle_timeout, Some(std::time::Duration::from_secs(60)));
+
+            let Command::Unlock { idle_timeout } =
+                parse(&["unlock", "--idle-timeout=120"]).unwrap()
+            else {
+                panic!("expected unlock command");
+            };
+            assert_eq!(idle_timeout, Some(std::time::Duration::from_secs(120)));
+
+            assert!(parse(&["unlock", "--idle-timeout", "0"]).is_err());
+            assert!(parse(&["unlock", "--idle-timeout", "soon"]).is_err());
+            assert!(parse(&["unlock", "--idle-timeout"]).is_err());
+        }
     }
 
     #[test]
