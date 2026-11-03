@@ -171,12 +171,17 @@ password:
 passmgr unlock
 passmgr grant create --label 'gh status' \
     --ref pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5 \
-    --command /usr/bin/gh --expires 1h \
+    --command /usr/bin/gh --allow-interpreter --expires 1h \
     --out /run/user/1000/gh.token
 passmgr run --grant-file /run/user/1000/gh.token \
     --env GH_TOKEN=pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5 \
     -- gh auth status
 ```
+
+The example allows `gh` on purpose with `--allow-interpreter`: `gh` can run
+another program (an alias, a plugin), so `grant create` refuses it otherwise.
+See [Create a grant](#create-a-grant) before allowing a program that can start
+something else.
 
 `run` needs both the unlock session token and a grant token that covers the
 credential and command. The grant token is read from `--grant-file` or

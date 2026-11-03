@@ -4,6 +4,8 @@
 //! the load-bearing statements from silently disappearing; behavior itself is
 //! tested in the other integration suites.
 
+use std::path::Path;
+
 const SECURITY: &str = include_str!("../SECURITY.md");
 const README: &str = include_str!("../README.md");
 const MCP: &str = include_str!("../MCP.md");
@@ -512,6 +514,115 @@ fn docs_say_who_checks_vault_limits_before_the_proof() {
     assert!(
         REQUEST_SRC.contains("check_grant_writable") && REQUEST_SRC.contains("expiry rule alone"),
         "check_approvable's doc must say it covers the expiry rule only"
+    );
+}
+
+/// Every fenced block in a Markdown document, with the fence lines stripped.
+/// Blocks are returned separately so a check cannot borrow a `--command` from
+/// one example to satisfy another.
+fn fenced_blocks(markdown: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<Vec<&str>> = None;
+    for line in markdown.lines() {
+        if line.trim_start().starts_with("```") {
+            match current.take() {
+                Some(block) => blocks.push(block.join("\n")),
+                None => current = Some(Vec::new()),
+            }
+            continue;
+        }
+        if let Some(block) = current.as_mut() {
+            block.push(line);
+        }
+    }
+    blocks
+}
+
+/// Join shell continuation lines (`\` at end of line) so a multi-line
+/// `grant create` is one logical command.
+fn logical_lines(text: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let continued = trimmed.ends_with('\\');
+        let part = trimmed.strip_suffix('\\').unwrap_or(trimmed).trim_end();
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(part);
+        if !continued && !current.trim().is_empty() {
+            lines.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.trim().is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// The text between `start` and the next `end`, used to isolate `--help`'s
+/// examples from its notes.
+fn section_between<'a>(text: &'a str, start: &str, end: &str) -> Option<&'a str> {
+    let after = &text[text.find(start)? + start.len()..];
+    Some(&after[..after.find(end)?])
+}
+
+/// Check every `grant create` line in `text` and return how many grant lines
+/// were seen. A `--command` that names a program runner must be accompanied by
+/// `--allow-interpreter`, because `grant create` refuses it otherwise.
+fn check_grant_examples(name: &str, text: &str) -> usize {
+    let mut grant_lines = 0;
+    for line in logical_lines(text) {
+        if !line.contains("grant create") {
+            continue;
+        }
+        grant_lines += 1;
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let mut index = 0;
+        while index < tokens.len() {
+            let path = if tokens[index] == "--command" {
+                index += 1;
+                tokens.get(index).copied()
+            } else {
+                tokens[index].strip_prefix("--command=")
+            };
+            if let Some(path) = path {
+                if passmgr::grant::is_program_runner(Path::new(path)) {
+                    assert!(
+                        line.contains("--allow-interpreter"),
+                        "{name}: a grant example allows the program runner {path} \
+                         without --allow-interpreter: {line}"
+                    );
+                }
+            }
+            index += 1;
+        }
+    }
+    grant_lines
+}
+
+/// TODO R.43: the README's quickstart allowed `/usr/bin/gh` without
+/// `--allow-interpreter`, so the first command a reader copied exited 5. Every
+/// `grant create` example in the README and in `--help` must flag a program
+/// runner, not just the one under "### Create a grant" (which R.25 fixed).
+#[test]
+fn every_documented_grant_example_flags_a_program_runner() {
+    let mut readme_grants = 0;
+    for block in fenced_blocks(README) {
+        readme_grants += check_grant_examples("README.md", &block);
+    }
+    assert!(
+        readme_grants >= 2,
+        "README.md must keep both its grant create examples, found {readme_grants}"
+    );
+
+    let help = help_text();
+    let examples = section_between(&help, "Examples:", "Notes:")
+        .expect("--help must keep an Examples section");
+    assert!(
+        check_grant_examples("--help", examples) >= 1,
+        "--help must keep its grant create example"
     );
 }
 

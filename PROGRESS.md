@@ -1,3 +1,27 @@
+## 2026-11-03 — Make every documented grant example runnable (TODO R.43)
+
+- `README.md`'s quickstart under "Use a credential without reading it" allowed
+  `/usr/bin/gh` without `--allow-interpreter`, so the first command a reader
+  copied exited 5. Kept `gh` (the example is `gh auth status`) and added the
+  flag plus a sentence explaining that `gh` can run another program and that
+  `grant create` refuses it otherwise, linking to "Create a grant".
+- New `tests/docs.rs` helpers `fenced_blocks`, `logical_lines` (joins shell
+  `\` continuations) and `check_grant_examples`; the test
+  `every_documented_grant_example_flags_a_program_runner` checks every fenced
+  README block and `--help`'s Examples section, using the real
+  `passmgr::grant::is_program_runner` on each `--command`. It also asserts both
+  README grant examples and the `--help` one still exist, so deleting an
+  example fails instead of making the check vacuous.
+- Proved the test fails on the old quickstart (temporarily removed the flag,
+  saw the expected assertion, restored) and passes at HEAD.
+- No behavior change, so no DECISIONS entry. The README's later "Create a
+  grant" example and `--help` were already correct since R.25.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  `cargo test` all pass. `cargo audit` skipped (not installed).
+- **Next iteration must know:** the new test treats `--command=PATH` and
+  `--command PATH` alike but does not parse quoted paths with spaces; no
+  current example has one. R.44 is next.
+
 ## 2026-11-03 — Prune dead grants so a vault never fills up (TODO R.42)
 
 - `pm grant create` now drops grants that are dead (revoked, or expired) and

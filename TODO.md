@@ -960,7 +960,7 @@ Rules that apply to every item:
       Done as prune-on-write in `pm grant create` (7-day retention after
       death), not as a `pm grant purge` subcommand.
 
-- [ ] **R.43 The README's main `run` example is refused with exit 5.**
+- [x] **R.43 The README's main `run` example is refused with exit 5.**
       `README.md:170-173` creates a grant with `--command /usr/bin/gh` and no
       `--allow-interpreter`, but R.25 made `gh` a program runner
       (`src/grant/validate.rs:146`). R.25 fixed only the example under
@@ -973,6 +973,11 @@ Rules that apply to every item:
       Test: a docs test that checks every fenced block containing
       `grant create` in `README.md` and `--help`: any `--command` whose
       basename `is_program_runner` must carry `--allow-interpreter`.
+      Done: kept `gh` in the quickstart (the example is about `gh auth
+      status`) and added `--allow-interpreter` plus a sentence on why. The new
+      `every_documented_grant_example_flags_a_program_runner` checks every
+      fenced README block and `--help`'s Examples section; it fails on the
+      old quickstart (verified).
 
 - [ ] **R.44 Copying an older `vault.dat` back undoes revocation and resets
       `max_uses`.**
