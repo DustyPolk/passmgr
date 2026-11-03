@@ -12,6 +12,7 @@ const README: &str = include_str!("../README.md");
 fn plain(markdown: &str) -> String {
     markdown
         .replace("**", "")
+        .replace('`', "")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -85,6 +86,28 @@ fn readme_points_at_security_md() {
         README.contains("SECURITY.md"),
         "README.md must link to SECURITY.md"
     );
+}
+
+/// `run` injects from the daemon's vault and refuses an explicit `--db` or
+/// `PASSMGR_DB` before connecting (TODO R.4). An agent that believes the flag
+/// selected a vault would be wrong, so both documents must say so.
+#[test]
+fn docs_say_run_refuses_an_explicit_vault() {
+    let documents = [
+        ("README.md", plain(README)),
+        ("--help", plain(&help_text())),
+    ];
+    for (name, text) in documents {
+        assert!(
+            text.contains("refuses --db and PASSMGR_DB"),
+            "{name} must say that run refuses --db and PASSMGR_DB"
+        );
+        assert!(
+            text.contains("the vault the running daemon was unlocked with")
+                || text.contains("the one the running daemon was unlocked with"),
+            "{name} must say which vault run uses"
+        );
+    }
 }
 
 /// Redaction replaces only an exact, contiguous occurrence of the value; it

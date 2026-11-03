@@ -84,12 +84,16 @@ Commands:
                              daemon's (which belong to the shell that ran
                              'unlock'), and the child starts in the caller's
                              working directory. An unresolvable program is a
-                             usage error (exit 2).
+                             usage error (exit 2). The vault is always the
+                             one the running daemon was unlocked with: 'run'
+                             refuses --db and PASSMGR_DB (exit 2) instead of
+                             injecting from a vault the caller did not name.
   help                       Show this help.
   version                    Show version information.
 
 Global options:
   --db PATH                  Vault file (default: ./passwords.dat, or $PASSMGR_DB).
+                             'run' does not accept it (see above).
   --agent                    Force agent mode. This can only make the tool more
                              restrictive: 'get --reveal' is refused even on a
                              terminal. It never reveals a secret by itself.

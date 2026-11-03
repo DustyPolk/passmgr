@@ -1,3 +1,39 @@
+## 2026-11-02 — Refuse `--db`/`PASSMGR_DB` for `run` (TODO R.4)
+
+- `src/cli/args.rs`: `parse_args` now reads `PASSMGR_DB` once, passes it to
+  `finish_parsing`, and calls `refuse_run_vault_selection` for a `Run` command.
+  An explicit `--db` or a non-empty `PASSMGR_DB` is a usage error (exit 2)
+  before the program is resolved or the daemon is contacted. The message names
+  the offending source and says `run` always uses the vault of the running
+  unlock daemon. Other commands keep flag > env > default.
+- Chose the refusal branch over "name/verify the vault in the request": the
+  daemon is keyed by the runtime socket, the session file stores no vault
+  path, and a protocol change belongs with grants (3.6). Refusal is the
+  conservative option and costs no new concept.
+- Docs: `src/cli/help.rs` (run paragraph + `--db` note), the regenerated
+  `tests/fixtures/help.txt`, `README.md` (vault-selection list and the `run`
+  section) and a `DECISIONS.md` bullet.
+- Tests: `src/cli/args.rs` unit tests for the flag, the env variable and the
+  non-`run` commands (the env case calls the pure helper instead of mutating
+  the process environment). `tests/run.rs`
+  `run_refuses_db_selection_before_connecting_or_running` starts a daemon with
+  vault A and passes a second vault B, once by flag and once by env: exit 2,
+  the message names `--db`/`PASSMGR_DB`, a child marker file is never created,
+  the canary is absent, and the daemon still answers `ping`. `command_at` now
+  clears `PASSMGR_DB` so tests do not inherit it. `tests/docs.rs`
+  `docs_say_run_refuses_an_explicit_vault` runs the real `--help` and pins the
+  claim in README and `--help`; `plain()` now also strips backticks.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass (`cargo audit` not installed; skipped).
+- **Next iteration must know:** `lock` still accepts and ignores `--db` (it
+  only talks to the socket); R.4 deliberately scoped to `run`. A shell that
+  exports `PASSMGR_DB` for `unlock --db` must unset it for `run` — the error
+  says so. R.5 is next: its current test matches `SECURITY.md:16`, not the
+  accepted-limit sentence, so rewrite it against `/proc/<pid>/environ` + a
+  specific phrase, and reuse this contract style.
+- NEEDS HUMAN REVIEW: none. The refusal makes the previously silent
+  ambiguity loud, which is the safer failure.
+
 ## 2026-11-02 — Stop promising encoded-secret redaction (TODO R.3)
 
 - Docs only; no code changed. `README.md`, `src/cli/help.rs` and its golden

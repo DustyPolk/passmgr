@@ -96,7 +96,7 @@ Phase 3: R.1 breaks a containment guarantee that the design already claims.
       encodings" promise). `tests/run.rs` proves the documented behavior with
       a canary and its base64: the raw value is redacted, the encoded copy is
       relayed verbatim. No code changed; 4.6 still owns the fix.
-- [ ] **R.4 `--db`/`PASSMGR_DB` are documented as global but silently
+- [x] **R.4 `--db`/`PASSMGR_DB` are documented as global but silently
       ignored by `run`.** `src/cli/help.rs:89` lists `--db PATH` under
       "Global options" and `README.md:47`/`:53` show it, but
       `src/cli/mod.rs:81` dispatches `Command::Run` without the parsed path
@@ -112,6 +112,12 @@ Phase 3: R.1 breaks a containment guarantee that the design already claims.
       Test: with two vaults, assert the chosen behavior: a clear usage error,
       or that the ref is resolved in the `--db` vault; add the `tests/docs.rs`
       contract.
+      Done: took the refusal branch. `parse_args` rejects `run` with `--db`
+      or a non-empty `PASSMGR_DB` (exit 2) before resolving the program or
+      contacting the daemon; the message names the variable and says `run`
+      uses the daemon's vault. `--help`, the golden fixture and README state
+      the rule; `tests/docs.rs` pins it. E2E proves the child never runs and
+      the refusal contains no secret.
 - [ ] **R.5 The SECURITY.md disclosure test can pass without the
       disclosure.** `tests/docs.rs:29` asserts `SECURITY.contains("same
       user")`, but the first matching sentence is `SECURITY.md:16` ("a process

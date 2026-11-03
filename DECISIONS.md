@@ -224,6 +224,12 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   the shell that ran `unlock`) and starts the child in the requested `cwd`.
   An unresolvable program is a CLI usage error (exit 2). This is why the
   protocol version is 3: a version-2 daemon would silently ignore `cwd`.
+- `run` does not accept an explicit vault: `--db` and a non-empty
+  `PASSMGR_DB` are a usage error (exit 2) before the CLI resolves the program
+  or connects. The daemon injects from the vault it was unlocked with, so
+  honouring the flag is impossible and ignoring it could inject a value from
+  a vault the human did not name (TODO R.4). Other commands still choose
+  their vault by flag > env > default.
 - Protocol code layout: `src/protocol/mod.rs` owns framing, requests and
   errors; `src/protocol/response.rs` owns one-shot responses and the `run`
   stream. `crate::protocol::*` re-exports the public API unchanged.

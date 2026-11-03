@@ -155,6 +155,9 @@ impl std::ops::Deref for Daemon {
 fn command_at(xdg_runtime_dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_passmgr"));
     command.env("XDG_RUNTIME_DIR", xdg_runtime_dir);
+    // `run` refuses an exported PASSMGR_DB (see below); tests must not inherit
+    // one from the developer's shell.
+    command.env_remove("PASSMGR_DB");
     for marker in passmgr::agent::AGENT_MARKERS {
         command.env_remove(marker);
     }
@@ -311,6 +314,61 @@ fn run_executes_relative_programs_in_the_callers_working_directory() {
         !stderr_text(&output).contains("daemon-directory"),
         "the daemon's working directory must not be used: {output:?}"
     );
+}
+
+/// `run` cannot choose a vault: the daemon injects from the vault it was
+/// unlocked with. Accepting `--db`/`PASSMGR_DB` and ignoring it would inject
+/// from a vault the human did not name, so both are usage errors (exit 2)
+/// before any connection or spawn.
+#[test]
+fn run_refuses_db_selection_before_connecting_or_running() {
+    let daemon = Daemon::start();
+    let other = tempfile::tempdir().expect("tempdir");
+    let other_vault = other.path().join("other.dat");
+    fs::write(&other_vault, b"not the daemon's vault").expect("write other vault");
+    let marker = other.path().join("ran-marker");
+    let marker_text = marker.to_str().expect("marker path is UTF-8").to_owned();
+    let env = env_argument(&daemon, "API_KEY");
+    let argv = [
+        "--env",
+        env.as_str(),
+        "--",
+        "/bin/sh",
+        "-c",
+        "printf ran > \"$1\"",
+        "sh",
+        marker_text.as_str(),
+    ];
+
+    let mut flag_argv = vec!["--db", other_vault.to_str().expect("UTF-8"), "run"];
+    flag_argv.extend_from_slice(&argv);
+    let output = run(&daemon, &flag_argv);
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("--db"), "{stderr}");
+    assert!(stderr.contains("does not accept"), "{stderr}");
+
+    let mut env_argv = vec!["run"];
+    env_argv.extend_from_slice(&argv);
+    let output = command_at(daemon.xdg_runtime_dir(), &env_argv)
+        .env("PASSMGR_DB", &other_vault)
+        .output()
+        .expect("run passmgr");
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("PASSMGR_DB"), "{stderr}");
+    assert!(stderr.contains("does not accept"), "{stderr}");
+
+    assert!(
+        !marker.exists(),
+        "the child must never run when the vault is ambiguous"
+    );
+    assert!(
+        !stderr.contains(SECRET) && !String::from_utf8_lossy(&output.stdout).contains(SECRET),
+        "the canary must not appear in the refusal"
+    );
+    // The refusals happened before the daemon was asked to do anything.
+    assert!(client::ping(&daemon.paths(), &daemon.token).is_ok());
 }
 
 #[test]

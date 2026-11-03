@@ -2,7 +2,7 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use passmgr::password::{MAX_LEN, MIN_LEN, Preset};
 use passmgr::store;
@@ -87,6 +87,9 @@ pub(crate) fn parse_args(args: Vec<OsString>) -> Result<Parsed, String> {
     let mut args = args.into_iter().peekable();
     let mut db_override = None;
     let mut agent = false;
+    let env_db = env::var_os("PASSMGR_DB")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
 
     let (command, rest) = loop {
         let argument = args
@@ -103,10 +106,10 @@ pub(crate) fn parse_args(args: Vec<OsString>) -> Result<Parsed, String> {
                 break (command, args.collect());
             }
             "-h" | "--help" => {
-                return Ok(finish_parsing(db_override, agent, Command::Help));
+                return Ok(finish_parsing(db_override, env_db, agent, Command::Help));
             }
             "-V" | "--version" => {
-                return Ok(finish_parsing(db_override, agent, Command::Version));
+                return Ok(finish_parsing(db_override, env_db, agent, Command::Version));
             }
             // A boolean flag, so repeating it is harmless.
             "--agent" => agent = true,
@@ -131,26 +134,47 @@ pub(crate) fn parse_args(args: Vec<OsString>) -> Result<Parsed, String> {
     };
 
     let command = parse_command(command, rest)?;
-    Ok(finish_parsing(db_override, agent, command))
+    refuse_run_vault_selection(&command, db_override.as_deref(), env_db.as_deref())?;
+    Ok(finish_parsing(db_override, env_db, agent, command))
 }
 
 pub(crate) fn finish_parsing(
     db_override: Option<PathBuf>,
+    env_db: Option<PathBuf>,
     agent: bool,
     command: Command,
 ) -> Parsed {
     let db_path = db_override
-        .or_else(|| {
-            env::var_os("PASSMGR_DB")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        })
+        .or(env_db)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_DB));
     Parsed {
         db_path,
         agent,
         command,
     }
+}
+
+/// `run` talks to whichever daemon owns the runtime socket, and that daemon
+/// holds the key for the vault it was unlocked with. Honouring `--db` here
+/// would be a lie (the path is never sent) and ignoring it could inject a
+/// value from a vault the human did not choose, so the combination is a usage
+/// error before any connection is made. `PASSMGR_DB` counts too: an exported
+/// variable would otherwise be silently ignored for this one command.
+fn refuse_run_vault_selection(
+    command: &Command,
+    flag_db: Option<&Path>,
+    env_db: Option<&Path>,
+) -> Result<(), String> {
+    if !matches!(command, Command::Run(_)) {
+        return Ok(());
+    }
+    let Some(source) = flag_db.map(|_| "--db").or(env_db.map(|_| "PASSMGR_DB")) else {
+        return Ok(());
+    };
+    Err(format!(
+        "'run' always uses the vault of the running unlock daemon and does not accept \
+         {source}; unset {source} (or unlock the daemon with the vault you want)"
+    ))
 }
 
 pub(crate) fn set_db(slot: &mut Option<PathBuf>, path: PathBuf) -> Result<(), String> {
@@ -723,4 +747,61 @@ pub(crate) fn parse_length(value: &str) -> Result<usize, String> {
         return Err(format!("length must be between {MIN_LEN} and {MAX_LEN}"));
     }
     Ok(length)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RUN_REF: &str = "pm://00112233445566778899aabbccddeeff";
+
+    fn run_command() -> Command {
+        Command::Run(RunOptions {
+            env: "API_KEY".into(),
+            reference: RUN_REF.into(),
+            command: vec!["/bin/true".into()],
+        })
+    }
+
+    #[test]
+    fn run_refuses_an_explicit_db_flag() {
+        let error =
+            refuse_run_vault_selection(&run_command(), Some(Path::new("/tmp/other.dat")), None)
+                .expect_err("--db must be refused for run");
+        assert!(error.contains("--db"), "{error}");
+        assert!(error.contains("does not accept"), "{error}");
+    }
+
+    #[test]
+    fn run_refuses_the_db_environment_variable() {
+        // `PASSMGR_DB` is checked here rather than through `parse_args`, so
+        // the test does not mutate the process environment (which would race
+        // with every other test in the binary).
+        let error =
+            refuse_run_vault_selection(&run_command(), None, Some(Path::new("/tmp/other.dat")))
+                .expect_err("PASSMGR_DB must be refused for run");
+        assert!(error.contains("PASSMGR_DB"), "{error}");
+    }
+
+    #[test]
+    fn other_commands_accept_an_explicit_db() {
+        for command in [
+            Command::List {
+                json: false,
+                tags: Vec::new(),
+            },
+            Command::Lock,
+            Command::Help,
+        ] {
+            assert!(
+                refuse_run_vault_selection(
+                    &command,
+                    Some(Path::new("/tmp/other.dat")),
+                    Some(Path::new("/tmp/other.dat"))
+                )
+                .is_ok(),
+                "{command:?}"
+            );
+        }
+    }
 }

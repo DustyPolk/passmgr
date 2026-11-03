@@ -54,6 +54,11 @@ order:
 2. the `PASSMGR_DB` environment variable
 3. `./passwords.dat`
 
+`lock` and `run` do not read that path: they talk to the running daemon, which
+holds the key for the vault it was unlocked with. `run` therefore refuses `--db`
+and `PASSMGR_DB` with exit code 2 (see below) instead of injecting from a vault
+the caller did not name.
+
 The master password is prompted for every command except `generate`, `help`,
 `version`, `lock`, and `run`; `lock` and `run` talk to an already-unlocked
 daemon instead, and `unlock` prompts once to start it. Prompts are written to
@@ -180,7 +185,9 @@ occurrence of the secret replaced by `[REDACTED]`; encoded or transformed
 copies (base64, hex, percent-encoding, case changes) are not replaced —
 redaction is best-effort, not a sandbox (see `SECURITY.md`, limit 3).
 `passmgr` exits with the child's status, or 128+N when the child was killed by
-signal N. Loader and shell-hook
+signal N. The vault is always the one the running daemon was unlocked with, so
+`run` refuses `--db` and `PASSMGR_DB` with exit code 2 rather than inject from
+a different vault. Loader and shell-hook
 names (`PATH`, `LD_*`, `BASH_ENV`, ...) are refused with exit code 5. The
 secret never crosses the socket to the CLI: only references and
 already-redacted output do.
