@@ -1,3 +1,12 @@
+## 2026-11-02 — loop note: gate failed (iteration 21)
+
+- Commits from this work iteration (TODO H.1) failed the gate and were rolled back.
+- The work is kept on branch failed/iter-21-20261102-202146; you may cherry-pick from it and fix it.
+- gate: `unauthorized_requests_do_not_refresh_the_idle_timeout --- FAILED`
+- gate: `thread 'unauthorized_requests_do_not_refresh_the_idle_timeout' (414411) panicked at tests/daemon.rs:127:36:`
+- gate: `test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.15s`
+- gate: `error: test failed, to rerun pass `--test daemon``
+
 ## 2026-11-02 — Streaming output redactor (TODO 2.6a)
 
 - New `src/redact.rs`, exported from `src/lib.rs`. No new dependency
