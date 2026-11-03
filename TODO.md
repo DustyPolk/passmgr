@@ -9,6 +9,101 @@ Rules that apply to every item:
   absent from stdout, stderr and logs).
 - No new network-capable dependency. Justify any new dependency in `PROGRESS.md`.
 
+## Phase R — review findings (fix first)
+
+Findings from the security review of `49d9915..3500f6d` (details in
+`PROGRESS.md`). Each item names the code, a failure that reproduces today, and
+the test that must fail before the fix and pass after it. They come before
+Phase 3: R.1 breaks a containment guarantee that the design already claims.
+
+- [ ] **R.1 A long-running `run` defeats `lock`, the idle timeout and SIGTERM.**
+      `src/daemon.rs:383-397` accepts and serves one connection at a time, and
+      `src/daemon.rs:452`/`:481` (`serve_run`) calls `runner::execute`
+      synchronously, so a second connection (`passmgr lock`) is never read.
+      When the child closes stdout/stderr, `src/runner.rs:199` takes
+      `Relay::Finished` and `src/runner.rs:202` calls `child.wait()` without
+      polling the cancel flag, so the daemon's SIGTERM handler is not
+      observed either. Failure: `passmgr run --env K=pm://… -- sh -c 'exec
+      >/dev/null 2>&1; sleep 1h'`; `passmgr lock` exits 1 after its 5 s read
+      timeout, `pmd` stays alive after SIGTERM (reproduced: alive 2 s later),
+      and the idle-timeout check at `src/daemon.rs:379` is never reached, so
+      the vault key and the child's copy of the secret stay usable for the
+      whole hour. This contradicts `DECISIONS.md:244-246` ("lock, SIGTERM,
+      SIGINT and the idle timeout all wipe the key") and `SECURITY.md`'s
+      containment claims; `PROGRESS.md:105-108` recorded only the lock part
+      and wrongly says SIGTERM stops the run.
+      Fix direction: serve `Run` on a worker thread (or otherwise keep the
+      accept loop responsive to `Lock`/`Ping`), make `lock` cancel in-flight
+      runs, and replace the blocking `wait()` in `Relay::Finished` with a
+      `waitpid(WNOHANG)` loop that checks the cancel flag every 100 ms.
+      Test: e2e `run` a child that closes both pipes and sleeps 30 s; assert
+      `lock` returns `Locked` within 2 s and the child is reaped, that SIGTERM
+      terminates `pmd` within 2 s, and that a 1 s idle timeout shuts the
+      daemon down (killing the child) while the run is still live.
+- [ ] **R.2 `run` resolves the command in `pmd`'s cwd and `PATH`, not the
+      caller's.** `src/runner.rs:158-159` builds `Command::new(program)` and
+      `command.args(&argv[1..])` with no `current_dir`, `src/cli/run.rs` sends
+      no cwd, and `pmd` inherits the cwd of the terminal that ran `passmgr
+      unlock` (`detach_session`, `src/daemon.rs:313-317`, only calls
+      `setsid`). Failure (reproduced): the human unlocks from `~/work`; an
+      agent in a repository with its own `./deploy.sh` runs `passmgr run
+      --env TOKEN=pm://… -- ./deploy.sh` and the daemon executes
+      `~/work/deploy.sh` with the secret in its environment. Relative
+      arguments have the same problem, so the agent can hand the credential
+      to a different script than the one it named. `PATH` lookup also uses
+      the unlock shell's `PATH`.
+      Fix direction: resolve the program and relative arguments against the
+      caller's cwd (add the cwd to `RunRequest` and set `current_dir`, or
+      canonicalize/refuse relative paths client-side), use a fixed child
+      `PATH` or refuse `PATH` lookups, and document the choice in
+      `DECISIONS.md`.
+      Test: daemon cwd A, CLI cwd B, both containing `rel.sh`; assert the run
+      executes B's script or is refused before spawn, never A's; add a unit
+      test for a relative `command[0]`.
+- [ ] **R.3 README and `--help` promise encoded-secret redaction that does
+      not exist.** `README.md:173-174` says stdout/stderr are relayed with
+      "the secret (and common encodings)" replaced by `[REDACTED]`, and
+      `src/cli/help.rs:73` (fixture `tests/fixtures/help.txt:68`) repeats it,
+      but `src/redact.rs` matches the exact secret bytes only;
+      `SECURITY.md:108` correctly says encodings are not followed and belong
+      to TODO 4.6. Failure: an agent runs `passmgr run --env K=pm://… -- sh
+      -c 'printf %s "$K" | base64'`; the base64 value reaches the agent
+      verbatim while the human-visible docs promised redaction. A hex-dumped
+      credential leaked this way defeats the "agents never see plaintext"
+      invariant without any warning.
+      Test: implement TODO 4.6 first, or change README/`--help` to say that
+      only the exact secret bytes are redacted; add a `tests/docs.rs`
+      contract that README, `--help` and `SECURITY.md` agree on that limit,
+      and an e2e test with a base64-encoded secret showing the documented
+      behavior.
+- [ ] **R.4 `--db`/`PASSMGR_DB` are documented as global but silently
+      ignored by `run`.** `src/cli/help.rs:89` lists `--db PATH` under
+      "Global options" and `README.md:47`/`:53` show it, but
+      `src/cli/mod.rs:81` dispatches `Command::Run` without the parsed path
+      (`RunOptions` in `src/cli/args.rs` has no db field), so `run` always
+      talks to whichever daemon owns the runtime socket. Failure: `passmgr
+      --db ~/vaults/work.dat run …` against a daemon started for
+      `~/personal.dat` reports `not_found` for a valid ref, or (when the two
+      vaults are copies) injects the other vault's password while the human
+      believes the `--db` vault was used.
+      Fix direction: either reject `--db`/`PASSMGR_DB` for `run` with exit 2
+      before connecting (and say so in `--help`), or make the run request
+      name/verify the vault the daemon serves; record the decision.
+      Test: with two vaults, assert the chosen behavior: a clear usage error,
+      or that the ref is resolved in the `--db` vault; add the `tests/docs.rs`
+      contract.
+- [ ] **R.5 The SECURITY.md disclosure test can pass without the
+      disclosure.** `tests/docs.rs:29` asserts `SECURITY.contains("same
+      user")`, but the first matching sentence is `SECURITY.md:16` ("a process
+      running as the same user can read the 0600 session file"), not the
+      accepted-limit sentence at `SECURITY.md:71` about
+      `/proc/<pid>/environ`. Failure: deleting or rewording limit 1 still
+      leaves the test green, so the next iteration can silently drop the one
+      document that admits the injected-child exposure.
+      Test: assert on a stable, specific phrase from the limit itself (e.g.
+      `/proc/<pid>/environ` plus `same user`), and use the same style of
+      contract for the R.3 and R.4 claims so a doc edit cannot regress them.
+
 ## Phase 3 — grants and audit log
 
 The design for grants, approval and audit lives in `MCP.md` ("Grants and the

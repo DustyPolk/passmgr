@@ -1,3 +1,42 @@
+## 2026-11-02 — Review of 49d9915..3500f6d
+
+- Reviewed the whole range (26 files, +6340/−2583): the new `src/runner.rs`,
+  `src/cli/{run,args,mod}.rs`, `src/protocol/response.rs`, the streaming
+  reader in `src/client.rs`, `serve_run` in `src/daemon.rs`, `SECURITY.md`
+  and `tests/{run,docs}.rs`, plus `PROMPT.md`, `MCP.md`, `DECISIONS.md` and
+  the archived TODO. `cargo test` passes on the range (16 daemon, 8 run,
+  8 cli, 5 docs, 0 failures); `cargo audit` is still not installed. No source
+  changes were made.
+- Five findings, now `## Phase R` in `TODO.md`: authorization 1 (R.1),
+  unsafe exec/path resolution 1 (R.2), documentation drift 2 (R.3, R.4),
+  ineffective test 1 (R.5). No secret-exposure, crypto or maintainability
+  finding. The session-token-only gate on `run` (TODO 3.6) and unaudited run
+  frames (TODO 3.8) are the documented transition, not new findings.
+- R.1 reproduced outside the suite: with a run child that closes both pipes
+  and sleeps, `passmgr lock` timed out after 5 s and `pmd` was still alive
+  2 s after SIGTERM (the daemon serves `run` inline on its accept thread, and
+  the `Relay::Finished` path waits without polling the cancel flag). R.2
+  reproduced with the daemon started in one directory and the CLI run from
+  another: the daemon's copy of `./rel.sh` executed with the secret injected.
+  Both scratch harnesses lived in `/tmp/pmreview` and are not committed.
+- Looked at and judged fine (do not redo): the peer-uid check in
+  `accept_peer`; constant-time token comparison and the session file's
+  0600/`O_NOFOLLOW` handling; frame, chunk, argv and password bounds with
+  no-panic parsers on arbitrary bytes; redacting `Debug` for `RunFrame`,
+  `SessionToken` and `LockedKey`; the daemon-side loader/shell-hook denylist
+  and its live-daemon test (`tests/daemon.rs:744`); redaction before the
+  socket plus the raw-socket canary test; no new `println!`/`format!`/JSON
+  path can carry a secret; no new file over ~1000 lines (`src/protocol/mod.rs`
+  shrank from 1244 to 1080 when `response.rs` was split out). The CLI
+  denylist test's `!marker.exists()` cannot fail (no daemon runs), but its
+  exit-5 and stderr assertions still catch a CLI regression and the daemon
+  test covers the actual spawn.
+- Accepted and documented, not findings: `/proc/<pid>/environ` for the
+  injected child, interpreter exfiltration, the partial-prefix output flush,
+  `[REDACTED]` vs `MCP.md`'s `[REDACTED:<VAR>]` (Phase 4), and the `--db`
+  note already in the previous entry. Do not expose `run` to MCP before R.1
+  and 3.6 are fixed.
+
 ## 2026-11-02 — Document the accepted limits in `SECURITY.md` (TODO 2.7)
 
 - New `SECURITY.md` (the file already referenced by `src/daemon.rs`,
