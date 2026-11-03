@@ -341,7 +341,13 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   A run-capable grant needs at least one command; a list-only grant may have
   none. Commands are sorted and deduplicated, max 32, each <= `MAX_PATH_BYTES`
   and valid UTF-8.
-- Grant limits: label 1..=64 bytes with no control characters, at least one
+- Grant limits: label 1..=64 bytes with no control, bidi, zero-width/format,
+  line-separator or variation-selector characters (TODO R.14). The label is
+  stored verbatim and later rendered by `pm grant list`, so validation
+  **rejects** the whole class instead of stripping it: a silently altered
+  label would not match what a human approved. A visible combining accent,
+  an emoji without a zero-width joiner, or a non-Latin script is allowed. At
+  least one
   capability, expiry in `(now, now + 30 days]`, and `max_uses = Some(0)` is
   refused (omit it for unlimited). Capabilities are a bit field
   (`list` = 1, `run` = 2) with unknown bits rejected on decode.

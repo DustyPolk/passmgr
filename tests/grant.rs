@@ -170,6 +170,105 @@ fn create_rejects_invalid_specs() {
     }
 }
 
+/// Code points a stored label must never keep. Spelled out here on purpose:
+/// the module's table is the code under test, so re-using it as the oracle
+/// would prove nothing (TODO R.14). Controls, bidi controls, zero-width and
+/// format characters, separators and variation selectors.
+const FORBIDDEN_IN_LABELS: [char; 29] = [
+    '\u{0}',
+    '\u{7}',
+    '\u{9B}',
+    '\u{AD}',
+    '\u{61C}',
+    '\u{180E}',
+    '\u{200B}',
+    '\u{200C}',
+    '\u{200D}',
+    '\u{200E}',
+    '\u{200F}',
+    '\u{202A}',
+    '\u{202B}',
+    '\u{202C}',
+    '\u{202D}',
+    '\u{202E}',
+    '\u{2028}',
+    '\u{2029}',
+    '\u{2060}',
+    '\u{2066}',
+    '\u{2067}',
+    '\u{2068}',
+    '\u{2069}',
+    '\u{FE0F}',
+    '\u{FEFF}',
+    '\u{FFF9}',
+    '\u{E0041}',
+    '\u{E0100}',
+    '\u{1D173}',
+];
+
+#[test]
+fn create_rejects_hidden_and_reordering_label_characters() {
+    for bad in FORBIDDEN_IN_LABELS {
+        let label = format!("prod{bad}deploy");
+        let err = Grant::create(
+            GrantSpec {
+                label: label.clone(),
+                ..spec(Capabilities::RUN)
+            },
+            TokenHash::of(TOKEN),
+            NOW,
+        )
+        .expect_err(&format!("label {label:?} was accepted"));
+        assert!(
+            err.to_string().contains("control, bidi or zero-width"),
+            "{bad:?}: unexpected error {err}"
+        );
+        // The refusal must not echo the untrusted label back to a terminal.
+        assert!(
+            !err.to_string().contains(&label),
+            "{bad:?}: error echoed the label: {err}"
+        );
+    }
+}
+
+#[test]
+fn accepted_labels_hold_only_visible_characters() {
+    // Ordinary visible text, including non-Latin scripts, an emoji and a
+    // combining accent, must stay usable.
+    let visible = [
+        "prod deploy",
+        "工作",
+        "إنتاج",
+        "cafe\u{301}",
+        "🔑 deploy",
+        "a.b/c",
+        "Grüße—2026",
+    ];
+    for label in visible {
+        let grant = Grant::create(
+            GrantSpec {
+                label: label.into(),
+                ..spec(Capabilities::RUN)
+            },
+            TokenHash::of(TOKEN),
+            NOW,
+        )
+        .unwrap_or_else(|err| panic!("visible label {label:?} was rejected: {err}"));
+        assert_eq!(grant.label(), label);
+        // Every rendering surface (`pm grant list`, logs, `Debug`) prints the
+        // stored label verbatim, so a label free of these code points cannot
+        // smuggle bidi or invisible text into a human's terminal.
+        for rendering in [grant.label().to_owned(), format!("{grant:?}")] {
+            for character in rendering.chars() {
+                assert!(
+                    !FORBIDDEN_IN_LABELS.contains(&character),
+                    "label {label:?} rendered {character:?}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn commands_are_sorted_deduplicated_and_must_be_absolute() {
     let spec = GrantSpec {

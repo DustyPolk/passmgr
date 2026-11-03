@@ -1,3 +1,37 @@
+## 2026-11-03 — Reject bidi and zero-width characters in grant labels (TODO R.14)
+
+- `src/grant.rs`: `validate_label` now rejects Cc controls plus the Unicode
+  **format** set (bidi embeddings/overrides/isolates U+061C, U+200E/F,
+  U+202A-202E, U+2066-2069; zero-width U+200B-200D, U+2060-2064, U+FEFF, soft
+  hyphen, tag characters, …), the line/paragraph separators (U+2028/2029) and
+  the variation selectors. Implemented as the explicit table
+  `is_hidden_or_reordering`; no new dependency (a general-category crate for
+  one check would be a new tree to vet).
+- Chose **reject** over strip: the label is stored verbatim and re-rendered by
+  `pm grant list` and may come from an approved agent request (4.9), so a
+  silently altered label would not match what a human approved. Cost: an
+  emoji ZWJ sequence (U+200D) in a label is refused; plain emoji, combining
+  accents, Arabic and CJK stay allowed. Error text names the class, never
+  echoes the label.
+- Tests in `tests/grant.rs`: `create_rejects_hidden_and_reordering_label_characters`
+  loops 29 forbidden code points (a table written out in the test, so it is an
+  oracle independent of the module's) through `Grant::create`, asserts refusal
+  and that the error does not echo the label; it fails against the old
+  `char::is_control` check (verified). `accepted_labels_hold_only_visible_characters`
+  proves visible labels round-trip and neither the label nor its `Debug`
+  rendering holds a forbidden code point.
+- `DECISIONS.md`: the label limit now records the reject-not-strip rule.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` green. `cargo audit` not installed; skipped.
+- **Next iteration must know:** the TODO's "`pm grant list` rendering" test
+  cannot exist yet (3.5 builds it); the guarantee currently holds by
+  construction at `Grant::create`, and 3.5 must render `label()` verbatim, not
+  re-sanitize. `validate_service`/`validate_username` (`src/store.rs:348-368`)
+  still reject only Cc and can carry the same bidi bytes; they are
+  human-typed today, so they were left alone, but a later item should decide
+  on a shared guard (and what to do with existing vaults) before those names
+  are rendered widely. Next item is 3.2b (persist grants, store version 5).
+
 ## 2026-11-03 — Make `TokenHash` comparisons constant-time by construction (TODO R.13)
 
 - `src/grant.rs`: `TokenHash` now derives only `Clone, Copy`; `PartialEq` and

@@ -77,7 +77,7 @@ continuing Phase 3; each names the test that must prove the fix.
       not compile, and its companion doctest proves `matches` does. Chose a
       doctest over `trybuild`/a source guard: no new dependency and the
       compiler, not a text parse, is the oracle.
-- [ ] **R.14 Grant labels accept bidi and zero-width characters.**
+- [x] **R.14 Grant labels accept bidi and zero-width characters.**
       `validate_label` (`src/grant.rs:699-713`) rejects only
       `char::is_control` (`src/grant.rs:708`), which is Unicode Cc. Verified:
       U+202E RIGHT-TO-LEFT OVERRIDE and U+200B ZERO WIDTH SPACE both pass.
@@ -93,6 +93,13 @@ continuing Phase 3; each names the test that must prove the fix.
       `label: "prod\u{202E}nimda"`, `"a\u{200B}b"` and `"a\u{2066}b"` must
       be rejected (or sanitized to the visible characters), and a rendering
       test asserts `pm grant list` output contains none of those code points.
+      Done: `validate_label` rejects Cc plus the Unicode format (`Cf`),
+      line/paragraph separator and variation-selector sets via
+      `is_hidden_or_reordering`; the whole label is refused (not stripped) so
+      it always matches what a human approved. Tested with a test-local
+      table of 29 code points (independent of the module's table); the
+      `pm grant list` half waits for 3.5, so the rendering test proves the
+      accepted label and its `Debug` rendering hold no such code point.
 
 ## Phase 3 — grants and audit log
 

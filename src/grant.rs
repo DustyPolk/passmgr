@@ -745,12 +745,61 @@ fn validate_label(label: &str) -> Result<()> {
             "a grant label holds at most {MAX_LABEL_BYTES} bytes"
         )));
     }
-    if label.chars().any(char::is_control) {
+    if label.chars().any(is_hidden_or_reordering) {
         return Err(Error::InvalidInput(
-            "a grant label must not contain control characters".into(),
+            "a grant label must not contain control, bidi or zero-width characters".into(),
         ));
     }
     Ok(())
+}
+
+/// Characters that are invisible, reorder neighbouring text, or can hide part
+/// of a label from a human reading `pm grant list`.
+///
+/// The label is stored verbatim and later shown to a human, and from TODO 4.9
+/// it may come from an approved agent request, so this module rejects the
+/// whole class instead of trusting the renderer. Covered: C0/C1 controls;
+/// every Unicode **format** character (`Cf`) this build knows, which includes
+/// the bidi controls (U+061C, U+200E/U+200F, U+202A-U+202E, U+2066-U+2069),
+/// the zero-width set (U+200B-U+200D, U+2060-U+2064), soft hyphen, the tag
+/// characters and U+FEFF; the line and paragraph separators (U+2028/U+2029);
+/// and the variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF), which are
+/// invisible combining marks rather than `Cf`. Ordinary visible combining
+/// marks, emoji, accents and non-Latin scripts stay allowed.
+///
+/// Kept as an explicit table rather than a new dependency: a
+/// general-category crate for one check would be a new tree to vet, and a
+/// `Cf` character this list misses is rejected by the next review, not by a
+/// silent pass.
+fn is_hidden_or_reordering(character: char) -> bool {
+    if character.is_control() {
+        return true;
+    }
+    matches!(character,
+        '\u{00AD}'                       // soft hyphen
+        | '\u{0600}'..='\u{0605}'        // Arabic number signs
+        | '\u{061C}'                     // Arabic letter mark
+        | '\u{06DD}'                     // Arabic end of ayah
+        | '\u{070F}'                     // Syriac abbreviation mark
+        | '\u{0890}'..='\u{0891}'        // Arabic pound/piastre marks
+        | '\u{08E2}'                     // Arabic disputed end of ayah
+        | '\u{180E}'                     // Mongolian vowel separator
+        | '\u{200B}'..='\u{200F}'        // zero-width + LRM/RLM
+        | '\u{202A}'..='\u{202E}'        // bidi embeddings/overrides
+        | '\u{2060}'..='\u{2064}'        // word joiner + invisible operators
+        | '\u{2066}'..='\u{206F}'        // bidi isolates + deprecated formats
+        | '\u{2028}'..='\u{2029}'        // line/paragraph separators
+        | '\u{FE00}'..='\u{FE0F}'        // variation selectors
+        | '\u{FEFF}'                     // zero-width no-break space (BOM)
+        | '\u{FFF9}'..='\u{FFFB}'        // interlinear annotation
+        | '\u{110BD}' | '\u{110CD}'      // Kaithi number signs
+        | '\u{13430}'..='\u{1343F}'      // Egyptian hieroglyph controls
+        | '\u{1BCA0}'..='\u{1BCA3}'      // shorthand format controls
+        | '\u{1D173}'..='\u{1D17A}'      // musical symbol format controls
+        | '\u{E0001}'                    // language tag
+        | '\u{E0020}'..='\u{E007F}'      // tag characters
+        | '\u{E0100}'..='\u{E01EF}'      // variation selectors supplement
+    )
 }
 
 fn validate_commands(commands: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
