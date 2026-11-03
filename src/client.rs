@@ -24,12 +24,15 @@
 //! read (bounded) to explain a startup failure; `pmd` messages never contain
 //! key material.
 //!
-//! # What this module does not do
+//! # Authorization
 //!
-//! There is no request that returns plaintext, and no authorization beyond the
-//! socket's peer-uid check yet (the session token is TODO 2.5, grants are 3.1).
-//! `lock` is therefore available to any process running as the owner; the
-//! worst it can do is make the human unlock again.
+//! Every request carries the session token from the 0600 session file, and the
+//! daemon rejects a mismatch with `unauthorized`. The token proves the client
+//! can read the owner's runtime directory, which every same-user process can;
+//! it is not yet a boundary between an agent and its owner (grants are TODO
+//! 3.1). There is still no request that returns plaintext, so the worst a
+//! process holding the token can do is use secrets through `run` (when it
+//! lands) or make the human unlock again.
 
 use std::env;
 use std::fs::File;
@@ -41,7 +44,9 @@ use std::time::{Duration, Instant};
 use crate::crypto::KEY_LEN;
 use crate::error::{Error, Result};
 use crate::protocol::{self, Request, Response};
+use crate::session;
 use crate::socket::{self, RuntimePaths, SocketError};
+use crate::token::SessionToken;
 
 /// How long the client waits for a daemon response.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -57,12 +62,12 @@ const LOG_LIMIT: u64 = 8 * 1024;
 ///
 /// Fails with [`Error::Daemon`] when the daemon is not running, does not answer
 /// within [`REQUEST_TIMEOUT`], or sends bytes that are not a valid response.
-pub fn request(paths: &RuntimePaths, request: &Request) -> Result<Response> {
+pub fn request(paths: &RuntimePaths, token: &SessionToken, request: &Request) -> Result<Response> {
     let mut stream = socket::connect_at(paths).map_err(socket_error)?;
     stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
 
-    let frame = protocol::encode(request).map_err(protocol_error)?;
+    let frame = protocol::encode(token, request).map_err(protocol_error)?;
     stream.write_all(&frame)?;
     stream.flush()?;
 
@@ -96,8 +101,8 @@ pub fn request(paths: &RuntimePaths, request: &Request) -> Result<Response> {
 }
 
 /// Ask whether a daemon is alive (and holds a key) at `paths`.
-pub fn ping(paths: &RuntimePaths) -> Result<()> {
-    match request(paths, &Request::Ping)? {
+pub fn ping(paths: &RuntimePaths, token: &SessionToken) -> Result<()> {
+    match request(paths, token, &Request::Ping)? {
         Response::Pong => Ok(()),
         Response::Error(error) => Err(Error::Daemon(format!(
             "the unlock daemon rejected a ping ({})",
@@ -110,9 +115,31 @@ pub fn ping(paths: &RuntimePaths) -> Result<()> {
 }
 
 /// Ask the daemon to wipe its key and stop.
+///
+/// The token comes from the session file. When that file is gone, the socket is
+/// probed first so the caller still gets the precise "no daemon is running"
+/// error instead of a confusing token error; a reachable daemon with no
+/// readable token is a real error, not a success.
 pub fn lock(paths: &RuntimePaths) -> Result<()> {
-    match request(paths, &Request::Lock)? {
-        Response::Locked => Ok(()),
+    let token = match session::load(paths) {
+        Ok(token) => token,
+        Err(err) => {
+            // Distinguish "nothing is running" from "a daemon is running but
+            // this client cannot authenticate to it".
+            socket::connect_at(paths).map_err(socket_error)?;
+            return Err(Error::Daemon(format!(
+                "cannot authenticate to the unlock daemon: {err}"
+            )));
+        }
+    };
+    match request(paths, &token, &Request::Lock)? {
+        Response::Locked => {
+            // The daemon removes the file too, but only if it still matches;
+            // this makes `lock` leave no stale token even if the daemon died
+            // between answering and cleaning up.
+            let _ = session::remove(paths);
+            Ok(())
+        }
         Response::Error(error) => Err(Error::Daemon(format!(
             "the unlock daemon rejected the lock request ({})",
             error.code()
@@ -135,6 +162,7 @@ pub fn spawn_daemon(
     vault: &Path,
     paths: &RuntimePaths,
     key: &[u8],
+    token: &SessionToken,
     idle_timeout: Duration,
 ) -> Result<u32> {
     if key.len() != KEY_LEN {
@@ -168,14 +196,18 @@ pub fn spawn_daemon(
         .stdin
         .take()
         .ok_or_else(|| Error::Daemon("internal error: pmd stdin was not piped".into()))?;
-    // Exactly the key, then close: pmd requires EOF after KEY_LEN bytes.
-    let handover = stdin.write_all(key).and_then(|()| stdin.flush());
+    // Exactly the key then the token, then close: pmd requires EOF after those
+    // bytes. Neither is ever in argv, the environment or a log.
+    let handover = stdin
+        .write_all(key)
+        .and_then(|()| stdin.write_all(token.as_bytes()))
+        .and_then(|()| stdin.flush());
     drop(stdin);
     if let Err(err) = handover {
         return Err(startup_failure(
             &mut child,
             &mut log,
-            format!("could not be handed the vault key: {err}"),
+            format!("could not be handed the vault key and session token: {err}"),
         ));
     }
 
@@ -195,7 +227,7 @@ pub fn spawn_daemon(
             }
         }
 
-        if ping(paths).is_ok() {
+        if ping(paths, token).is_ok() {
             // A daemon started earlier could answer before our child discovers
             // it cannot take the instance lock. Let pmd reach that decision,
             // then require that our own child is still alive.
@@ -305,14 +337,21 @@ mod tests {
     use std::os::unix::fs::DirBuilderExt;
 
     use super::*;
-    use crate::protocol::FrameDecoder;
+    use crate::protocol::{AuthenticatedRequest, FrameDecoder};
     use crate::socket::DaemonSocket;
     use tempfile::TempDir;
+
+    fn test_token() -> SessionToken {
+        SessionToken::from_bytes(&[0x5Au8; crate::token::TOKEN_BYTES]).expect("token")
+    }
 
     /// Bind a socket in `paths` and answer one request with `response` on a
     /// background thread. The socket (and its instance lock) lives until the
     /// thread finishes.
-    fn serve_once(paths: RuntimePaths, response: Response) -> std::thread::JoinHandle<Request> {
+    fn serve_once(
+        paths: RuntimePaths,
+        response: Response,
+    ) -> std::thread::JoinHandle<AuthenticatedRequest> {
         let socket = DaemonSocket::bind_at(paths.clone())
             .unwrap_or_else(|error| panic!("bind test socket at {paths:?}: {error:?}"));
         std::thread::spawn(move || {
@@ -350,23 +389,61 @@ mod tests {
     #[test]
     fn ping_and_lock_round_trip() {
         let (_directory, paths) = runtime_paths();
-        let server = serve_once(paths.clone(), Response::Pong);
-        ping(&paths).expect("ping");
-        assert_eq!(server.join().expect("server thread"), Request::Ping);
+        let token = test_token();
 
+        let server = serve_once(paths.clone(), Response::Pong);
+        ping(&paths, &token).expect("ping");
+        let seen = server.join().expect("server thread");
+        assert!(
+            seen.token().matches(&token),
+            "the ping must carry the token"
+        );
+        assert_eq!(seen.into_request(), Request::Ping);
+
+        session::store(&paths, &token).expect("store token");
         let server = serve_once(paths.clone(), Response::Locked);
         lock(&paths).expect("lock");
-        assert_eq!(server.join().expect("server thread"), Request::Lock);
+        let seen = server.join().expect("server thread");
+        assert!(seen.token().matches(&token), "lock must carry the token");
+        assert_eq!(seen.into_request(), Request::Lock);
+        assert!(
+            !paths.session().exists(),
+            "lock must not leave a stale session token behind"
+        );
+    }
+
+    #[test]
+    fn lock_without_a_session_file_reports_the_real_problem() {
+        let (_directory, paths) = runtime_paths();
+        // No daemon and no token: the caller hears about the missing daemon.
+        let error = lock(&paths).expect_err("no daemon");
+        assert!(
+            error.to_string().contains("no passmgr daemon is running"),
+            "{error}"
+        );
+
+        // A daemon is reachable but the token is gone: that is not success,
+        // and nothing is sent (the client cannot authenticate).
+        let socket = DaemonSocket::bind_at(paths.clone()).expect("bind");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _peer) = socket.accept_peer().expect("accept");
+            let mut buffer = [0u8; 1];
+            assert_eq!(stream.read(&mut buffer).expect("read"), 0);
+        });
+        let error = lock(&paths).expect_err("no token file");
+        assert!(error.to_string().contains("authenticate"), "{error}");
+        server.join().expect("server thread");
     }
 
     #[test]
     fn an_error_response_is_returned_to_the_caller() {
         let (_directory, paths) = runtime_paths();
+        let token = test_token();
         let server = serve_once(
             paths.clone(),
             Response::Error(protocol::ResponseError::Unsupported),
         );
-        let response = request(&paths, &Request::Ping).expect("request");
+        let response = request(&paths, &token, &Request::Ping).expect("request");
         assert_eq!(
             response,
             Response::Error(protocol::ResponseError::Unsupported)
@@ -378,7 +455,7 @@ mod tests {
     fn a_missing_daemon_is_a_clear_error() {
         let directory = TempDir::new().expect("tempdir");
         let paths = RuntimePaths::at(directory.path().join("no-daemon-here"));
-        let error = ping(&paths).expect_err("no daemon");
+        let error = ping(&paths, &test_token()).expect_err("no daemon");
         let message = error.to_string();
         assert!(
             message.contains("no passmgr daemon is running"),
@@ -404,7 +481,8 @@ mod tests {
                 let _ = stream.read(&mut buffer);
                 stream.write_all(&body).expect("write garbage");
             });
-            let error = request(&paths, &Request::Ping).expect_err("garbage response");
+            let error =
+                request(&paths, &test_token(), &Request::Ping).expect_err("garbage response");
             assert!(matches!(error, Error::Daemon(_)), "{error:?}");
             assert!(!error.to_string().contains("not a frame"));
             server.join().expect("server thread");
@@ -418,6 +496,7 @@ mod tests {
             Path::new("/nonexistent/vault.dat"),
             &paths,
             &[0u8; 4],
+            &test_token(),
             crate::daemon::DEFAULT_IDLE_TIMEOUT,
         )
         .expect_err("short key");

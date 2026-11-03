@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use passmgr::crypto::{self, KdfParams};
 use passmgr::socket::RuntimePaths;
 use passmgr::store::{self, Credential};
+use passmgr::token::SessionToken;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -122,10 +123,24 @@ impl Fixture {
         run_on_pty(command, &format!("{password}\n"))
     }
 
+    /// The session token `unlock` wrote (TODO 2.5).
+    fn session_token(&self) -> SessionToken {
+        passmgr::session::load(&self.daemon_paths()).expect("session token file")
+    }
+
+    /// Whether a daemon is up *and* accepts the token on disk. Missing token
+    /// or daemon both count as "not answering".
+    fn daemon_answers(&self) -> bool {
+        let Ok(token) = passmgr::session::load(&self.daemon_paths()) else {
+            return false;
+        };
+        passmgr::client::ping(&self.daemon_paths(), &token).is_ok()
+    }
+
     /// Wait until the daemon answers a ping, or fail the test.
     fn wait_ready(&self) {
         let deadline = Instant::now() + WAIT;
-        while passmgr::client::ping(&self.daemon_paths()).is_err() {
+        while !self.daemon_answers() {
             assert!(
                 Instant::now() < deadline,
                 "the daemon did not become ready within {WAIT:?}"
@@ -321,6 +336,24 @@ fn unlock_then_lock_round_trip_never_prints_a_secret() {
     }
 
     fixture.wait_ready();
+
+    // The session token is the client's credential. It must live in a 0600
+    // file and must never be printed by `unlock`.
+    let token = fixture.session_token();
+    let token_hex = token.to_hex();
+    for output in [&unlocked.stdout, &unlocked.stderr] {
+        assert!(
+            !output.contains(token_hex.as_str()),
+            "the session token reached the output"
+        );
+    }
+    let session = fixture.daemon_paths().session();
+    let mode = fs::metadata(&session)
+        .expect("session token file")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "session token mode: {mode:04o}");
+
     let pid = daemon_pid(&unlocked);
     let cmdline = fs::read(format!("/proc/{pid}/cmdline")).expect("daemon cmdline");
     let cmdline = String::from_utf8_lossy(&cmdline);
@@ -350,9 +383,38 @@ fn unlock_then_lock_round_trip_never_prints_a_secret() {
 
     fixture.wait_socket_gone();
     assert!(
-        passmgr::client::ping(&fixture.daemon_paths()).is_err(),
+        !fixture.daemon_answers(),
         "the daemon must be gone after lock"
     );
+    assert!(
+        !fixture.daemon_paths().session().exists(),
+        "lock must remove the session token file"
+    );
+}
+
+/// A session token file with loose permissions is refused, not trusted.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_world_readable_session_token_is_refused() {
+    let fixture = Fixture::new();
+    fixture.unlock_on_pty();
+    fixture.wait_ready();
+    let session = fixture.daemon_paths().session();
+    fs::set_permissions(&session, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+
+    let refused = fixture.command(&["lock"]).output().expect("run lock");
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("0600"), "stderr: {stderr}");
+    // The daemon is untouched: a refused client must not stop it.
+    assert!(!fixture.daemon_answers());
+
+    // Restoring the permissions restores the client's access.
+    fs::set_permissions(&session, fs::Permissions::from_mode(0o600)).expect("chmod 600");
+    fixture.wait_ready();
+    let locked = fixture.command(&["lock"]).output().expect("run lock");
+    assert_eq!(locked.status.code(), Some(0));
+    fixture.wait_socket_gone();
 }
 
 /// `unlock --idle-timeout` reaches the daemon: it wipes its key and stops
@@ -375,6 +437,11 @@ fn unlock_passes_the_idle_timeout_to_the_daemon() {
     );
     let pid = daemon_pid(&unlocked);
 
+    // An idle shutdown must also clear the session token, so a later client
+    // cannot keep using a token for a daemon that no longer exists.
+    fixture.wait_socket_gone();
+    assert!(!fixture.daemon_paths().session().exists());
+
     let started = Instant::now();
     loop {
         // SAFETY: `pid` was printed by the daemon spawned for this test.
@@ -389,7 +456,8 @@ fn unlock_passes_the_idle_timeout_to_the_daemon() {
         std::thread::sleep(Duration::from_millis(25));
     }
     fixture.wait_socket_gone();
-    assert!(passmgr::client::ping(&fixture.daemon_paths()).is_err());
+    assert!(!fixture.daemon_answers());
+    assert!(!fixture.daemon_paths().session().exists());
 }
 
 /// A second unlock must not prompt or start a second daemon.

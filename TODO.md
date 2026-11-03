@@ -134,9 +134,13 @@ come first.
       peer check; malformed frames are answered but never refresh. Zero is
       refused. Not an authorization boundary until 2.5/3.1: any same-user
       process can `ping` to keep the daemon alive; documented in `daemon.rs`.)
-- [ ] **2.5 Session token file** (`$XDG_RUNTIME_DIR/passmgr/session`, 0600) written
+- [x] **2.5 Session token file** (`$XDG_RUNTIME_DIR/passmgr/session`, 0600) written
       at unlock; requests carry it; mismatch rejected. Test: wrong token rejected,
-      token file mode is 0600.
+      token file mode is 0600. (Token is 32 random bytes as 64 lowercase hex
+      chars; protocol bumped to version 2 with a required `token` envelope
+      field; `unauthorized` is a distinct response and does not refresh the
+      idle timer. `lock` and a daemon exit remove the file. Clients refuse a
+      token file that is not a regular 0600 file owned by the user.)
 - [ ] **2.6 `run --env NAME=<ref> -- <cmd>` via the daemon.** The daemon spawns the
       child, relaying redacted stdout/stderr and the exit code. Tests: child sees
       the variable; the secret appears in neither the socket bytes nor the client's

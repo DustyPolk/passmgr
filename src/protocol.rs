@@ -8,17 +8,23 @@
 //! u32 length | length bytes of JSON
 //! ```
 //!
-//! The JSON envelope is `{"version":1,"request":{...}}`. The `request` object
-//! always has a `"type"` field; the types this version knows are `ping`,
-//! `lock` and `run`:
+//! The JSON envelope is `{"version":2,"token":"<64 hex>","request":{...}}`.
+//! The `token` is the unlock session token (see [`crate::token`]) and is
+//! required on every request; the daemon rejects a missing or mismatched one
+//! with `unauthorized`. The `request` object always has a `"type"` field; the
+//! types this version knows are `ping`, `lock` and `run`:
 //!
 //! ```json
-//! {"version":1,"request":{"type":"ping"}}
-//! {"version":1,"request":{"type":"lock"}}
-//! {"version":1,"request":{"type":"run","env":"API_KEY",
+//! {"version":2,"token":"...","request":{"type":"ping"}}
+//! {"version":2,"token":"...","request":{"type":"lock"}}
+//! {"version":2,"token":"...","request":{"type":"run","env":"API_KEY",
 //!                         "ref":"pm://00112233445566778899aabbccddeeff",
 //!                         "command":["curl","-s","https://example.test"]}}
 //! ```
+//!
+//! Version 2 added the required `token` field, so it is not backward
+//! compatible with version 1 (a version-1 peer would be treated as an
+//! unsigned request). Older versions are refused with `unsupported_version`.
 //!
 //! # There is no plaintext request type
 //!
@@ -38,20 +44,22 @@
 //!
 //! # Forward compatibility
 //!
-//! Unknown *fields* are ignored (a later version may add a session token or a
-//! new field without breaking older peers). Unknown request *types* and
-//! unknown envelope *versions* are hard errors, because guessing at semantics
-//! is not safe.
+//! Unknown *fields* are ignored (a later version may add a field without
+//! breaking older peers). Unknown request *types* and unknown envelope
+//! *versions* are hard errors, because guessing at semantics is not safe.
+//! Adding the required `token` field bumped the version, so a version-1 peer
+//! is refused instead of silently being served as if it were authenticated.
 
 use std::fmt;
 
 use serde_json::{Map, Value, json};
 
 use crate::store::EntryId;
+use crate::token::SessionToken;
 
 /// The protocol version carried in every envelope. Bump it when a change is
 /// not backward compatible.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Largest accepted frame body. 64 KiB is far more than any request needs and
 /// bounds the memory a peer can make the daemon allocate.
@@ -102,6 +110,40 @@ pub struct RunRequest {
     pub command: Vec<String>,
 }
 
+/// A request together with the session token that authorized it.
+///
+/// [`decode`] only produces this after the envelope's `token` field parsed as
+/// a [`SessionToken`]; the daemon then compares it with its own token before
+/// looking at the request. The token's `Debug` is redacted, so deriving
+/// `Debug` here cannot leak it.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedRequest {
+    token: SessionToken,
+    request: Request,
+}
+
+impl AuthenticatedRequest {
+    /// Pair a token with a request (used by clients before encoding).
+    pub fn new(token: SessionToken, request: Request) -> Self {
+        Self { token, request }
+    }
+
+    /// The session token the peer presented.
+    pub fn token(&self) -> &SessionToken {
+        &self.token
+    }
+
+    /// The request the peer wants served.
+    pub fn request(&self) -> &Request {
+        &self.request
+    }
+
+    /// Consume the pair, keeping only the request.
+    pub fn into_request(self) -> Request {
+        self.request
+    }
+}
+
 /// A daemon response.
 ///
 /// Responses carry status only. There is deliberately no field that can hold
@@ -126,6 +168,8 @@ pub enum ResponseError {
     /// A well-formed request this build does not implement yet (`run` before
     /// TODO 2.6).
     Unsupported,
+    /// The envelope did not carry this daemon's session token.
+    Unauthorized,
 }
 
 impl ResponseError {
@@ -134,6 +178,7 @@ impl ResponseError {
         match self {
             Self::BadRequest => "bad_request",
             Self::Unsupported => "unsupported",
+            Self::Unauthorized => "unauthorized",
         }
     }
 
@@ -141,6 +186,7 @@ impl ResponseError {
         match code {
             "bad_request" => Ok(Self::BadRequest),
             "unsupported" => Ok(Self::Unsupported),
+            "unauthorized" => Ok(Self::Unauthorized),
             other => Err(ProtocolError::UnknownResponse(
                 other.chars().take(MAX_TYPE_CHARS).collect(),
             )),
@@ -172,6 +218,8 @@ pub enum ProtocolError {
     UnknownResponse(String),
     /// The request is structurally valid JSON but fails validation.
     InvalidRequest(String),
+    /// The envelope has no usable session token.
+    InvalidToken,
     /// A [`FrameDecoder`] was given more bytes than it will buffer.
     BufferFull { buffered: usize, max: usize },
 }
@@ -203,6 +251,11 @@ impl fmt::Display for ProtocolError {
             Self::UnknownRequest(kind) => write!(f, "unknown request type {kind:?}"),
             Self::UnknownResponse(kind) => write!(f, "unknown response type or code {kind:?}"),
             Self::InvalidRequest(detail) => write!(f, "invalid request: {detail}"),
+            Self::InvalidToken => write!(
+                f,
+                "invalid session token (expected {} lowercase hex characters)",
+                crate::token::TOKEN_HEX_CHARS
+            ),
             Self::BufferFull { buffered, max } => {
                 write!(
                     f,
@@ -215,14 +268,14 @@ impl fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
-/// Encode one request as a complete length-prefixed frame.
+/// Encode one authenticated request as a complete length-prefixed frame.
 ///
 /// Fails with [`ProtocolError::InvalidRequest`] if the request violates the
 /// field bounds, and with [`ProtocolError::MessageTooLarge`] if the encoded
 /// body would exceed [`MAX_MESSAGE_BYTES`].
-pub fn encode(request: &Request) -> Result<Vec<u8>, ProtocolError> {
+pub fn encode(token: &SessionToken, request: &Request) -> Result<Vec<u8>, ProtocolError> {
     validate_request(request)?;
-    let body = encode_body(request)?;
+    let body = encode_body(token, request)?;
     if body.len() > MAX_MESSAGE_BYTES {
         return Err(ProtocolError::MessageTooLarge {
             length: body.len(),
@@ -238,9 +291,9 @@ pub fn encode(request: &Request) -> Result<Vec<u8>, ProtocolError> {
 /// Decode exactly one complete length-prefixed frame.
 ///
 /// Rejects truncated frames, trailing bytes, oversized declared lengths (before
-/// allocating anything based on them), malformed JSON, unknown versions and
-/// unknown request types.
-pub fn decode(frame: &[u8]) -> Result<Request, ProtocolError> {
+/// allocating anything based on them), malformed JSON, unknown versions,
+/// missing or malformed session tokens, and unknown request types.
+pub fn decode(frame: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
     let (body, rest) = split_frame(frame)?;
     if !rest.is_empty() {
         return Err(ProtocolError::TrailingBytes {
@@ -402,8 +455,9 @@ impl FrameDecoder {
         Ok(Some(body))
     }
 
-    /// Take and decode the next complete request, if one is buffered.
-    pub fn next_request(&mut self) -> Result<Option<Request>, ProtocolError> {
+    /// Take and decode the next complete authenticated request, if one is
+    /// buffered.
+    pub fn next_request(&mut self) -> Result<Option<AuthenticatedRequest>, ProtocolError> {
         match self.next_frame()? {
             Some(body) => decode_body(&body).map(Some),
             None => Ok(None),
@@ -452,7 +506,7 @@ fn split_frame(frame: &[u8]) -> Result<(&[u8], &[u8]), ProtocolError> {
     Ok((&frame[LENGTH_PREFIX_BYTES..end], &frame[end..]))
 }
 
-fn encode_body(request: &Request) -> Result<Vec<u8>, ProtocolError> {
+fn encode_body(token: &SessionToken, request: &Request) -> Result<Vec<u8>, ProtocolError> {
     let request = match request {
         Request::Ping => json!({ "type": "ping" }),
         Request::Lock => json!({ "type": "lock" }),
@@ -463,11 +517,16 @@ fn encode_body(request: &Request) -> Result<Vec<u8>, ProtocolError> {
             "command": run.command,
         }),
     };
-    let envelope = json!({ "version": PROTOCOL_VERSION, "request": request });
+    let token = token.to_hex();
+    let envelope = json!({
+        "version": PROTOCOL_VERSION,
+        "token": token.as_str(),
+        "request": request,
+    });
     serde_json::to_vec(&envelope).map_err(|err| ProtocolError::MalformedJson(err.to_string()))
 }
 
-fn decode_body(body: &[u8]) -> Result<Request, ProtocolError> {
+fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|err| ProtocolError::MalformedJson(err.to_string()))?;
     let envelope = value
@@ -484,6 +543,13 @@ fn decode_body(body: &[u8]) -> Result<Request, ProtocolError> {
     if version != u64::from(PROTOCOL_VERSION) {
         return Err(ProtocolError::UnsupportedVersion(version));
     }
+
+    let token_text = envelope
+        .get("token")
+        .ok_or_else(|| ProtocolError::MalformedJson("missing 'token'".into()))?
+        .as_str()
+        .ok_or_else(|| ProtocolError::MalformedJson("'token' must be a string".into()))?;
+    let token = SessionToken::from_hex(token_text).map_err(|_| ProtocolError::InvalidToken)?;
 
     let request = envelope
         .get("request")
@@ -512,7 +578,7 @@ fn decode_body(body: &[u8]) -> Result<Request, ProtocolError> {
         }
     };
     validate_request(&decoded)?;
-    Ok(decoded)
+    Ok(AuthenticatedRequest::new(token, decoded))
 }
 
 fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, ProtocolError> {
@@ -624,6 +690,23 @@ mod tests {
     use super::*;
 
     const REF: &str = "pm://00112233445566778899aabbccddeeff";
+    /// A fixed token so exact-frame assertions stay readable.
+    const TOKEN_HEX: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+    fn test_token() -> SessionToken {
+        SessionToken::from_hex(TOKEN_HEX).expect("test token")
+    }
+
+    /// Request-only views of [`super::encode`]/[`super::decode`], so each
+    /// transport test can assert on the request without restating the token.
+    /// Tests that care about the token call `super::decode` directly.
+    fn encode(request: &Request) -> Result<Vec<u8>, ProtocolError> {
+        super::encode(&test_token(), request)
+    }
+
+    fn decode(frame: &[u8]) -> Result<Request, ProtocolError> {
+        super::decode(frame).map(AuthenticatedRequest::into_request)
+    }
 
     fn run_request() -> Request {
         Request::Run(RunRequest {
@@ -651,9 +734,11 @@ mod tests {
     #[test]
     fn frame_starts_with_a_big_endian_length_prefix() {
         let encoded = encode(&Request::Ping).expect("encode");
-        let body = br#"{"request":{"type":"ping"},"version":1}"#;
+        let body = format!(
+            r#"{{"request":{{"type":"ping"}},"token":"{TOKEN_HEX}","version":{PROTOCOL_VERSION}}}"#
+        );
         assert_eq!(&encoded[..4], &(body.len() as u32).to_be_bytes());
-        assert_eq!(&encoded[4..], body);
+        assert_eq!(&encoded[4..], body.as_bytes());
     }
 
     #[test]
@@ -736,8 +821,10 @@ mod tests {
 
     #[test]
     fn bad_versions_are_rejected() {
-        for version in ["0", "2", "99", "18446744073709551615"] {
-            let body = format!(r#"{{"version":{version},"request":{{"type":"ping"}}}}"#);
+        for version in ["0", "1", "3", "99", "18446744073709551615"] {
+            let body = format!(
+                r#"{{"version":{version},"token":"{TOKEN_HEX}","request":{{"type":"ping"}}}}"#
+            );
             let expected = version.parse::<u64>().expect("test version");
             assert_eq!(
                 decode(&frame(&body)),
@@ -748,27 +835,94 @@ mod tests {
 
     #[test]
     fn missing_or_mistyped_envelope_fields_are_rejected() {
-        for body in [
-            "not json",
-            "[]",
-            "null",
-            r#"{"request":{"type":"ping"}}"#,
-            r#"{"version":"1","request":{"type":"ping"}}"#,
-            r#"{"version":-1,"request":{"type":"ping"}}"#,
-            r#"{"version":1.5,"request":{"type":"ping"}}"#,
-            r#"{"version":1}"#,
-            r#"{"version":1,"request":[]}"#,
-            r#"{"version":1,"request":{}}"#,
-            r#"{"version":1,"request":{"type":42}}"#,
-            r#"{"version":1,"request":{"type":"run","env":"A","ref":"x"}}"#,
-            r#"{"version":1,"request":{"type":"run","env":"A","ref":"x","command":"true"}}"#,
-            r#"{"version":1,"request":{"type":"run","env":"A","ref":"x","command":[1]}}"#,
-        ] {
+        let bodies: Vec<String> = vec![
+            "not json".into(),
+            "[]".into(),
+            "null".into(),
+            r#"{"request":{"type":"ping"}}"#.into(),
+            r#"{"version":"2","token":"x","request":{"type":"ping"}}"#.into(),
+            r#"{"version":-1,"token":"x","request":{"type":"ping"}}"#.into(),
+            r#"{"version":2.5,"token":"x","request":{"type":"ping"}}"#.into(),
+            r#"{"version":2}"#.into(),
+            format!(r#"{{"version":2,"token":"{TOKEN_HEX}","request":[]}}"#),
+            format!(r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{}}}}"#),
+            format!(r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":42}}}}"#),
+            format!(
+                r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x"}}}}"#
+            ),
+            format!(
+                r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x","command":"true"}}}}"#
+            ),
+            format!(
+                r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x","command":[1]}}}}"#
+            ),
+        ];
+        for body in bodies {
             assert!(
-                matches!(decode(&frame(body)), Err(ProtocolError::MalformedJson(_))),
+                matches!(
+                    super::decode(&frame(&body)),
+                    Err(ProtocolError::MalformedJson(_))
+                ),
                 "body should be malformed: {body}"
             );
         }
+    }
+
+    #[test]
+    fn a_missing_or_malformed_token_is_rejected_on_every_request_type() {
+        // No token at all.
+        for request in [r#"{"type":"ping"}"#, r#"{"type":"lock"}"#] {
+            let body = format!(r#"{{"version":2,"request":{request}}}"#);
+            assert!(
+                matches!(
+                    super::decode(&frame(&body)),
+                    Err(ProtocolError::MalformedJson(_))
+                ),
+                "missing token must be malformed: {body}"
+            );
+        }
+
+        // A token field that is not a string.
+        let body = r#"{"version":2,"token":7,"request":{"type":"ping"}}"#;
+        assert!(matches!(
+            super::decode(&frame(body)),
+            Err(ProtocolError::MalformedJson(_))
+        ));
+
+        // Strings that are not exactly 64 lowercase hex characters.
+        let uppercase = "A".repeat(crate::token::TOKEN_HEX_CHARS);
+        let short = "a".repeat(crate::token::TOKEN_HEX_CHARS - 1);
+        let long = "a".repeat(crate::token::TOKEN_HEX_CHARS + 1);
+        let non_hex = "g".repeat(crate::token::TOKEN_HEX_CHARS);
+        for token in [uppercase, short, long, non_hex, String::new()] {
+            let body = format!(r#"{{"version":2,"token":"{token}","request":{{"type":"ping"}}}}"#);
+            match super::decode(&frame(&body)) {
+                Err(ProtocolError::InvalidToken) => {}
+                other => panic!("token {token:?} should be invalid, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_decoded_token_matches_what_was_encoded() {
+        let token = test_token();
+        let other = SessionToken::from_bytes(&[0xFFu8; crate::token::TOKEN_BYTES]).expect("token");
+        for request in [Request::Ping, Request::Lock, run_request()] {
+            let encoded = super::encode(&token, &request).expect("encode");
+            let decoded = super::decode(&encoded).expect("decode");
+            assert!(decoded.token().matches(&token));
+            assert!(!decoded.token().matches(&other));
+            assert_eq!(decoded.into_request(), request);
+        }
+    }
+
+    #[test]
+    fn the_token_never_appears_in_debug_output() {
+        let token = test_token();
+        let encoded = super::encode(&token, &Request::Ping).expect("encode");
+        let decoded = super::decode(&encoded).expect("decode");
+        let text = format!("{decoded:?} {decoded:?}");
+        assert!(!text.contains(TOKEN_HEX), "Debug leaked the token: {text}");
     }
 
     #[test]
@@ -776,7 +930,8 @@ mod tests {
         // Including the request types a plaintext-leaking protocol would have:
         // none of them exist here, and none may ever be added.
         for kind in ["reveal", "get", "password", "export", "run ", "PING", ""] {
-            let body = format!(r#"{{"version":1,"request":{{"type":"{kind}"}}}}"#);
+            let body =
+                format!(r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"{kind}"}}}}"#);
             assert!(
                 matches!(decode(&frame(&body)), Err(ProtocolError::UnknownRequest(_))),
                 "type {kind:?} should be unknown"
@@ -785,7 +940,8 @@ mod tests {
 
         // A huge type is echoed back only in truncated form.
         let long = "x".repeat(10_000);
-        let body = format!(r#"{{"version":1,"request":{{"type":"{long}"}}}}"#);
+        let body =
+            format!(r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"{long}"}}}}"#);
         match decode(&frame(&body)) {
             Err(ProtocolError::UnknownRequest(kind)) => {
                 assert_eq!(kind.chars().count(), MAX_TYPE_CHARS)
@@ -806,7 +962,11 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys, ["request", "version"]);
+        assert_eq!(keys, ["request", "token", "version"]);
+        // The token is the only envelope value, and it is the client's own
+        // token, not anything read from the vault.
+        let token = ping["token"].as_str().expect("token string");
+        assert_eq!(token, TOKEN_HEX);
         let keys: Vec<&str> = ping["request"]
             .as_object()
             .expect("object")
@@ -899,11 +1059,12 @@ mod tests {
         for (index, byte) in encoded.iter().enumerate() {
             decoder.push(std::slice::from_ref(byte)).expect("push");
             if index + 1 < encoded.len() {
-                assert_eq!(decoder.next_request().expect("decode"), None);
+                assert!(decoder.next_request().expect("decode").is_none());
             }
         }
-        assert_eq!(decoder.next_request().expect("decode"), Some(request));
-        assert_eq!(decoder.next_request().expect("decode"), None);
+        let decoded = decoder.next_request().expect("decode").expect("request");
+        assert_eq!(decoded.into_request(), request);
+        assert!(decoder.next_request().expect("decode").is_none());
         assert_eq!(decoder.buffered(), 0);
     }
 
@@ -913,9 +1074,11 @@ mod tests {
         bytes.extend_from_slice(&encode(&Request::Lock).expect("encode"));
         let mut decoder = FrameDecoder::new();
         decoder.push(&bytes).expect("push");
-        assert_eq!(decoder.next_request().expect("decode"), Some(Request::Ping));
-        assert_eq!(decoder.next_request().expect("decode"), Some(Request::Lock));
-        assert_eq!(decoder.next_request().expect("decode"), None);
+        let first = decoder.next_request().expect("decode").expect("first");
+        assert_eq!(first.into_request(), Request::Ping);
+        let second = decoder.next_request().expect("decode").expect("second");
+        assert_eq!(second.into_request(), Request::Lock);
+        assert!(decoder.next_request().expect("decode").is_none());
     }
 
     #[test]
@@ -958,7 +1121,7 @@ mod tests {
         // request type, but must never repeat a field value from the body.
         let secret_like = "SUPER_SECRET_VALUE_123";
         let body = format!(
-            r#"{{"version":1,"request":{{"type":"run","env":"{secret_like}","ref":"x","command":["true"]}}}}"#
+            r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"{secret_like}","ref":"x","command":["true"]}}}}"#
         );
         let error = decode(&frame(&body)).expect_err("invalid ref");
         let text = error.to_string();
@@ -973,6 +1136,7 @@ mod tests {
             Response::Locked,
             Response::Error(ResponseError::BadRequest),
             Response::Error(ResponseError::Unsupported),
+            Response::Error(ResponseError::Unauthorized),
         ] {
             let encoded = encode_response(&response).expect("encode response");
             assert_eq!(
@@ -985,14 +1149,14 @@ mod tests {
     #[test]
     fn response_frames_have_a_fixed_shape_with_no_value_fields() {
         let pong = encode_response(&Response::Pong).expect("encode");
-        let pong_body = br#"{"response":{"type":"pong"},"version":1}"#;
+        let pong_body = br#"{"response":{"type":"pong"},"version":2}"#;
         assert_eq!(&pong[..4], &(pong_body.len() as u32).to_be_bytes());
         assert_eq!(&pong[4..], pong_body);
 
         let error = encode_response(&Response::Error(ResponseError::BadRequest)).expect("encode");
         assert_eq!(
             &error[4..],
-            br#"{"response":{"code":"bad_request","type":"error"},"version":1}"#
+            br#"{"response":{"code":"bad_request","type":"error"},"version":2}"#
         );
     }
 
@@ -1000,7 +1164,7 @@ mod tests {
     fn unknown_response_types_and_codes_are_rejected() {
         let long = "x".repeat(MAX_TYPE_CHARS * 4);
         let unknown_type = frame(&format!(
-            r#"{{"version":1,"response":{{"type":"{long}"}}}}"#
+            r#"{{"version":2,"response":{{"type":"{long}"}}}}"#
         ));
         match decode_response(&unknown_type) {
             Err(ProtocolError::UnknownResponse(echoed)) => {
@@ -1010,7 +1174,7 @@ mod tests {
         }
 
         let unknown_code = frame(&format!(
-            r#"{{"version":1,"response":{{"type":"error","code":"{long}"}}}}"#
+            r#"{{"version":2,"response":{{"type":"error","code":"{long}"}}}}"#
         ));
         assert!(matches!(
             decode_response(&unknown_code),
@@ -1021,14 +1185,14 @@ mod tests {
     #[test]
     fn malformed_response_frames_are_rejected() {
         let cases = [
-            frame(r#"{"version":2,"response":{"type":"pong"}}"#),
+            frame(r#"{"version":1,"response":{"type":"pong"}}"#),
             frame(r#"{"response":{"type":"pong"}}"#),
-            frame(r#"{"version":1}"#),
-            frame(r#"{"version":1,"response":"pong"}"#),
-            frame(r#"{"version":1,"response":{}}"#),
-            frame(r#"{"version":1,"response":{"type":7}}"#),
-            frame(r#"{"version":1,"response":{"type":"error"}}"#),
-            frame(r#"{"version":1,"response":{"type":"error","code":7}}"#),
+            frame(r#"{"version":2}"#),
+            frame(r#"{"version":2,"response":"pong"}"#),
+            frame(r#"{"version":2,"response":{}}"#),
+            frame(r#"{"version":2,"response":{"type":7}}"#),
+            frame(r#"{"version":2,"response":{"type":"error"}}"#),
+            frame(r#"{"version":2,"response":{"type":"error","code":7}}"#),
             frame("not json"),
             vec![0, 0, 0, 10, b'{'],
         ];
@@ -1054,7 +1218,7 @@ mod tests {
         // error text never repeats them.
         let secret_like = "SUPER_SECRET_VALUE_123";
         let body = format!(
-            r#"{{"version":1,"response":{{"type":"error","code":"nope","value":"{secret_like}"}}}}"#
+            r#"{{"version":2,"response":{{"type":"error","code":"nope","value":"{secret_like}"}}}}"#
         );
         let error = decode_response(&frame(&body)).expect_err("unknown code");
         let text = error.to_string();

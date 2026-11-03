@@ -23,13 +23,19 @@
 //!
 //! One request per connection. `SIGTERM`/`SIGINT`, a successful `lock`, or
 //! [`DEFAULT_IDLE_TIMEOUT`] (configurable) without a successfully handled
-//! request wipe the key, remove the socket and exit.
+//! request wipe the key, remove the socket and the session file, and exit.
 //!
-//! The idle timeout is a second line of defense, not an authorization
-//! boundary: until session tokens (TODO 2.5) and grants (TODO 3.1) restrict
-//! requests, any same-user process can send `ping` and keep the daemon alive.
-//! It still guarantees that a session left alone does not keep the key in
-//! memory indefinitely.
+//! # Authorization
+//!
+//! Besides the peer-uid check on the socket, every request must carry the
+//! session token that `unlock` handed over with the key. A request with a
+//! missing or wrong token is answered `unauthorized` and, importantly, does
+//! **not** refresh the idle timer: an unauthenticated peer must not be able to
+//! keep the key in memory.
+//!
+//! The token is not an agent/human boundary (any same-user process can read a
+//! 0600 file). Grants in TODO 3.1 are. The idle timeout still guarantees that
+//! a session left alone does not keep the key in memory indefinitely.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -42,7 +48,9 @@ use zeroize::Zeroizing;
 
 use crate::crypto::KEY_LEN;
 use crate::protocol::{self, FrameDecoder, ProtocolError, Request, Response, ResponseError};
+use crate::session;
 use crate::socket::{DaemonSocket, RuntimePaths, SocketError};
+use crate::token::{SessionToken, TOKEN_BYTES};
 use crate::vault::Vault;
 
 /// How long the accept loop sleeps between non-blocking accepts.
@@ -210,15 +218,36 @@ fn lock_memory(bytes: &[u8]) -> bool {
     unsafe { libc::mlock(bytes.as_ptr().cast::<libc::c_void>(), bytes.len()) == 0 }
 }
 
-/// Read exactly [`KEY_LEN`] bytes from `reader`, then require EOF.
+/// What `unlock` hands the daemon over the inherited pipe: the vault key
+/// followed by the session token, then EOF.
+#[derive(Debug)]
+pub struct Handover {
+    key: LockedKey,
+    token: SessionToken,
+}
+
+impl Handover {
+    /// The derived vault key, locked in memory where possible.
+    pub fn key(&self) -> &LockedKey {
+        &self.key
+    }
+
+    /// The session token this daemon will require from clients.
+    pub fn token(&self) -> &SessionToken {
+        &self.token
+    }
+}
+
+/// Read the handover: exactly [`KEY_LEN`] key bytes, [`TOKEN_BYTES`] token
+/// bytes, then require EOF.
 ///
 /// The pipe is the handover channel: accepting trailing bytes would let a
-/// caller smuggle something else in behind the key. The partial buffer is
-/// zeroized on error.
-pub fn read_key_from<R: Read>(reader: &mut R) -> Result<LockedKey, DaemonError> {
-    let mut key = Zeroizing::new(vec![0u8; KEY_LEN]);
+/// caller smuggle something else in behind the key. Partial buffers are
+/// zeroized on error, and no error message contains key or token bytes.
+pub fn read_handover<R: Read>(reader: &mut R) -> Result<Handover, DaemonError> {
+    let mut bytes = Zeroizing::new(vec![0u8; KEY_LEN + TOKEN_BYTES]);
     reader
-        .read_exact(key.as_mut_slice())
+        .read_exact(bytes.as_mut_slice())
         .map_err(|err| DaemonError::KeyHandover(format!("{err}")))?;
 
     let mut trailing = [0u8; 1];
@@ -226,12 +255,17 @@ pub fn read_key_from<R: Read>(reader: &mut R) -> Result<LockedKey, DaemonError> 
         Ok(0) => {}
         Ok(_) => {
             return Err(DaemonError::KeyHandover(
-                "unexpected data after the key".into(),
+                "unexpected data after the key and token".into(),
             ));
         }
         Err(err) => return Err(DaemonError::KeyHandover(format!("{err}"))),
     }
-    LockedKey::new(key)
+
+    let (key, token) = bytes.split_at(KEY_LEN);
+    let key = LockedKey::new(Zeroizing::new(key.to_vec()))?;
+    let token =
+        SessionToken::from_bytes(token).map_err(|err| DaemonError::KeyHandover(err.to_string()))?;
+    Ok(Handover { key, token })
 }
 
 /// Disable core dumps and make the process non-dumpable where supported.
@@ -311,15 +345,20 @@ pub fn shutdown_requested() -> bool {
 /// caller with the wrong key can never make `pmd` look alive. `key` stays
 /// borrowed: the caller drops (and therefore zeroizes) it after this returns.
 ///
-/// `idle_timeout` is measured from the last successfully decoded request
-/// (one that passed the peer check), not from the last byte received: a
-/// malformed or half-sent frame must not extend the key's lifetime.
+/// `idle_timeout` is measured from the last authorized, successfully decoded
+/// request, not from the last byte received: a malformed, half-sent or
+/// unauthorized frame must not extend the key's lifetime.
+///
+/// On every exit path the session file is removed, but only if it still holds
+/// `token`: a newer session's file is never deleted.
 pub fn run(
     vault_path: &Path,
     runtime_dir: &Path,
     key: &LockedKey,
+    token: &SessionToken,
     idle_timeout: Duration,
 ) -> Result<(), DaemonError> {
+    let paths = RuntimePaths::at(runtime_dir);
     harden_process()?;
     install_signal_handlers()?;
     detach_session();
@@ -340,7 +379,7 @@ pub fn run(
             Ok((mut stream, _peer)) => {
                 let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
                 let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
-                match handle_connection(&mut stream) {
+                match handle_connection(&mut stream, token) {
                     // `lock`: response is written, now wipe on the way out.
                     Handled::Locked => break,
                     // Only a request that was decoded and answered counts as
@@ -360,6 +399,7 @@ pub fn run(
     }
 
     // Dropping `socket` unlinks the socket and releases the instance lock.
+    session::remove_if_matches(&paths, token);
     Ok(())
 }
 
@@ -380,14 +420,21 @@ enum Handled {
 /// Nothing here can panic on attacker input: every parse failure becomes
 /// `bad_request`, and write failures (client vanished) are ignored so one
 /// aborted client cannot take the daemon down.
-fn handle_connection(stream: &mut UnixStream) -> Handled {
-    let request = read_request(stream);
-    let (response, handled) = match request {
-        Ok(Request::Ping) => (Response::Pong, Handled::Served),
-        Ok(Request::Lock) => (Response::Locked, Handled::Locked),
-        // `run` exists in the protocol but is TODO 2.6. Refuse it explicitly
-        // rather than pretending a generic parse error.
-        Ok(Request::Run(_)) => (Response::Error(ResponseError::Unsupported), Handled::Served),
+fn handle_connection(stream: &mut UnixStream, token: &SessionToken) -> Handled {
+    let (response, handled) = match read_request(stream) {
+        // The token check comes first: a request that is not for this session
+        // gets a fixed answer and cannot refresh the idle timer.
+        Ok(authorized) if !authorized.token().matches(token) => (
+            Response::Error(ResponseError::Unauthorized),
+            Handled::Rejected,
+        ),
+        Ok(authorized) => match authorized.into_request() {
+            Request::Ping => (Response::Pong, Handled::Served),
+            Request::Lock => (Response::Locked, Handled::Locked),
+            // `run` exists in the protocol but is TODO 2.6. Refuse it
+            // explicitly rather than pretending a generic parse error.
+            Request::Run(_) => (Response::Error(ResponseError::Unsupported), Handled::Served),
+        },
         Err(_) => (
             Response::Error(ResponseError::BadRequest),
             Handled::Rejected,
@@ -402,7 +449,7 @@ fn handle_connection(stream: &mut UnixStream) -> Handled {
 }
 
 /// Read one framed request from a stream, without unbounded allocation.
-fn read_request(stream: &mut UnixStream) -> Result<Request, ProtocolError> {
+fn read_request(stream: &mut UnixStream) -> Result<protocol::AuthenticatedRequest, ProtocolError> {
     let mut decoder = FrameDecoder::new();
     let mut chunk = [0u8; READ_CHUNK];
     loop {
@@ -445,31 +492,56 @@ fn read_request(stream: &mut UnixStream) -> Result<Request, ProtocolError> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn reads_exactly_one_key_and_rejects_short_input() {
-        let key = [7u8; KEY_LEN];
-        let mut reader = &key[..];
-        let locked = read_key_from(&mut reader).expect("valid key");
-        assert_eq!(locked.as_slice(), &key);
+    fn handover_bytes(key: &[u8], token: &SessionToken) -> Vec<u8> {
+        let mut bytes = key.to_vec();
+        bytes.extend_from_slice(token.as_bytes());
+        bytes
+    }
 
-        for length in [0usize, 1, KEY_LEN - 1] {
-            let mut reader = &key[..length];
-            assert!(matches!(
-                read_key_from(&mut reader),
-                Err(DaemonError::KeyHandover(_))
-            ));
+    #[test]
+    fn reads_exactly_one_key_and_token_and_rejects_short_input() {
+        let key = [7u8; KEY_LEN];
+        let token = SessionToken::from_bytes(&[0x42u8; TOKEN_BYTES]).expect("token");
+        let bytes = handover_bytes(&key, &token);
+
+        let mut reader = &bytes[..];
+        let handover = read_handover(&mut reader).expect("valid handover");
+        assert_eq!(handover.key().as_slice(), &key);
+        assert!(handover.token().matches(&token));
+
+        for length in [0usize, 1, KEY_LEN - 1, KEY_LEN, KEY_LEN + TOKEN_BYTES - 1] {
+            let mut reader = &bytes[..length];
+            assert!(
+                matches!(read_handover(&mut reader), Err(DaemonError::KeyHandover(_))),
+                "{length} bytes must be rejected"
+            );
         }
     }
 
     #[test]
-    fn rejects_trailing_bytes_after_the_key() {
-        let mut bytes = vec![9u8; KEY_LEN];
+    fn rejects_trailing_bytes_after_the_key_and_token() {
+        let key = [9u8; KEY_LEN];
+        let token = SessionToken::from_bytes(&[1u8; TOKEN_BYTES]).expect("token");
+        let mut bytes = handover_bytes(&key, &token);
         bytes.push(0);
         let mut reader = &bytes[..];
         assert!(matches!(
-            read_key_from(&mut reader),
+            read_handover(&mut reader),
             Err(DaemonError::KeyHandover(_))
         ));
+    }
+
+    #[test]
+    fn handover_debug_never_contains_key_or_token_bytes() {
+        let key = [0xABu8; KEY_LEN];
+        let token = SessionToken::from_bytes(&[0xCDu8; TOKEN_BYTES]).expect("token");
+        let bytes = handover_bytes(&key, &token);
+        let mut reader = &bytes[..];
+        let handover = read_handover(&mut reader).expect("valid handover");
+        let text = format!("{handover:?}");
+        assert!(!text.contains("171"), "{text}");
+        assert!(!text.contains("205"), "{text}");
+        assert!(text.contains("redacted"), "{text}");
     }
 
     #[test]
@@ -493,7 +565,7 @@ mod tests {
     #[test]
     fn key_handover_errors_do_not_echo_bytes() {
         let mut reader = &b"short"[..];
-        let error = read_key_from(&mut reader).unwrap_err();
+        let error = read_handover(&mut reader).unwrap_err();
         assert!(!error.to_string().contains("short"));
     }
 

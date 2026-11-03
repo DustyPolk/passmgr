@@ -76,6 +76,8 @@ pub const RUNTIME_SUBDIR: &str = "passmgr";
 pub const SOCKET_FILE: &str = "pmd.sock";
 /// Name of the single-instance lock file inside the runtime directory.
 pub const LOCK_FILE: &str = "pmd.lock";
+/// Name of the session token file inside the runtime directory.
+pub const SESSION_FILE: &str = "session";
 /// Mode of the runtime directory.
 pub const DIR_MODE: u32 = 0o700;
 /// Mode of the socket and the lock file.
@@ -314,10 +316,15 @@ impl RuntimePaths {
         self.dir.join(LOCK_FILE)
     }
 
+    /// The session token file clients use to authorize requests.
+    pub fn session(&self) -> PathBuf {
+        self.dir.join(SESSION_FILE)
+    }
+
     /// Create the directory if needed, then require that it is a real 0700
     /// directory owned by the current user. Anything else is refused rather
     /// than repaired, so a pre-created directory cannot be taken over.
-    fn ensure_dir(&self) -> Result<(), SocketError> {
+    pub(crate) fn ensure_dir(&self) -> Result<(), SocketError> {
         match fs::create_dir(&self.dir) {
             Ok(()) => {
                 fs::set_permissions(&self.dir, fs::Permissions::from_mode(DIR_MODE))

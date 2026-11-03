@@ -144,7 +144,10 @@ Notes:
   - 'unlock' starts a per-user background daemon that keeps the vault key in
     memory, so later commands do not prompt again. The daemon listens on a
     socket inside $XDG_RUNTIME_DIR/passmgr that only the owning user can
-    connect to, and it has no request that returns plaintext. It stops on
+    connect to, and it has no request that returns plaintext. Clients
+    authenticate with the session token that 'unlock' writes to
+    session in that directory (mode 0600); 'lock' removes it. The token is a
+    local convenience, not a human/agent boundary. The daemon stops on
     'lock', on SIGTERM/SIGINT, or after the idle timeout (default 15 minutes,
     set with 'unlock --idle-timeout SECS').
   - Vaults are encrypted with Argon2id and AES-256-GCM.
@@ -1046,6 +1049,8 @@ fn command_unlock(
     path: &Path,
     idle_timeout: Option<std::time::Duration>,
 ) -> Result<(), Error> {
+    use passmgr::token::SessionToken;
+
     let idle_timeout = idle_timeout.unwrap_or(passmgr::daemon::DEFAULT_IDLE_TIMEOUT);
     // Starting the daemon is where a session begins, so it must be the
     // human's decision. Checked before any prompt: a refusal must not cost a
@@ -1073,8 +1078,30 @@ fn command_unlock(
     drop(master);
     drop(container);
 
-    let pid = passmgr::client::spawn_daemon(path, &runtime, &key, idle_timeout)?;
+    // A stale file from a previous session would make clients send a token
+    // this daemon does not know; clear it before creating the new one.
+    if let Err(error) = passmgr::session::remove(&runtime) {
+        return Err(Error::Daemon(format!(
+            "could not clear the previous session token: {error}"
+        )));
+    }
+    let token = SessionToken::generate()
+        .map_err(|error| Error::Daemon(format!("could not create a session token: {error}")))?;
+    passmgr::session::store(&runtime, &token).map_err(|error| {
+        Error::Daemon(format!("could not write the session token file: {error}"))
+    })?;
+
+    let spawned = passmgr::client::spawn_daemon(path, &runtime, &key, &token, idle_timeout);
     drop(key);
+    let pid = match spawned {
+        Ok(pid) => pid,
+        Err(error) => {
+            // No daemon means the token authorizes nothing; do not leave it
+            // behind for the next unlock to mistake for a live session.
+            let _ = passmgr::session::remove(&runtime);
+            return Err(error);
+        }
+    };
     stdout_write(format_args!(
         "Vault unlocked. The unlock daemon is running (pid {pid}).\n\
          It stops after {idle_timeout:?} without activity.\n\

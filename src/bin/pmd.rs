@@ -1,8 +1,9 @@
 //! `pmd`: the passmgr unlock daemon.
 //!
-//! Started by `passmgr unlock` (TODO 2.4b). It reads the 32-byte vault key
-//! from stdin, verifies it against the vault, then serves `ping`/`lock` on a
-//! Unix socket until a signal arrives. It never prints key material and never
+//! Started by `passmgr unlock` (TODO 2.4b). It reads the 32-byte vault key and
+//! the 32-byte session token from stdin, verifies the key against the vault,
+//! then serves `ping`/`lock` on a Unix socket until a signal arrives. Requests
+//! must carry the session token. It never prints key material and never
 //! returns a secret value.
 
 #[cfg(not(unix))]
@@ -49,9 +50,10 @@ fn run() -> Result<(), passmgr::daemon::DaemonError> {
                     stdout,
                     "pmd: the passmgr unlock daemon\n\n\
                      Usage: pmd --vault PATH [--runtime-dir DIR] [--idle-timeout SECS]\n\n\
-                     Reads a 32-byte vault key from stdin, verifies it, then serves\n\
-                     ping/lock requests on DIR/pmd.sock. Started by `passmgr unlock`;\n\
-                     stop it with `passmgr lock` or SIGTERM.\n\n\
+                     Reads a 32-byte vault key and a 32-byte session token from stdin,\n\
+                     verifies the key, then serves ping/lock requests on DIR/pmd.sock.\n\
+                     Every request must carry the session token. Started by\n\
+                     `passmgr unlock`; stop it with `passmgr lock` or SIGTERM.\n\n\
                      --idle-timeout SECS  Stop and wipe the key after SECS without a\n\
                                           successfully handled request (default: {}).",
                     daemon::DEFAULT_IDLE_TIMEOUT.as_secs()
@@ -74,13 +76,19 @@ fn run() -> Result<(), passmgr::daemon::DaemonError> {
         None => RuntimePaths::resolve(),
     };
 
-    // Read the key before touching the filesystem: no socket appears for a
-    // caller that cannot even hand over a key.
+    // Read the key and session token before touching the filesystem: no
+    // socket appears for a caller that cannot even hand over both.
     let mut stdin = io::stdin().lock();
-    let key = daemon::read_key_from(&mut stdin)?;
+    let handover = daemon::read_handover(&mut stdin)?;
     drop(stdin);
 
-    daemon::run(&vault, paths.dir(), &key, idle_timeout)
+    daemon::run(
+        &vault,
+        paths.dir(),
+        handover.key(),
+        handover.token(),
+        idle_timeout,
+    )
 }
 
 #[cfg(unix)]

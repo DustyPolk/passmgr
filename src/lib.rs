@@ -13,10 +13,13 @@ pub mod error;
 pub mod password;
 pub mod protocol;
 #[cfg(unix)]
+pub mod session;
+#[cfg(unix)]
 pub mod socket;
 pub mod store;
 pub mod terminal;
 pub mod timestamp;
+pub mod token;
 pub mod vault;
 
 pub use error::{

@@ -1,3 +1,66 @@
+## 2026-11-02 — Session token for the unlock daemon (TODO 2.5)
+
+- New `src/token.rs` (`SessionToken`): 32 OS-random bytes from `getrandom`,
+  rendered as 64 lowercase hex characters on the wire and in the session file.
+  Bytes live in `Zeroizing`, `Debug` is `SessionToken(<redacted>)`, there is no
+  `Display` and deliberately no `PartialEq` (`matches()` uses a branch-free-ish
+  XOR loop), so accidental comparison or printing is hard.
+- New `src/session.rs` (Unix): `store`, `load`, `remove`, `remove_if_matches`
+  for `$XDG_RUNTIME_DIR/passmgr/session`. `store` goes through `ensure_dir`
+  (0700, owner-only) and writes a `tempfile` in that directory with mode 0600,
+  `fsync`s, renames and `fsync`s the directory. `load` is strict: regular file,
+  owned by the current uid, mode **exactly** 0600, opened `O_NOFOLLOW`, bounded
+  read (512 bytes); anything else is an error, never "repaired". This turns a
+  planted symlink or loosened mode into a visible failure.
+- Handover: `pmd` now reads `key(32) || token(32)` from the inherited stdin pipe
+  (`daemon::read_handover`, exactly 64 bytes then EOF; wrong length or trailing
+  data refuses to start). Neither value appears in argv or the environment.
+- Protocol version 2: the envelope is
+  `{"version":2,"token":"<64 hex>","request":{...}}`; the token is required on
+  every request type and parsed *before* the request, so an unauthenticated
+  peer cannot reach request parsing. Malformed/missing token → `bad_request`
+  (no echo); well-formed but wrong token → new `unauthorized` response code.
+  `protocol::decode` returns `AuthenticatedRequest` (redacted `Debug`).
+- Daemon: `run(vault, runtime_dir, key, token, idle)` compares
+  `authenticated.token().matches(token)` first and answers `unauthorized` with
+  `Handled::Rejected`, which does **not** refresh the idle timer — a client
+  with the wrong token cannot keep the key in memory. On any exit path
+  (`lock`, signal, idle) the daemon removes the session file only if it still
+  contains its own token (`remove_if_matches`), so it cannot delete a newer
+  session's token after a fast re-unlock.
+- Client/CLI: `client::request/ping` take a token, `lock` loads it from the
+  session file and removes it after `Locked`. `unlock` clears a stale file,
+  generates and stores the token *before* spawning `pmd`, passes it through the
+  pipe, and removes the file again if the spawn fails. If the session file is
+  missing, `lock` still probes the socket first so "no daemon is running" is
+  reported precisely instead of blaming authentication.
+- Wire compatibility: protocol version 1 frames are now rejected. This is
+  local IPC between `passmgr` and its own `pmd`, both from this build, so no
+  migration path is needed; the version field is what makes the mismatch
+  explicit rather than a confusing parse error.
+- Known limit (recorded in `src/token.rs`/`src/daemon.rs` docs): the token is
+  **not** an agent/human boundary. Any same-user process can read a 0600 file,
+  so it proves only what the socket's peer-uid check already proves. It stops
+  an accidental or stale client and makes an unauthorized request explicit;
+  scoped, revocable authorization arrives with grants (TODO 3.1).
+- Tests (all passing): 10 new lib tests — token hex round-trip, strict
+  lowercase-hex rejection, length check, redacted `Debug`; session store/load
+  0600 with no leftover temp file, refusal of 0644/symlink/directory/missing,
+  scoped removal, insecure runtime dir. Protocol: envelope now carries exactly
+  `["request","token","version"]`; missing/wrong-type/non-64-lowercase-hex
+  tokens rejected on ping/lock without echoing the token; decoded token matches
+  what was encoded; `Debug` of `AuthenticatedRequest` hides it; exact-frame
+  assertions updated to version 2. Daemon e2e: wrong token gets `unauthorized`
+  and cannot `lock` the daemon; token absent from socket bytes, `/proc/cmdline`
+  and daemon stdout/stderr; unauthorized pings every 200 ms for 4 s do not
+  refresh a 2 s idle timeout; a malformed token frame is `bad_request`. CLI e2e:
+  session file is 0600, its token appears in no output, a 0644 session file is
+  refused (daemon untouched) and works again after `chmod 600`, and both `lock`
+  and an idle timeout remove the session file.
+- Gate: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+  clean; `cargo test` passes: 127 lib, 20 bin, 27 CLI, 12 daemon, 8 unlock.
+  `cargo audit` is not installed on this machine.
+
 ## 2026-11-02 — Idle timeout for the unlock daemon (TODO 2.4c)
 
 - `src/daemon.rs`: new `DEFAULT_IDLE_TIMEOUT = 15 * 60` s, shared
