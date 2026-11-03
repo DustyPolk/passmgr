@@ -391,6 +391,112 @@ Rules that apply to every item:
       the fenced block from MCP.md and compares envelope and request key sets
       plus the whole value to the encoder (a nested example fails, verified).
 
+- [ ] **R.25 The interpreter gate is an incomplete name list, and the
+      documented `gh` example is itself a program runner.**
+      `is_interpreter` (`src/grant/validate.rs:130-192`) refuses only the fixed
+      names in `INTERPRETERS`/`VERSIONED_INTERPRETERS`; `gh` and `git` are
+      absent, and `src/grant.rs:937-962` explicitly asserts that `/usr/bin/gh`
+      and `/usr/bin/git` are **not** interpreters. But a grant binds only
+      argv[0] (`Grant::allows_command`), so any allowed program that can run
+      another command is a shell. `README.md:220` uses
+      `--command /usr/bin/gh` as the example.
+      Failure: a human approves that example, and the agent runs
+      `gh alias set --shell pwn 'id -u > /tmp/proof'; gh pwn` (verified: the
+      proof file contains `1000`) or
+      `git -c alias.pwn='!id -u > /tmp/proof' pwn` (also verified). Either can
+      read the injected secret from the environment and send it out. The
+      gate's stated purpose (`MCP.md:265-268`, `DECISIONS.md:529-536`) is
+      defeated, and the unit test locks the bypass in.
+      Fix: add `gh`, `git` and the other known runners (`find`, `sed`, `tar`,
+      `ssh`, `go`, `docker`, `podman`, `kubectl`, …) to the table, or require
+      an explicit per-command trust confirmation for every command because
+      argv is unconstrained; update the README example and the test so it no
+      longer calls git/gh safe.
+      Test: a unit table over every documented runner name, plus an e2e test
+      where `passmgr grant create --command /usr/bin/gh` exits 5 with the
+      interpreter refusal before the password prompt and creates no token
+      file, and the same command with `--allow-interpreter` succeeds.
+
+- [ ] **R.26 `pm grant create` prompts for the master password without ever
+      showing the request the human is approving.**
+      `command_grant_create` checks the TTY, creates the token file and calls
+      `prompt_master(false)` at `src/cli/grant.rs:153`; the `GrantRequest` is
+      built at `src/cli/grant.rs:163-176`, and its label, refs/tags, commands,
+      expiry and max uses are never printed. `MCP.md:265-268` promises
+      "Approval shows a red warning" for interpreters, and
+      `DECISIONS.md:362-363` says the approval prompt renders command paths,
+      but no grant-create prompt does; `--allow-interpreter` silently skips
+      the refusal at `src/cli/grant.rs:129-136`.
+      Failure: an agent supplies the argv for a terminal command (the normal
+      threat model), the human sees only "Enter Master Password", and the
+      digest they prove covers e.g. a 30-day, 100-use, all-refs grant for
+      `--command /usr/bin/gh`. Presence is proved, but not informed consent.
+      There is no test that any summary is shown.
+      Fix: build the request first and print a sanitized summary (label,
+      refs/tags, commands, expiry, max uses and the red interpreter warning)
+      before the prompt, then require an explicit y/N; on `n` exit 2 before
+      creating the token file or contacting the daemon.
+      Test: a PTY `grant create` with sentinel values asserts every value and
+      the warning appear before the "Master Password" prompt, that a command
+      containing a hidden character is refused before any summary, and that
+      answering `n` sends no `challenge`/`prove` and leaves no token file.
+
+- [ ] **R.27 `grant revoke --all` panics if the daemon answers `not_found`.**
+      In the `Response::Error(ResponseError::NotFound)` arm,
+      `src/cli/grant.rs:369` does
+      `Err(Error::GrantNotFound(options.id.expect("not_found implies an id")))`.
+      `--all` leaves `options.id` as `None`, so any daemon, or a same-user
+      process that replaced the socket, answering `{"type":"error",
+      "code":"not_found"}` makes the CLI panic instead of reporting a clean
+      error. The current daemon returns `not_found` only for an id
+      (`src/daemon.rs:738-740`), so this is a robustness/DoS bug, not a secret
+      leak.
+      Failure: `passmgr grant revoke --all` exits 101 with a panic and a
+      backtrace; a script cannot distinguish that from a crash, and the arm is
+      untested.
+      Fix: match on `options.id`; `Some(id)` -> `GrantNotFound(id)`, `None` ->
+      a `Daemon`/protocol error such as "the daemon refused the revoke".
+      Test: a stub `UnixListener` reads the `grant_revoke` frame and writes a
+      `not_found` error; assert a nonzero exit, a normal message, and no
+      `panicked at` or `not_found implies an id` in stderr.
+
+- [ ] **R.28 `grant revoke --all` revokes expired and exhausted grants while
+      the help, decisions and test say "active".**
+      `revoke_grants` (`src/daemon.rs:743-748`) filters only
+      `!grant.is_revoked()`, so expired and exhausted grants are included and
+      counted; `grant_status` treats "active" as neither revoked, expired nor
+      exhausted. `src/cli/help.rs:125` says "every active grant",
+      `DECISIONS.md:414` says "`--all` targets only active grants", and
+      `tests/grant_cli.rs:713` seeds only three active grants.
+      Failure: with one active, one expired and one exhausted grant,
+      `grant revoke --all` prints "Revoked 3 grant(s)" and flips the expired
+      and exhausted rows to `revoked`; a human cannot tell which grants were
+      actually in force. A future refactor that adds a status filter has no
+      failing test.
+      Fix: filter with the same predicate as `grant_status` (a new
+      `is_active(now)`), or change the docs to "every grant that is not
+      already revoked" and count all changed; keep one predicate.
+      Test: a `revoke_grants` unit test with an explicit `now` and one active,
+      one expired and one exhausted grant, asserting the chosen contract,
+      the count, and each grant's `revoked_at`/status.
+
+- [ ] **R.29 `--out` paths are echoed with raw control characters.**
+      The success line at `src/cli/grant.rs:226` interpolates
+      `options.out.display()`, and the existing-file error at
+      `src/cli/grant.rs:576` interpolates `path.display()`; unlike command
+      paths, neither is passed through `escape_hidden`/`escape_debug`. The path
+      is argv and can be agent-suggested.
+      Failure: `passmgr grant create ... --out $'\e]52;c;...'` writes a raw
+      OSC 52 escape to the human's terminal on success or when the file
+      already exists, letting the suggested path manipulate the terminal or
+      clipboard after the human trusted the command. (Confirmed by code
+      inspection; no scratch e2e was run because the happy path needs a daemon
+      and a written grant.)
+      Fix: escape the path for display with the same helper used for commands
+      in both messages.
+      Test: a formatting unit test, or a PTY existing-file case, asserts the
+      message contains `\u{1b}` as text and no raw ESC/OSC sequence.
+
 ## Phase 3 — grants and audit log
 
 The design for grants, approval and audit lives in `MCP.md` ("Grants and the

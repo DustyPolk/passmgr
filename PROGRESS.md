@@ -1,3 +1,40 @@
+## 2026-11-03 — Review of 4662526..4a16226
+
+- 5 findings: 2 authorization (R.25, R.26; R.25 also exposes injected
+  secrets), 2 unsafe input/output (R.27, R.29), 1 drift/test gap (R.28); 0
+  direct secret-printing bugs, 0 crypto, 0 maintainability. Added R.25–R.29 to
+  `TODO.md`.
+- R.25 (high, authorization/secret exposure): the interpreter denylist omits
+  `gh` and `git`. A grant for the README's `/usr/bin/gh` example can run
+  `gh alias set --shell`, and `git -c alias...` runs a shell (both verified
+  locally with `id -u` output `1000`), so an agent can read injected secrets.
+  `src/grant.rs:953-954` currently pins the wrong expectation.
+- R.26 (medium, authorization): `grant create` prompts for the master
+  password without displaying the request. `MCP.md` and `DECISIONS.md` say the
+  approval prompt shows command paths and a red interpreter warning. Presence
+  is proved, but not informed consent.
+- R.27 (low, unsafe input): `src/cli/grant.rs:369` panics on `not_found` for
+  `revoke --all` because `options.id` is `None`.
+- R.28 (low, drift/tests): `revoke --all` includes expired and exhausted
+  grants despite the "active" wording in the help, decisions and test.
+- R.29 (low, unsafe output): `--out` is echoed unescaped at
+  `src/cli/grant.rs:226` and `:576`.
+- Looked at and judged fine: `grant list`/`show` are metadata-only (no token,
+  token hash or value; tests assert it); the token file is 0600 with
+  `O_EXCL|O_NOFOLLOW|O_CLOEXEC`, fsynced and unlinked on failure; the
+  grant-create write happens only after `grant_approved`, uses
+  `lock_for_update` + `save_with_key`, and `check_grant_writable` reuses
+  `store::encode`; the presence proof binds the canonical digest;
+  token/token-hash `Debug` is redacted and comparison is constant-time; no
+  nonce/KDF change or other crypto misuse; no new unbounded read; files remain
+  under 1,000 lines.
+- Known/accepted, not counted: `run` is not yet grant-gated (TODO 3.6, stated
+  in SECURITY.md and PROGRESS); `revoke` needs no proof because it only
+  removes access (same-user DoS only); `revoke --all` is available to an agent
+  by design.
+- Gate: `cargo test --quiet` passes; no source, test or doc changes were made
+  apart from `TODO.md` and this entry.
+
 ## 2026-11-03 — Add `pm grant list|show|revoke` (TODO 3.5)
 
 - `pm grant list [--json]` / `grant show <id> [--json]`: local vault reads
