@@ -94,7 +94,7 @@ Rules that apply to every item:
       maximum), a round trip over create/used/revoked, and a `src/grant.rs`
       unit test that corrupts a private field and proves `encode` refuses it.
 
-- [ ] **R.18 The label rejection table is broader than every document and
+- [x] **R.18 The label rejection table is broader than every document and
       error message that describes it.**
       `is_hidden_or_reordering` (`src/grant.rs:880-909`) rejects variation
       selectors U+FE00-FE0F, so `Grant::create` refuses a normal emoji
@@ -115,6 +115,15 @@ Rules that apply to every item:
       genuine VS1-14 case to the accept/reject table with the chosen
       outcome, and add a `tests/docs.rs` contract so the documents cannot
       drift from the table again.
+      Done: kept the whole class refused (a stored label must render exactly
+      as approved) and made the class explicit. New
+      `grant::LABEL_FORBIDDEN_CLASSES` is the single spelling used by the
+      rejection error, `FORMAT.md` and `DECISIONS.md`; `DECISIONS.md` also
+      records why VS15/VS16 are refused. Tests: the table now includes
+      U+FE0E, U+E0001 and U+E0020; a dedicated test refuses "❤️ prod" and a
+      bare VS15 label while accepting the selector-free heart, and asserts
+      the error names the class without echoing the label; `tests/docs.rs`
+      pins both documents to the constant.
 
 ## Phase 3 — grants and audit log
 

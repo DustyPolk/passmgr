@@ -1,3 +1,32 @@
+## 2026-11-03 — One spelling for the forbidden label classes (TODO R.18)
+
+- `src/grant/validate.rs`: kept the full rejection table (all variation
+  selectors included) so a stored label renders exactly as the human
+  approved. New `LABEL_FORBIDDEN_CLASSES` is the one spelling used by the
+  rejection error: "control, bidi, zero-width/format, line-separator or
+  variation-selector characters". The error still never echoes the label or
+  the offending code point.
+- Chose refusal over allowing VS15/VS16: a selector changes how the base
+  character renders (heart as emoji vs text), so accepting one form weakens
+  the verbatim-label rule; dropping only those ranges would also leave an
+  invisible-mark exception. Recorded in `DECISIONS.md`; a human can drop the
+  selector or pick another emoji.
+- Docs: `FORMAT.md` and the `DECISIONS.md` grant bullet use the same list.
+  `DECISIONS.md` said "an emoji without a zero-width joiner", false for
+  `❤️`; it now says "without a variation selector or zero-width joiner".
+- Tests: the label table gained U+FE0E, U+E0001 and U+E0020;
+  `variation_selectors_are_refused_including_the_emoji_presentation`
+  refuses "❤️ prod" and a bare VS15, accepts "❤ prod", and checks the
+  error names the class without echoing the label. New
+  `tests/docs.rs::docs_name_every_forbidden_label_character_class` pins both
+  documents to the constant.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` green (209 lib, 22
+  grant, 11 docs). `cargo audit` not installed; skipped.
+- **Next iteration must know:** 3.4 (`pm grant create`) is next; it must
+  refuse labels through `Grant::create`, not a duplicate CLI check.
+  `LABEL_FORBIDDEN_CLASSES` lives in `src/grant/validate.rs`, re-exported
+  from `passmgr::grant`.
+
 ## 2026-11-03 — The payload writer validates grants before writing (TODO R.17)
 
 - `src/grant.rs`: `from_stored` is now `check_stored(&StoredGrant) -> Result<()>`

@@ -7,6 +7,8 @@
 const SECURITY: &str = include_str!("../SECURITY.md");
 const README: &str = include_str!("../README.md");
 const MCP: &str = include_str!("../MCP.md");
+const FORMAT: &str = include_str!("../FORMAT.md");
+const DECISIONS: &str = include_str!("../DECISIONS.md");
 
 /// Collapse Markdown emphasis and line wrapping so a sentence can be matched
 /// regardless of how it is formatted in the source.
@@ -141,6 +143,27 @@ fn security_discloses_the_transitional_session_token_gap() {
     assert!(
         SECURITY.contains("TODO 3.6"),
         "SECURITY.md must name the TODO that closes the gap"
+    );
+}
+
+/// TODO R.18: `FORMAT.md` and `DECISIONS.md` described fewer character
+/// classes than `is_hidden_or_reordering` rejects, and the error message
+/// named fewer still. The rejection error now names
+/// `LABEL_FORBIDDEN_CLASSES`, so pinning both documents to the same constant
+/// keeps the class list from drifting in either direction. Behavior (which
+/// code points are refused) is tested in `tests/grant.rs`.
+#[test]
+fn docs_name_every_forbidden_label_character_class() {
+    let classes = passmgr::grant::LABEL_FORBIDDEN_CLASSES;
+    for (name, markdown) in [("FORMAT.md", FORMAT), ("DECISIONS.md", DECISIONS)] {
+        assert!(
+            plain(markdown).contains(classes),
+            "{name} must list the forbidden label classes as \"{classes}\""
+        );
+    }
+    assert!(
+        plain(DECISIONS).contains("VS15/VS16"),
+        "DECISIONS.md must record that the emoji-presentation selectors are refused"
     );
 }
 

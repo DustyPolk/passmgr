@@ -12,6 +12,15 @@ use super::{MAX_COMMANDS, MAX_FIELD_NAME_BYTES, MAX_LABEL_BYTES};
 use crate::error::{Error, Result};
 use crate::protocol::MAX_PATH_BYTES;
 
+/// The classes of character a grant label may not contain, spelled the same
+/// way in the rejection error, `FORMAT.md` and `DECISIONS.md` (TODO R.18).
+///
+/// The error names the whole class rather than echoing the offending code
+/// point (or the label), because the label is untrusted text that later gets
+/// printed to a terminal.
+pub const LABEL_FORBIDDEN_CLASSES: &str =
+    "control, bidi, zero-width/format, line-separator or variation-selector";
+
 pub(super) fn validate_label(label: &str) -> Result<()> {
     if label.trim().is_empty() {
         return Err(Error::InvalidInput("a grant needs a label".into()));
@@ -22,9 +31,9 @@ pub(super) fn validate_label(label: &str) -> Result<()> {
         )));
     }
     if label.chars().any(is_hidden_or_reordering) {
-        return Err(Error::InvalidInput(
-            "a grant label must not contain control, bidi or zero-width characters".into(),
-        ));
+        return Err(Error::InvalidInput(format!(
+            "a grant label must not contain {LABEL_FORBIDDEN_CLASSES} characters"
+        )));
     }
     Ok(())
 }
@@ -39,9 +48,17 @@ pub(super) fn validate_label(label: &str) -> Result<()> {
 /// the bidi controls (U+061C, U+200E/U+200F, U+202A-U+202E, U+2066-U+2069),
 /// the zero-width set (U+200B-U+200D, U+2060-U+2064), soft hyphen, the tag
 /// characters and U+FEFF; the line and paragraph separators (U+2028/U+2029);
-/// and the variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF), which are
-/// invisible combining marks rather than `Cf`. Ordinary visible combining
-/// marks, emoji, accents and non-Latin scripts stay allowed.
+/// and every variation selector (U+FE00-U+FE0F, U+E0100-U+E01EF), which are
+/// invisible combining marks rather than `Cf`.
+///
+/// VS15/VS16 (U+FE0E/U+FE0F) are refused on purpose even though they select a
+/// visible presentation: the rule is "store exactly what the human saw", and
+/// the sequence "heart + VS16" renders as an emoji while the bare heart
+/// renders as text. Accepting one variant and refusing the other would also
+/// bring back the invisible-mark class this table exists to keep out. A human
+/// can drop the selector ("❤ prod") or pick another emoji. Ordinary visible
+/// combining marks, emoji without a selector or joiner, accents and non-Latin
+/// scripts stay allowed.
 ///
 /// Kept as an explicit table rather than a new dependency: a
 /// general-category crate for one check would be a new tree to vet, and a

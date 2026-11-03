@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use passmgr::grant::{
     AccessRequest, Capabilities, Capability, Denied, Grant, GrantId, GrantSpec,
-    MAX_GRANT_LIFETIME_SECS, MAX_LABEL_BYTES, Scope, StoredGrant, Target, TokenHash, UpdateError,
-    validate_field_name,
+    LABEL_FORBIDDEN_CLASSES, MAX_GRANT_LIFETIME_SECS, MAX_LABEL_BYTES, Scope, StoredGrant, Target,
+    TokenHash, UpdateError, validate_field_name,
 };
 use passmgr::store::{EntryId, MAX_TIMESTAMP_UNIX};
 
@@ -175,7 +175,7 @@ fn create_rejects_invalid_specs() {
 /// the module's table is the code under test, so re-using it as the oracle
 /// would prove nothing (TODO R.14). Controls, bidi controls, zero-width and
 /// format characters, separators and variation selectors.
-const FORBIDDEN_IN_LABELS: [char; 29] = [
+const FORBIDDEN_IN_LABELS: [char; 32] = [
     '\u{0}',
     '\u{7}',
     '\u{9B}',
@@ -199,9 +199,12 @@ const FORBIDDEN_IN_LABELS: [char; 29] = [
     '\u{2067}',
     '\u{2068}',
     '\u{2069}',
+    '\u{FE0E}',
     '\u{FE0F}',
     '\u{FEFF}',
     '\u{FFF9}',
+    '\u{E0001}',
+    '\u{E0020}',
     '\u{E0041}',
     '\u{E0100}',
     '\u{1D173}',
@@ -221,7 +224,7 @@ fn create_rejects_hidden_and_reordering_label_characters() {
         )
         .expect_err(&format!("label {label:?} was accepted"));
         assert!(
-            err.to_string().contains("control, bidi or zero-width"),
+            err.to_string().contains(LABEL_FORBIDDEN_CLASSES),
             "{bad:?}: unexpected error {err}"
         );
         // The refusal must not echo the untrusted label back to a terminal.
@@ -230,6 +233,41 @@ fn create_rejects_hidden_and_reordering_label_characters() {
             "{bad:?}: error echoed the label: {err}"
         );
     }
+}
+
+/// TODO R.18: VS16 is a variation selector, so the emoji-presentation form of
+/// an otherwise allowed character is refused, while the bare (text) form
+/// stays usable. The refusal must name the variation-selector class and must
+/// not echo the untrusted label.
+#[test]
+fn variation_selectors_are_refused_including_the_emoji_presentation() {
+    for bad in ["\u{2764}\u{FE0F} prod", "prod \u{FE0E}"] {
+        let err = Grant::create(
+            GrantSpec {
+                label: bad.into(),
+                ..spec(Capabilities::RUN)
+            },
+            TokenHash::of(TOKEN),
+            NOW,
+        )
+        .expect_err(&format!("label {bad:?} was accepted"));
+        assert!(
+            err.to_string().contains("variation-selector"),
+            "{bad:?}: the error must name the variation-selector class: {err}"
+        );
+        assert!(!err.to_string().contains(bad), "{bad:?}: {err}");
+    }
+
+    let bare = "\u{2764} prod";
+    Grant::create(
+        GrantSpec {
+            label: bare.into(),
+            ..spec(Capabilities::RUN)
+        },
+        TokenHash::of(TOKEN),
+        NOW,
+    )
+    .unwrap_or_else(|err| panic!("label {bare:?} without a selector was rejected: {err}"));
 }
 
 #[test]

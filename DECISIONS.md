@@ -365,7 +365,13 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   stored verbatim and later rendered by `pm grant list`, so validation
   **rejects** the whole class instead of stripping it: a silently altered
   label would not match what a human approved. A visible combining accent,
-  an emoji without a zero-width joiner, or a non-Latin script is allowed. At
+  an emoji that uses no variation selector or zero-width joiner, or a
+  non-Latin script is allowed. VS15/VS16 (U+FE0E/U+FE0F) are refused like
+  every other selector even though they pick a visible presentation: an
+  approved label must render exactly as stored, and accepting a subset would
+  reintroduce the invisible-mark class (TODO R.18). The rejection error names
+  the same class list as `FORMAT.md` and this file, via
+  `grant::LABEL_FORBIDDEN_CLASSES`, pinned by `tests/docs.rs`. At
   least one
   capability, expiry in `(now, now + 30 days]`, and `max_uses = Some(0)` is
   refused (omit it for unlimited). Capabilities are a bit field
