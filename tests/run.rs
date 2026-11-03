@@ -21,6 +21,7 @@ use passmgr::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope};
 use passmgr::socket::RuntimePaths;
 use passmgr::store::{self, Credential};
 use passmgr::token::SessionToken;
+use passmgr::vault::Vault;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -703,5 +704,138 @@ fn run_maps_daemon_refusals_to_stable_exit_codes() {
     );
 
     // The daemon is still healthy after both refusals.
+    assert!(client::ping(&daemon.paths(), &daemon.token).is_ok());
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+}
+
+/// Replace the vault's contents without changing the container header, so the
+/// running daemon's key still opens it (the salt and KDF parameters are kept).
+fn rewrite_vault(fixture: &Fixture, credentials: &[Credential], grants: &[Grant]) {
+    let plaintext = store::encode(credentials, grants).expect("encode store");
+    let template = fs::read(&fixture.vault).expect("read vault");
+    let container = crypto::encrypt_with_key(&plaintext, fixture.key.as_slice(), &template)
+        .expect("encrypt vault");
+    fs::write(&fixture.vault, &container).expect("write vault");
+}
+
+/// R.31: the CLI must not turn a grant token into an existence oracle. For
+/// each state in which the grant can never be used, an existing and a
+/// nonexistent reference must have the same exit status; a credential that
+/// exists but is outside the scope must exit like a missing one.
+#[test]
+fn a_denied_run_exit_code_does_not_reveal_whether_a_reference_exists() {
+    let daemon = Daemon::start();
+    let now = unix_now();
+
+    let (credentials, base_grant) = {
+        let vault = Vault::open_with_key(&daemon.vault, daemon.key.as_slice()).expect("open");
+        (vault.list().to_vec(), vault.grants()[0].clone())
+    };
+    let token_hash = *base_grant.token_hash();
+    let scope = base_grant.scope().clone();
+    let commands = base_grant.commands().to_vec();
+    let absent = "pm://00000000000000000000000000000000";
+    let absent_env = format!("API_KEY={absent}");
+
+    let mut revoked = base_grant.clone();
+    revoked.revoke(now).expect("revoke");
+    // `Grant::create` refuses an expiry that is not after its `now`, so the
+    // grant is created in the past and is already expired when stored.
+    let expired = Grant::create(
+        GrantSpec {
+            label: "expired".into(),
+            scope: scope.clone(),
+            commands: commands.clone(),
+            capabilities: Capabilities::RUN,
+            expires_at: now - 3_600,
+            max_uses: None,
+        },
+        token_hash,
+        now - 7_200,
+    )
+    .expect("expired grant");
+    let mut exhausted = Grant::create(
+        GrantSpec {
+            label: "exhausted".into(),
+            scope: scope.clone(),
+            commands: commands.clone(),
+            capabilities: Capabilities::RUN,
+            expires_at: now + 3_600,
+            max_uses: Some(1),
+        },
+        token_hash,
+        now,
+    )
+    .expect("exhausted grant");
+    exhausted.mark_used(now).expect("use");
+    let unlisted = Credential::new(
+        "other.test".into(),
+        "bob".into(),
+        Zeroizing::new("other-run-canary-value".into()),
+    )
+    .expect("credential");
+    let out_of_scope = Grant::create(
+        GrantSpec {
+            label: "out of scope".into(),
+            scope: Scope::new(vec![unlisted.id()], Vec::new(), None).expect("scope"),
+            commands,
+            capabilities: Capabilities::RUN,
+            expires_at: now + 3_600,
+            max_uses: None,
+        },
+        token_hash,
+        now,
+    )
+    .expect("out-of-scope grant");
+    let credentials = vec![credentials[0].clone(), unlisted];
+
+    let cases = [
+        ("revoked", revoked, 5),
+        ("expired", expired, 5),
+        ("exhausted", exhausted, 5),
+        ("out of scope", out_of_scope, 3),
+    ];
+    for (label, grant, expected) in cases {
+        rewrite_vault(&daemon, &credentials, std::slice::from_ref(&grant));
+        // The base credential exists. For the out-of-scope grant it exists
+        // but is outside the scope, which must look exactly like a missing
+        // reference.
+        let existing_env = env_argument(&daemon, "API_KEY");
+        let existing = run(&daemon, &["run", "--env", &existing_env, "--", "/bin/true"]);
+        let missing = run(&daemon, &["run", "--env", &absent_env, "--", "/bin/true"]);
+
+        assert_eq!(
+            existing.status.code(),
+            Some(expected),
+            "{label}: existing reference: {existing:?}"
+        );
+        assert_eq!(
+            missing.status.code(),
+            Some(expected),
+            "{label}: nonexistent reference: {missing:?}"
+        );
+        let expected_message = if expected == 3 {
+            "no credential found"
+        } else {
+            "refused the run"
+        };
+        for output in [&existing, &missing] {
+            let stderr = stderr_text(output);
+            assert!(stderr.contains(expected_message), "{label}: {stderr}");
+            assert!(!stderr.contains(SECRET), "{label}: {stderr}");
+            assert!(
+                !stderr.contains("other-run-canary-value"),
+                "{label}: {stderr}"
+            );
+        }
+    }
+
+    // The vault rewrites did not disturb the running daemon.
     assert!(client::ping(&daemon.paths(), &daemon.token).is_ok());
 }

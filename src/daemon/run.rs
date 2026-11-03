@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use zeroize::Zeroizing;
 
-use crate::grant::{AccessRequest, GrantId, Target, UpdateError};
+use crate::grant::{AccessRequest, Denied, GrantId, Target, UpdateError};
 use crate::protocol::{self, FrameDecoder, ProtocolError, ResponseError, RunFrame};
 use crate::runner;
 use crate::store::EntryId;
@@ -34,9 +34,11 @@ const USE_RECORD_ATTEMPTS: usize = 8;
 
 /// Why a use could not be recorded. Every variant fails closed.
 enum RecordError {
-    /// The grant is unknown, expired, revoked, used up or out of scope.
+    /// The grant is unknown, expired, revoked or used up, its command is not
+    /// allowed, or it is out of scope and the reference exists.
     Denied,
-    /// The credential reference does not exist.
+    /// The credential reference does not exist, or it is outside the grant's
+    /// scope and must answer exactly like a missing one.
     NotFound,
     /// The vault could not be read, locked or saved.
     Internal,
@@ -159,16 +161,26 @@ fn record_use(
         else {
             return Err(RecordError::Denied);
         };
+        // Decide everything that does not need the credential first. If the
+        // lookup came first, a revoked, expired or exhausted grant would
+        // answer differently for an existing and a nonexistent reference,
+        // which is an existence oracle for a token that can never be used
+        // (R.31).
+        if grant.check_grant_for_run(program, now).is_err() {
+            return Err(RecordError::Denied);
+        }
         let Some(credential) = vault.get_by_ref(id) else {
             return Err(RecordError::NotFound);
         };
         let tags = credential.tags().to_vec();
         let target = Target::new(credential.id(), &tags);
-        if grant
-            .authorizes(&AccessRequest::run(target, None, program), now)
-            .is_err()
-        {
-            return Err(RecordError::Denied);
+        match grant.authorizes(&AccessRequest::run(target, None, program), now) {
+            Ok(()) => {}
+            // An existing reference outside the scope answers exactly like a
+            // nonexistent one, or the daemon becomes an existence oracle for
+            // every in-vault reference (DECISIONS.md).
+            Err(Denied::OutOfScope) => return Err(RecordError::NotFound),
+            Err(_) => return Err(RecordError::Denied),
         }
         let grant_id: GrantId = grant.id();
 

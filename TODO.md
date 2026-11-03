@@ -588,7 +588,7 @@ Rules that apply to every item:
       backstop. `tests/cli_args_escape.rs` covers every flag above except
       `--tag` (validated after the password prompt; unit-tested instead).
 
-- [ ] **R.31 A valid grant token is an existence oracle for out-of-scope
+- [x] **R.31 A valid grant token is an existence oracle for out-of-scope
       references, contradicting `DECISIONS.md`.**
       `src/daemon/run.rs:160-171` (`record_use`) looks the credential up
       first: a missing ref returns `RecordError::NotFound` (`:162-163`),
@@ -620,6 +620,10 @@ Rules that apply to every item:
       expired, exhausted, out of scope), an existing ref and a nonexistent
       ref get the same `RunFrame::Error` and the same CLI exit status. It
       must fail against the current order.
+      Done: `Grant::check_grant_for_run` (state, RUN bit, command allowlist)
+      now runs before `get_by_ref`, and an existing out-of-scope ref maps to
+      `NotFound`. A dead grant answers `Denied` for every ref, so its token is
+      no longer an oracle either.
 
 - [ ] **R.32 Security and protocol docs still describe the pre-3.6 state.**
       `SECURITY.md:14-16` says grant authorization is "not implemented yet"

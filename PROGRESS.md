@@ -1,3 +1,36 @@
+## 2026-11-03 — Close the grant-token existence oracle (TODO R.31)
+
+- `src/daemon/run.rs::record_use` now decides everything that does not need
+  the credential before `Vault::get_by_ref`: grant state (revoked, expired,
+  uses left), the `run` capability and the command allowlist, via the new
+  `Grant::check_grant_for_run` in `src/grant.rs`. Previously the lookup came
+  first, so a revoked/expired/exhausted token answered `Denied` for an
+  existing ref and `NotFound` for an absent one — an existence oracle for
+  every ref in the vault.
+- An existing ref outside the grant's scope now maps `Denied::OutOfScope` to
+  `RecordError::NotFound`, exactly like a missing ref, as `DECISIONS.md`
+  already promised. Other denials stay `Denied`.
+- `authorizes` was refactored onto the shared `check_capability` /
+  `check_command` helpers without changing its order, so grant decisions keep
+  one implementation. The unit tests moved to `src/grant/tests.rs` (declared
+  with `mod tests;`) because `src/grant.rs` would have crossed the 1,000-line
+  layout test; it is now 970 lines.
+- Tests: unit test in `src/grant.rs` (dead state wins over a command mismatch;
+  LIST-only grant is `NotCapable(Run)`); `tests/daemon_run.rs` loops revoked,
+  expired, exhausted and out-of-scope grants and asserts existing and absent
+  refs get the same frame, no child ran and no use was counted;
+  `tests/run.rs` asserts the same CLI exit status (5 for dead grants, 3 for
+  out-of-scope) and no canary leak. The daemon test fails against the old
+  order (`NotFound` vs `Denied`).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass (`cargo audit` not installed, skipped).
+- **Next iteration must know:** the vault rewrites in both new tests reuse
+  the container header with `crypto::encrypt_with_key`; the daemon re-opens
+  the vault per `run`, so this is also a useful pattern for future state
+  tests. A grant that is already expired can only be built by calling
+  `Grant::create` with a `now` in the past (it refuses `expires_at <= now`).
+  Next unchecked item is R.32 (stale security/protocol docs).
+
 ## 2026-11-03 — Review of 49d9915..03b7a31 (human-requested, outside the loop)
 
 - Full review of the overnight run (iterations 21–78) by five parallel

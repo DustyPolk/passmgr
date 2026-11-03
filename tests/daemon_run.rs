@@ -8,11 +8,16 @@ mod support;
 
 use support::*;
 
-use passmgr::grant::GrantToken;
+use std::fs;
+
+use passmgr::crypto;
+use passmgr::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope};
 use passmgr::protocol::{
     GrantRevokeRequest, MAX_CHUNK_BYTES, Request, Response, ResponseError, RunExit, RunFrame,
 };
+use passmgr::store::{self, Credential};
 use passmgr::vault::Vault;
+use zeroize::Zeroizing;
 
 #[test]
 fn run_injects_the_secret_and_redacts_stdout_and_stderr() {
@@ -182,6 +187,145 @@ fn run_stops_at_a_use_limited_grant() {
 
     assert_eq!(
         request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+}
+
+/// Replace the vault's contents without changing the container header, so the
+/// running daemon's key still opens it (the salt and KDF parameters are kept).
+fn rewrite_vault(fixture: &Fixture, credentials: &[Credential], grants: &[Grant]) {
+    let plaintext = store::encode(credentials, grants).expect("encode store");
+    let template = fs::read(&fixture.vault).expect("read vault");
+    let container = crypto::encrypt_with_key(&plaintext, fixture.key.as_slice(), &template)
+        .expect("encrypt vault");
+    fs::write(&fixture.vault, &container).expect("write vault");
+}
+
+/// Run with an arbitrary reference; `Fixture::run_request` always uses the
+/// one credential the fixture was built with.
+fn run_with_ref(fixture: &Fixture, reference: &str, command: &[&str]) -> Vec<RunFrame> {
+    let mut request = fixture.run_request("API_KEY", command);
+    if let Request::Run(run) = &mut request {
+        run.reference = reference.to_owned();
+    }
+    read_run(&fixture.socket(), &fixture.token, &request).0
+}
+
+/// R.31: a grant token must not work as an existence oracle for a grant that
+/// can never be used. Every credential-independent refusal has to answer the
+/// same for an existing and a nonexistent reference, and a credential that
+/// exists but is outside the scope must answer like a missing one.
+#[test]
+fn a_denied_run_does_not_reveal_whether_a_reference_exists() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+
+    let now = unix_now();
+    let (credentials, base_grant) = {
+        let vault = Vault::open_with_key(&fixture.vault, fixture.key.as_slice()).expect("open");
+        (vault.list().to_vec(), vault.grants()[0].clone())
+    };
+    let token_hash = *base_grant.token_hash();
+    let scope = base_grant.scope().clone();
+    let commands = base_grant.commands().to_vec();
+    let marker = fixture.temp_path("denied-run-marker");
+    let script = format!("printf ran > {}", marker.display());
+    let absent = "pm://00000000000000000000000000000000";
+
+    let mut revoked = base_grant.clone();
+    revoked.revoke(now).expect("revoke");
+    // `Grant::create` refuses an expiry that is not after its `now`, so the
+    // grant is created in the past and is already expired when stored.
+    let expired = Grant::create(
+        GrantSpec {
+            label: "expired".into(),
+            scope: scope.clone(),
+            commands: commands.clone(),
+            capabilities: Capabilities::RUN,
+            expires_at: now - 3_600,
+            max_uses: None,
+        },
+        token_hash,
+        now - 7_200,
+    )
+    .expect("expired grant");
+    let mut exhausted = Grant::create(
+        GrantSpec {
+            label: "exhausted".into(),
+            scope: scope.clone(),
+            commands: commands.clone(),
+            capabilities: Capabilities::RUN,
+            expires_at: now + 3_600,
+            max_uses: Some(1),
+        },
+        token_hash,
+        now,
+    )
+    .expect("exhausted grant");
+    exhausted.mark_used(now).expect("use");
+    let unlisted = Credential::new(
+        "other.test".into(),
+        "bob".into(),
+        Zeroizing::new("other-canary-value".into()),
+    )
+    .expect("credential");
+    let out_of_scope = Grant::create(
+        GrantSpec {
+            label: "out of scope".into(),
+            scope: Scope::new(vec![unlisted.id()], Vec::new(), None).expect("scope"),
+            commands,
+            capabilities: Capabilities::RUN,
+            expires_at: now + 3_600,
+            max_uses: None,
+        },
+        token_hash,
+        now,
+    )
+    .expect("out-of-scope grant");
+
+    let cases = [
+        ("revoked", revoked, ResponseError::Denied, 0),
+        ("expired", expired, ResponseError::Denied, 0),
+        ("exhausted", exhausted, ResponseError::Denied, 1),
+        ("out of scope", out_of_scope, ResponseError::NotFound, 0),
+    ];
+    for (label, grant, expected, expected_uses) in cases {
+        rewrite_vault(&fixture, &credentials, std::slice::from_ref(&grant));
+
+        let existing = run_with_ref(&fixture, &fixture.reference, &["/bin/sh", "-c", &script]);
+        let missing = run_with_ref(&fixture, absent, &["/bin/sh", "-c", &script]);
+
+        assert_eq!(
+            existing,
+            vec![RunFrame::Error(expected)],
+            "{label}: an existing reference"
+        );
+        assert_eq!(
+            missing, existing,
+            "{label}: a nonexistent reference must answer exactly like an existing one"
+        );
+        assert!(!marker.exists(), "{label}: a denied run must not spawn");
+
+        let vault =
+            Vault::open_with_key(&fixture.vault, fixture.key.as_slice()).expect("open vault");
+        assert_eq!(
+            vault.grants()[0].uses(),
+            expected_uses,
+            "{label}: a denied run must not record a use"
+        );
+    }
+
+    // The vault rewrites did not disturb the running daemon.
+    assert_eq!(
+        request(&fixture.socket(), &fixture.token, &Request::Lock),
         Response::Locked
     );
     assert!(wait_for_exit(&mut child, WAIT).success());

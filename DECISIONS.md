@@ -252,7 +252,11 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - An `exit` frame carries either `code` (0..=255) or `signal` (1..=127), never
   both; "killed by signal N" stays distinct from exit code 128+N.
 - `not_found` also covers a reference outside the caller's scope, so a client
-  cannot use the daemon as an existence oracle for refs it may not use.
+  cannot use the daemon as an existence oracle for refs it may not use. `pmd`
+  also decides the credential-independent checks (grant state, `run`
+  capability, command allowlist) before it looks a reference up, so a revoked,
+  expired or exhausted grant answers the same for an existing and a
+  nonexistent ref (TODO R.31).
 - `run` carries the caller's absolute `cwd`, and `command[0]` must be an
   absolute path. The CLI resolves a bare name through **its own** `PATH` and
   a relative program through **its own** cwd before sending the request; the

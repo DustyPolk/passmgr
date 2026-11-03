@@ -855,19 +855,50 @@ impl Grant {
         now: u64,
     ) -> std::result::Result<(), Denied> {
         self.check_active(now)?;
-        if !self.capabilities.contains(request.capability().flag()) {
-            return Err(Denied::NotCapable(request.capability()));
-        }
+        self.check_capability(request.capability())?;
         let (target, field) = request.target();
         if !self.scope_allows(target, field) {
             return Err(Denied::OutOfScope);
         }
         if let AccessRequest::Run { command, .. } = request {
-            if !self.allows_command(command) {
-                return Err(Denied::CommandNotAllowed);
-            }
+            self.check_command(command)?;
         }
         Ok(())
+    }
+
+    /// The parts of a `run` decision that do not need the credential: the
+    /// grant's state, the `run` capability and the command allowlist.
+    ///
+    /// The daemon calls this before it looks a reference up. If it looked the
+    /// credential up first, a revoked, expired or exhausted grant would answer
+    /// differently for an existing and a nonexistent reference, which is an
+    /// existence oracle for a token that can never be used. This method only
+    /// fixes that order; `authorizes` repeats the same checks after the scope
+    /// check, so it does not relax anything.
+    pub(crate) fn check_grant_for_run(
+        &self,
+        command: &Path,
+        now: u64,
+    ) -> std::result::Result<(), Denied> {
+        self.check_active(now)?;
+        self.check_capability(Capability::Run)?;
+        self.check_command(command)
+    }
+
+    fn check_capability(&self, capability: Capability) -> std::result::Result<(), Denied> {
+        if self.capabilities.contains(capability.flag()) {
+            Ok(())
+        } else {
+            Err(Denied::NotCapable(capability))
+        }
+    }
+
+    fn check_command(&self, command: &Path) -> std::result::Result<(), Denied> {
+        if self.allows_command(command) {
+            Ok(())
+        } else {
+            Err(Denied::CommandNotAllowed)
+        }
     }
 
     /// Record one use. Refuses an inactive grant so a caller can never count a
@@ -936,50 +967,4 @@ pub use token::{GRANT_TOKEN_BYTES, GrantToken};
 pub use validate::{LABEL_FORBIDDEN_CLASSES, is_program_runner, validate_field_name};
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn grant() -> Grant {
-        Grant::create(
-            GrantSpec {
-                label: "deploy prod".to_owned(),
-                scope: Scope::new(vec![EntryId::generate().unwrap()], Vec::new(), None).unwrap(),
-                commands: vec![PathBuf::from("/usr/bin/env")],
-                capabilities: Capabilities::RUN,
-                expires_at: 1_700_003_600,
-                max_uses: Some(2),
-            },
-            TokenHash::of(b"canary-store-symmetry-token"),
-            1_700_000_000,
-        )
-        .unwrap()
-    }
-
-    /// The payload writer runs the reader's checks, so a `Grant` the decoder
-    /// would refuse can never be written. Without this, `Vault::save` would
-    /// replace a good vault with one that every later open rejects (R.17).
-    #[test]
-    fn the_payload_writer_refuses_a_grant_its_reader_would_reject() {
-        let mut revoked = grant();
-        revoked.revoked_at = Some(MAX_TIMESTAMP_UNIX + 1);
-        assert!(Grant::from_stored(revoked.to_stored()).is_err());
-        assert!(matches!(
-            crate::store::encode(&[], std::slice::from_ref(&revoked)).unwrap_err(),
-            Error::InvalidInput(message) if message.contains("revoked_at")
-        ));
-
-        // The check is not only about timestamps: any stored-field rule the
-        // reader enforces also blocks the writer.
-        let mut hidden = grant();
-        hidden.label = "deploy\u{202E}prod".to_owned();
-        assert!(Grant::from_stored(hidden.to_stored()).is_err());
-        assert!(matches!(
-            crate::store::encode(&[], std::slice::from_ref(&hidden)).unwrap_err(),
-            Error::InvalidInput(message) if message.contains("label")
-        ));
-
-        // The untouched grant is writable: the check rejects only bad state.
-        assert!(Grant::check_stored(&grant().to_stored()).is_ok());
-        assert!(crate::store::encode(&[], std::slice::from_ref(&grant())).is_ok());
-    }
-}
+mod tests;
