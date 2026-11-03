@@ -88,12 +88,16 @@ Rules that apply to every item:
       (`RunFrame` is separate from `Response`; 16 KiB raw chunk cap; `exit`
       carries `code` xor `signal`; protocol stays v2; response code moved to
       `src/protocol/response.rs`.)
-- [ ] **2.6c Daemon executes `run`.** Decrypt, resolve the `pm://` ref, spawn the
+- [x] **2.6c Daemon executes `run`.** Decrypt, resolve the `pm://` ref, spawn the
       child with only the requested variable injected, stream redacted
       stdout/stderr, return its exit code. Tests: child sees the variable; the
       value appears in neither socket bytes nor daemon output; missing ref and
       failed spawn are distinct non-fatal errors; streaming output larger than
-      one chunk is redacted across chunk boundaries.
+      one chunk is redacted across chunk boundaries. (`src/runner.rs` owns the
+      spawn/redact/relay loop; the daemon refuses loader/shell-hook variable
+      names and starts the child from a fixed env allowlist, not the daemon's
+      environment. **Transitional:** `run` is authorized by the session token
+      until TODO 3.6 adds grants.)
 - [ ] **2.6d CLI `run` + client reader.** `passmgr run --env NAME=<ref> -- <cmd>`
       forwards frames to its own stdout/stderr and exits with the child's status;
       refuses malformed specs and non-daemon operation with stable exit codes.

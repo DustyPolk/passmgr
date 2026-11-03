@@ -16,7 +16,9 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use passmgr::crypto::{self, KEY_LEN, KdfParams};
-use passmgr::protocol::{self, Request, Response, ResponseError, RunRequest};
+use passmgr::protocol::{
+    self, MAX_CHUNK_BYTES, Request, Response, ResponseError, RunExit, RunFrame, RunRequest,
+};
 use passmgr::socket::RuntimePaths;
 use passmgr::store::{self, Credential};
 use passmgr::token::SessionToken;
@@ -33,10 +35,16 @@ struct Fixture {
     runtime: PathBuf,
     key: Zeroizing<Vec<u8>>,
     token: SessionToken,
+    /// The vault entry's `pm://…` reference, so tests can run it.
+    reference: String,
 }
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_secret(SECRET)
+    }
+
+    fn with_secret(secret: &str) -> Self {
         let directory = tempfile::tempdir().expect("tempdir");
         // tempfile creates the directory 0700, which is exactly what the
         // runtime directory check requires.
@@ -46,9 +54,10 @@ impl Fixture {
         let credential = Credential::new(
             "example.test".into(),
             "alice".into(),
-            Zeroizing::new(SECRET.into()),
+            Zeroizing::new(secret.into()),
         )
         .expect("credential");
+        let reference = credential.reference();
         let plaintext = store::encode(&[credential]).expect("encode store");
         let container = crypto::encrypt(&plaintext, MASTER, KdfParams::new(8 * 1024, 1, 1))
             .expect("encrypt vault");
@@ -64,7 +73,14 @@ impl Fixture {
             runtime,
             key,
             token: SessionToken::generate().expect("session token"),
+            reference,
         }
+    }
+
+    /// A path inside this fixture's private temp directory. Used to prove a
+    /// command did (or did not) run.
+    fn temp_path(&self, name: &str) -> PathBuf {
+        self._directory.path().join(name)
     }
 
     fn socket(&self) -> PathBuf {
@@ -171,6 +187,71 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStat
     }
 }
 
+/// Send one `run` request and collect every frame plus the raw socket bytes.
+///
+/// Reads until the daemon closes the connection (a terminal frame is always
+/// followed by close), so a missing terminal frame fails the test timeout.
+fn read_run(socket: &Path, token: &SessionToken, request: &Request) -> (Vec<RunFrame>, Vec<u8>) {
+    let mut stream = UnixStream::connect(socket).expect("connect");
+    stream.set_read_timeout(Some(WAIT)).expect("read timeout");
+    stream
+        .write_all(&protocol::encode(token, request).expect("encode request"))
+        .expect("write request");
+
+    let mut decoder = protocol::FrameDecoder::new();
+    let mut frames = Vec::new();
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = stream.read(&mut buffer).expect("read run stream");
+        if read == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buffer[..read]);
+        decoder
+            .push(&buffer[..read])
+            .expect("run frames are validly framed");
+        while let Some(body) = decoder.next_frame().expect("decode frame") {
+            let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&body);
+            frames.push(protocol::decode_run_frame(&frame).expect("decode run frame"));
+        }
+    }
+    (frames, raw)
+}
+
+fn stdout_bytes(frames: &[RunFrame]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for frame in frames {
+        if let RunFrame::Stdout(data) = frame {
+            bytes.extend_from_slice(data);
+        }
+    }
+    bytes
+}
+
+fn stderr_bytes(frames: &[RunFrame]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for frame in frames {
+        if let RunFrame::Stderr(data) = frame {
+            bytes.extend_from_slice(data);
+        }
+    }
+    bytes
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn run_request(reference: &str, env: &str, command: &[&str]) -> Request {
+    Request::Run(RunRequest {
+        env: env.into(),
+        reference: reference.into(),
+        command: command.iter().map(|arg| (*arg).to_string()).collect(),
+    })
+}
+
 #[test]
 fn ping_then_lock_wipes_the_key_and_removes_the_socket() {
     let fixture = Fixture::new();
@@ -254,19 +335,18 @@ fn malformed_oversized_and_unknown_requests_are_rejected_without_a_crash() {
         Response::Error(ResponseError::BadRequest)
     );
 
-    // `run` is well-formed but not implemented in this iteration.
-    assert_eq!(
-        request(
-            &socket,
-            &fixture.token,
-            &Request::Run(RunRequest {
-                env: "API_KEY".into(),
-                reference: "pm://00112233445566778899aabbccddeeff".into(),
-                command: vec!["true".into()],
-            })
-        ),
-        Response::Error(ResponseError::Unsupported)
+    // `run` for an unknown reference answers with a terminal run frame and
+    // leaves the daemon healthy.
+    let (frames, _) = read_run(
+        &socket,
+        &fixture.token,
+        &Request::Run(RunRequest {
+            env: "API_KEY".into(),
+            reference: "pm://00112233445566778899aabbccddeeff".into(),
+            command: vec!["true".into()],
+        }),
     );
+    assert_eq!(frames, vec![RunFrame::Error(ResponseError::NotFound)]);
 
     // Still alive and serving the owner.
     assert_eq!(
@@ -577,4 +657,194 @@ fn the_session_token_never_reaches_socket_traffic_or_daemon_output() {
         assert!(!text.contains(token_hex.as_str()));
         assert!(!text.contains(SECRET));
     }
+}
+
+#[test]
+fn run_injects_the_secret_and_redacts_stdout_and_stderr() {
+    let fixture = Fixture::new();
+    let child = fixture.start();
+    let socket = fixture.socket();
+
+    let (frames, raw) = read_run(
+        &socket,
+        &fixture.token,
+        &run_request(
+            &fixture.reference,
+            "API_KEY",
+            &[
+                "/bin/sh",
+                "-c",
+                "printf %s \"$API_KEY\"; printf %s \"$API_KEY\" >&2",
+            ],
+        ),
+    );
+
+    assert_eq!(stdout_bytes(&frames), b"[REDACTED]");
+    assert_eq!(stderr_bytes(&frames), b"[REDACTED]");
+    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert!(
+        !raw.windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
+    assert!(
+        !raw.windows(hex(SECRET.as_bytes()).len())
+            .any(|window| { window == hex(SECRET.as_bytes()).as_bytes() })
+    );
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    let output = child.wait_with_output().expect("wait for pmd");
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(SECRET));
+}
+
+#[test]
+fn run_reports_a_missing_reference_and_a_spawn_failure_without_dying() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+
+    let (frames, _) = read_run(
+        &socket,
+        &fixture.token,
+        &run_request(
+            "pm://00112233445566778899aabbccddeeff",
+            "API_KEY",
+            &["/bin/true"],
+        ),
+    );
+    assert_eq!(frames, vec![RunFrame::Error(ResponseError::NotFound)]);
+
+    let (frames, _) = read_run(
+        &socket,
+        &fixture.token,
+        &run_request(
+            &fixture.reference,
+            "API_KEY",
+            &["/nonexistent/passmgr-run-test"],
+        ),
+    );
+    assert_eq!(frames, vec![RunFrame::Error(ResponseError::SpawnFailed)]);
+
+    // Neither failure is fatal.
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Ping),
+        Response::Pong
+    );
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+#[test]
+fn run_refuses_loader_and_shell_hook_variables_without_spawning() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+    let marker = fixture.temp_path("spawned");
+
+    for env in [
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "BASH_ENV",
+        "ENV",
+        "PROMPT_COMMAND",
+        "IFS",
+        "PATH",
+        "HOME",
+        "SHELLOPTS",
+        "PS4",
+    ] {
+        let (frames, _) = read_run(
+            &socket,
+            &fixture.token,
+            &run_request(
+                &fixture.reference,
+                env,
+                &["/bin/sh", "-c", &format!("touch {}", marker.display())],
+            ),
+        );
+        assert_eq!(
+            frames,
+            vec![RunFrame::Error(ResponseError::BadRequest)],
+            "injecting {env} must be refused"
+        );
+        assert!(!marker.exists(), "a refused run must not spawn: {env}");
+    }
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+#[test]
+fn run_streams_large_output_in_protocol_sized_chunks_and_redacts() {
+    // The vault caps a password at 4096 bytes; the runner's unit tests cover
+    // a value split across pipe reads with a longer value. Here the prefix
+    // pushes the value to a read boundary anyway, and the output proves the
+    // frame cap.
+    let secret = format!("{}{}", SECRET, "z".repeat(4096 - SECRET.len()));
+    let fixture = Fixture::with_secret(&secret);
+    let child = fixture.start();
+    let socket = fixture.socket();
+
+    let (frames, raw) = read_run(
+        &socket,
+        &fixture.token,
+        &run_request(
+            &fixture.reference,
+            "BIG_SECRET",
+            &[
+                "/bin/sh",
+                "-c",
+                "dd if=/dev/zero bs=1024 count=40 2>/dev/null | tr '\\000' x; printf %s \"$BIG_SECRET\"",
+            ],
+        ),
+    );
+
+    let chunks: Vec<&Vec<u8>> = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            RunFrame::Stdout(data) => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert!(chunks.len() > 1, "long output must span several frames");
+    assert!(
+        chunks.iter().all(|chunk| chunk.len() <= MAX_CHUNK_BYTES),
+        "a frame must never exceed the protocol cap"
+    );
+
+    let stdout = stdout_bytes(&frames);
+    assert_eq!(stdout.len(), 40 * 1024 + b"[REDACTED]".len());
+    assert!(stdout[..40 * 1024].iter().all(|byte| *byte == b'x'));
+    assert_eq!(&stdout[40 * 1024..], b"[REDACTED]");
+    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+
+    assert!(
+        !raw.windows(secret.len())
+            .any(|window| window == secret.as_bytes())
+    );
+    let encoded = hex(secret.as_bytes());
+    assert!(
+        !raw.windows(encoded.len())
+            .any(|window| window == encoded.as_bytes())
+    );
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    let output = child.wait_with_output().expect("wait for pmd");
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(SECRET));
 }

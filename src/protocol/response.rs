@@ -34,8 +34,7 @@ pub enum Response {
 pub enum ResponseError {
     /// Malformed, truncated, oversized or unknown request.
     BadRequest,
-    /// A well-formed request this build does not implement yet (`run` before
-    /// TODO 2.6).
+    /// A well-formed request this build does not implement.
     Unsupported,
     /// The envelope did not carry this daemon's session token.
     Unauthorized,
@@ -45,6 +44,10 @@ pub enum ResponseError {
     NotFound,
     /// The child process could not be started (missing program, permission).
     SpawnFailed,
+    /// The daemon could not read its own vault (I/O, permissions, format).
+    /// Deliberately fixed: the underlying error may name paths but never a
+    /// value, and clients have nothing useful to do with it.
+    Internal,
 }
 
 impl ResponseError {
@@ -56,6 +59,7 @@ impl ResponseError {
             Self::Unauthorized => "unauthorized",
             Self::NotFound => "not_found",
             Self::SpawnFailed => "spawn_failed",
+            Self::Internal => "internal",
         }
     }
 
@@ -66,6 +70,7 @@ impl ResponseError {
             "unauthorized" => Ok(Self::Unauthorized),
             "not_found" => Ok(Self::NotFound),
             "spawn_failed" => Ok(Self::SpawnFailed),
+            "internal" => Ok(Self::Internal),
             other => Err(ProtocolError::UnknownResponse(
                 other.chars().take(MAX_TYPE_CHARS).collect(),
             )),
@@ -425,6 +430,7 @@ mod tests {
             Response::Error(ResponseError::Unauthorized),
             Response::Error(ResponseError::NotFound),
             Response::Error(ResponseError::SpawnFailed),
+            Response::Error(ResponseError::Internal),
         ] {
             let encoded = encode_response(&response).expect("encode response");
             assert_eq!(
@@ -693,6 +699,7 @@ mod tests {
             (ResponseError::Unauthorized, "unauthorized"),
             (ResponseError::NotFound, "not_found"),
             (ResponseError::SpawnFailed, "spawn_failed"),
+            (ResponseError::Internal, "internal"),
         ];
         for (error, code) in expected {
             assert_eq!(error.code(), code);

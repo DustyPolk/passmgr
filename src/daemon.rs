@@ -8,16 +8,17 @@
 //! # Why only the key
 //!
 //! Holding the key instead of the decrypted vault keeps plaintext on disk out
-//! of a long-lived process. When `run` lands (TODO 2.6) the daemon decrypts,
-//! spawns the child, and drops the plaintext immediately. The key is locked in
-//! memory where the platform allows it and is zeroized on drop.
+//! of a long-lived process. A `run` request decrypts the vault, copies one
+//! value, drops (and zeroizes) the rest, then spawns the child. The key is
+//! locked in memory where the platform allows it and is zeroized on drop.
 //!
 //! # No plaintext responses
 //!
 //! Every request is untrusted and any same-user process can connect. The
 //! daemon therefore has no request type that returns a secret; see
-//! [`crate::protocol`]. This iteration answers `ping` and `lock` and rejects
-//! `run` (and every malformed frame) with a fixed error code.
+//! [`crate::protocol`]. It answers `ping` and `lock`, and `run` streams the
+//! child's already-redacted output plus an exit status (TODO 2.6c). There is
+//! no request that returns a value.
 //!
 //! # Lifetime
 //!
@@ -47,9 +48,13 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use crate::crypto::KEY_LEN;
-use crate::protocol::{self, FrameDecoder, ProtocolError, Request, Response, ResponseError};
+use crate::protocol::{
+    self, FrameDecoder, ProtocolError, Request, Response, ResponseError, RunFrame,
+};
+use crate::runner;
 use crate::session;
 use crate::socket::{DaemonSocket, RuntimePaths, SocketError};
+use crate::store::EntryId;
 use crate::token::{SessionToken, TOKEN_BYTES};
 use crate::vault::Vault;
 
@@ -379,7 +384,7 @@ pub fn run(
             Ok((mut stream, _peer)) => {
                 let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
                 let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
-                match handle_connection(&mut stream, token) {
+                match handle_connection(&mut stream, token, vault_path, key) {
                     // `lock`: response is written, now wipe on the way out.
                     Handled::Locked => break,
                     // Only a request that was decoded and answered counts as
@@ -420,32 +425,114 @@ enum Handled {
 /// Nothing here can panic on attacker input: every parse failure becomes
 /// `bad_request`, and write failures (client vanished) are ignored so one
 /// aborted client cannot take the daemon down.
-fn handle_connection(stream: &mut UnixStream, token: &SessionToken) -> Handled {
-    let (response, handled) = match read_request(stream) {
-        // The token check comes first: a request that is not for this session
-        // gets a fixed answer and cannot refresh the idle timer.
-        Ok(authorized) if !authorized.token().matches(token) => (
-            Response::Error(ResponseError::Unauthorized),
-            Handled::Rejected,
-        ),
-        Ok(authorized) => match authorized.into_request() {
-            Request::Ping => (Response::Pong, Handled::Served),
-            Request::Lock => (Response::Locked, Handled::Locked),
-            // `run` exists in the protocol but is TODO 2.6. Refuse it
-            // explicitly rather than pretending a generic parse error.
-            Request::Run(_) => (Response::Error(ResponseError::Unsupported), Handled::Served),
-        },
-        Err(_) => (
-            Response::Error(ResponseError::BadRequest),
-            Handled::Rejected,
-        ),
+fn handle_connection(
+    stream: &mut UnixStream,
+    token: &SessionToken,
+    vault_path: &Path,
+    key: &LockedKey,
+) -> Handled {
+    let authorized = match read_request(stream) {
+        Ok(authorized) => authorized,
+        Err(_) => return reject(stream, ResponseError::BadRequest),
     };
-
-    if let Ok(frame) = protocol::encode_response(&response) {
-        let _ = stream.write_all(&frame);
-        let _ = stream.flush();
+    // The token check comes first: a request that is not for this session
+    // gets a fixed answer and cannot refresh the idle timer.
+    if !authorized.token().matches(token) {
+        return reject(stream, ResponseError::Unauthorized);
     }
-    handled
+    match authorized.into_request() {
+        Request::Ping => {
+            let _ = write_response(stream, &Response::Pong);
+            Handled::Served
+        }
+        Request::Lock => {
+            let _ = write_response(stream, &Response::Locked);
+            Handled::Locked
+        }
+        Request::Run(request) => serve_run(stream, &request, vault_path, key),
+    }
+}
+
+/// Answer with a one-shot error and count the connection as rejected.
+fn reject(stream: &mut UnixStream, error: ResponseError) -> Handled {
+    let _ = write_response(stream, &Response::Error(error));
+    Handled::Rejected
+}
+
+fn write_response(stream: &mut UnixStream, response: &Response) -> io::Result<()> {
+    let frame = protocol::encode_response(response)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response is too large"))?;
+    stream.write_all(&frame)?;
+    stream.flush()
+}
+
+fn write_run_frame(stream: &mut UnixStream, frame: &RunFrame) -> io::Result<()> {
+    let encoded = protocol::encode_run_frame(frame)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame is too large"))?;
+    stream.write_all(&encoded)?;
+    stream.flush()
+}
+
+/// Handle one `run`: decrypt, resolve, spawn, stream redacted output.
+///
+/// Every failure becomes a terminal [`RunFrame::Error`] after the request has
+/// been authenticated; nothing here can kill the daemon, and the vault is
+/// closed again before the child starts.
+fn serve_run(
+    stream: &mut UnixStream,
+    request: &protocol::RunRequest,
+    vault_path: &Path,
+    key: &LockedKey,
+) -> Handled {
+    // The protocol guarantees these, but the daemon must not rely on a
+    // client-side check for a security decision.
+    let Ok(id) = EntryId::parse_ref(&request.reference) else {
+        let _ = write_run_frame(stream, &RunFrame::Error(ResponseError::BadRequest));
+        return Handled::Served;
+    };
+    if runner::denied_env_name(&request.env) {
+        let _ = write_run_frame(stream, &RunFrame::Error(ResponseError::BadRequest));
+        return Handled::Served;
+    }
+
+    let vault = match Vault::open_with_key(vault_path, key.as_slice()) {
+        Ok(vault) => vault,
+        Err(_) => {
+            let _ = write_run_frame(stream, &RunFrame::Error(ResponseError::Internal));
+            return Handled::Served;
+        }
+    };
+    let Some(credential) = vault.get_by_ref(id) else {
+        drop(vault);
+        let _ = write_run_frame(stream, &RunFrame::Error(ResponseError::NotFound));
+        return Handled::Served;
+    };
+    // Copy only the one value, then drop the decrypted vault (which zeroizes
+    // the rest) before the child can run.
+    let secret = Zeroizing::new(credential.password().to_owned());
+    drop(vault);
+
+    let inherited = runner::inherited_env(std::env::vars_os());
+    let result = runner::execute(
+        &request.command,
+        &request.env,
+        secret.as_str(),
+        &inherited,
+        &SHUTDOWN,
+        |frame| write_run_frame(stream, &frame),
+    );
+    match result {
+        Ok(exit) => {
+            let _ = write_run_frame(stream, &RunFrame::Exit(exit));
+        }
+        Err(runner::RunError::Spawn(_)) => {
+            let _ = write_run_frame(stream, &RunFrame::Error(ResponseError::SpawnFailed));
+        }
+        // The caller vanished or the daemon is stopping: the child is gone
+        // and there is nobody left to tell.
+        Err(runner::RunError::Output(_) | runner::RunError::Cancelled) => {}
+    }
+    Handled::Served
 }
 
 /// Read one framed request from a stream, without unbounded allocation.

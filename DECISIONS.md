@@ -185,7 +185,8 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   the socket, so client-side checks protect nothing; every authorization
   decision is made in `pmd`.
 - Responses: one-shot `pong`, `locked`, or a fixed error code (`bad_request`,
-  `unsupported`, `unauthorized`, `not_found`, `spawn_failed`), and for `run` a
+  `unsupported`, `unauthorized`, `not_found`, `spawn_failed`, `internal`), and
+  for `run` a
   stream of `RunFrame`s: zero or more `stdout`/`stderr` chunks (lowercase hex
   of at most 16 KiB raw bytes each), then exactly one terminal `exit` or
   `error`. Errors never echo field values or the token.
@@ -203,10 +204,25 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   `$XDG_RUNTIME_DIR/passmgr/session`. Loading requires a regular 0600 file
   owned by the user, opened `O_NOFOLLOW`, at most 512 bytes; anything else is
   an error, never repaired.
-- The session token authorizes only `ping`, `lock`, `status` and `revoke`
-  (planned 3.6) and is **not** a human/agent boundary: holding it must never
-  be enough to use a secret. `revoke` over the session token is an accepted
-  DoS-at-worst trade-off.
+- The session token authorizes `ping` and `lock` today. It is **not** a
+  human/agent boundary and must never be enough to use a secret. TODO 3.6
+  makes `run` (and every credential-touching request) require a grant.
+  **Transitional gap (2.6c until 3.6):** `pmd` authorizes `run` with the
+  session token alone. Token checking and the no-plaintext response contract
+  are already in place, but any same-user process that can read the 0600
+  session file can inject a stored value into a command of its choosing. The
+  MCP server must not expose any `run`-equivalent tool before 3.6.
+  `revoke` over the session token is an accepted DoS-at-worst trade-off.
+- `run` child policy (TODO 2.6c): argv only, never a shell string; stdin is
+  `/dev/null`; the environment is built from scratch from `PATH`, `HOME`,
+  `USER`, `LOGNAME`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `TERM` plus exactly one
+  injected variable. The daemon refuses loader and shell-hook names
+  (`LD_*`, `DYLD_*`, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `IFS`, `PATH`,
+  `HOME`, `SHELLOPTS`, `PS4`) before spawning, even though the protocol's env
+  grammar already allows them. stdout and stderr each get their own streaming
+  redactor; frames are split at 16 KiB after redaction, so a value never
+  straddles a frame. `internal` is the fixed code for "the daemon could not
+  read its own vault"; it never names a path or value.
 - An `unauthorized` request does not refresh the idle timer.
 - Idle timeout: default 900 s (`pmd --idle-timeout SECS`,
   `passmgr unlock --idle-timeout SECS`); zero is refused. Activity means a

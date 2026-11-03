@@ -1,3 +1,48 @@
+## 2026-11-02 — Daemon executes `run` with redacted output (TODO 2.6c)
+
+- New `src/runner.rs` (cfg(unix)): `execute(argv, env_name, secret, inherited,
+  cancel, emit)` spawns an argv (never a shell string) with stdin null, a
+  fixed env allowlist, and exactly one injected variable. Two reader threads
+  each own a `Redactor`; one output thread relays frames in order, checks the
+  daemon's cancellation flag every 100 ms, splits redacted bytes at
+  `MAX_CHUNK_BYTES`, and kills/reaps the child on output failure or cancel.
+  `denied_env_name()` refuses loader/shell-hook names; `inherited_env()` keeps
+  only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TZ`, `TMPDIR`,
+  `TERM`.
+- `src/daemon.rs`: `handle_connection` now takes the vault path and key.
+  `Request::Run` resolves the ref with `EntryId::parse_ref`, opens the vault,
+  copies only that password into a `Zeroizing<String>`, drops the vault
+  (zeroizing the rest), then streams `RunFrame`s. Terminal outcomes:
+  `Exit(code|signal)`, `Error(not_found)`, `Error(spawn_failed)`,
+  `Error(bad_request)` for a denied env name, `Error(internal)` if the vault
+  cannot be read. A failed run never kills the daemon.
+- `ResponseError::Internal` added (`internal`) with round-trip coverage.
+- Tests: 11 runner unit tests (allowlist, denylist, injection + redaction,
+  no inherited test-process env, 10 KB secret split across 8 KiB reads,
+  multi-frame 40 KB output, exit 7, SIGTERM, bad program, invalid env name,
+  output failure/cancel kill the child) and 4 new daemon e2e tests
+  (stdout+stderr redaction with canary absent from raw socket bytes and pmd
+  output, not-found vs spawn-failed both non-fatal, every denied env name
+  refused without spawning, 40 KB output split into bounded frames with a
+  4096-byte secret redacted). The old "run is unsupported" assertion now
+  expects `not_found`.
+- Gate: fmt clean, clippy `-D warnings` clean, full `cargo test` passes
+  (159 lib + 20 bin + 28 CLI + 16 daemon + 8 unlock). `cargo audit` not
+  installed; skipped.
+- **Next iteration must know:** TODO 2.6d owns `passmgr run` and the client
+  stream reader (`src/client.rs` still reads exactly one response). Two
+  deliberate edges for later: (1) a `lock` request cannot interrupt an
+  in-flight `run` because the daemon serves one connection at a time; only
+  SIGTERM/SIGINT (via the cancel flag) stops it — timeouts/process groups are
+  TODO 4.5. (2) The redactor marker is `[REDACTED]`, while `MCP.md` promises
+  `[REDACTED:<VAR>]`; Phase 4 must either extend the redactor or amend
+  `MCP.md`. Run frames are not audited yet (3.8).
+- **NEEDS HUMAN REVIEW:** until TODO 3.6, `run` is authorized by the session
+  token alone, so any same-user process that can read the 0600 session file
+  can use a stored secret. This ordering is inherent in `TODO.md` (2.6 before
+  3.6) and is recorded in `DECISIONS.md`; do not expose an MCP tool for it
+  before 3.6.
+
 ## 2026-11-02 — Protocol streaming `run` responses (TODO 2.6b)
 
 - `src/protocol/response.rs` (new; moved out of `src/protocol.rs`, which is now

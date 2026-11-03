@@ -14,6 +14,8 @@ pub mod password;
 pub mod protocol;
 pub mod redact;
 #[cfg(unix)]
+pub mod runner;
+#[cfg(unix)]
 pub mod session;
 #[cfg(unix)]
 pub mod socket;
