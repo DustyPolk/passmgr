@@ -1,3 +1,32 @@
+## 2026-11-03 — Retire the stale R.15b block and prove A-then-B end to end (TODO R.33)
+
+- `TODO.md` R.15b is now `[x]` (was `[!]`, "blocked on 3.4/4.9", both long
+  done). Evidence recorded there: `src/daemon.rs`'s `GrantCreate` arm
+  re-checks `check_approvable` and spends one approval with
+  `approvals.take(&request.digest(), ...)`; the handler test
+  `src/daemon/tests.rs::grant_create_is_accepted_only_for_the_digest_the_human_proved`
+  already covered A-then-B and A-then-A. No code change was needed; only the
+  checklist was lying.
+- Added the missing socket-level case,
+  `tests/grant_create.rs::grant_create_refuses_a_different_request_than_the_one_proven`:
+  prove digest A over the real daemon socket, submit request B (same shape,
+  different expiry) -> `denied` and a byte-identical vault; then A ->
+  `grant_approved`, vault still byte-identical; then A again -> `denied`.
+- Mutation check: with `Approvals::take` changed to ignore the digest
+  (`.position(|_| true)`), the new test fails (`grant_approved` where
+  `denied` was expected). The file was restored; `git diff src/presence.rs`
+  is empty.
+- Docs: none changed. `MCP.md`/`DECISIONS.md` already describe the one-shot
+  digest-bound approval (R.32 aligned them).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` pass (`cargo audit` not installed, skipped).
+- **Next iteration must know:** the first unchecked item is now **R.34** (the
+  canonical-path check but raw-path exec, i.e. a symlink swap runs an
+  unlisted program with the secret). The review asked for R.34 *and* R.35
+  before any Phase 3/4 feature work; R.35 is the e2e allowlist/scope test
+  that would catch a regression of R.34's fix. `tests/grant_create.rs` starts
+  a second `pmd` per test with cheap KDF params, so it is a good template for
+  daemon-socket e2e cases.
 ## 2026-11-03 — Align security and protocol docs with the implemented flow (TODO R.32)
 
 - `SECURITY.md` "Current status" now says grant authorization for `run` is

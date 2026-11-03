@@ -23,13 +23,20 @@ Rules that apply to every item:
       `handle_connection`; the misleading "cannot approve a different one"
       comment in `tests/daemon.rs` now says it is a MAC mismatch; `MCP.md`,
       `DECISIONS.md` and the protocol/client docs describe the approval.
-- [!] **R.15b The write must spend the approval exactly once.** Blocked on
-      TODO 3.4/4.9, which own the first grant write. Test: complete `prove`
-      for digest A, submit a create whose canonical digest is B, and assert it
-      is refused and writes nothing; then assert A-then-A succeeds exactly
-      once. The daemon half of the binding is already proved by
-      `a_verified_proof_records_exactly_the_digest_it_covered`, so this item
-      is the write path's obligation, not a new mechanism.
+- [x] **R.15b The write must spend the approval exactly once.** Test:
+      complete `prove` for digest A, submit a create whose canonical digest is
+      B, and assert it is refused and writes nothing; then assert A-then-A
+      succeeds exactly once. The daemon half of the binding is already proved
+      by `a_verified_proof_records_exactly_the_digest_it_covered`, so this
+      item is the write path's obligation, not a new mechanism.
+      Done (R.33): 3.4/3.6 shipped. `src/daemon.rs`'s `GrantCreate` arm
+      re-checks `check_approvable` and spends exactly one approval with
+      `approvals.take(&request.digest(), ...)`; the A-then-B and A-then-A
+      cases now exist both through the handler
+      (`src/daemon/tests.rs::grant_create_is_accepted_only_for_the_digest_the_human_proved`)
+      and over the real socket
+      (`tests/grant_create.rs::grant_create_refuses_a_different_request_than_the_one_proven`).
+      The vault is byte-identical after every refusal and success.
 
 - [x] **R.16 Any session-token holder can occupy all 16 challenge slots and
       block human approval.**
@@ -657,7 +664,7 @@ Rules that apply to every item:
       (`status`/`revoke` are not request types) and the 0600-only token-file
       claim in `MCP.md`.
 
-- [ ] **R.33 TODO R.15b is stale: the property it guards is implemented and
+- [x] **R.33 TODO R.15b is stale: the property it guards is implemented and
       tested.**
       `TODO.md:28-34` keeps `[!]` and "Blocked on TODO 3.4/4.9", but 3.4 and
       3.6 are `[x]`. `src/daemon.rs`'s GrantCreate arm re-checks
@@ -676,6 +683,13 @@ Rules that apply to every item:
       A-then-B `grant_create` case to `tests/grant_create.rs`.
       Test: none beyond the existing tests; the checklist must stop saying
       blocked.
+      Done: R.15b is `[x]` with the evidence. Added
+      `tests/grant_create.rs::grant_create_refuses_a_different_request_than_the_one_proven`:
+      prove A over the real socket, submit B (different expiry, so a
+      different digest) -> `Denied` and a byte-identical vault; then A ->
+      `grant_approved`, still byte-identical; then A again -> `Denied`. It
+      fails against a mutated `Approvals::take` that ignores the digest
+      (`GrantApproved` instead of `Denied`).
 
 - [ ] **R.34 `pmd` checks the canonical program path but execs the raw
       request path, so a symlink swap runs an unlisted program with the

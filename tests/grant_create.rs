@@ -103,6 +103,99 @@ fn grant_create_spends_the_approval_once_without_writing_the_vault() {
     }
 }
 
+/// A proof for request A authorizes exactly A: submitting B is refused, the
+/// refusal does not spend A's approval, and the vault is never written by the
+/// daemon (TODO R.33, the e2e counterpart of the daemon-handler test).
+#[test]
+fn grant_create_refuses_a_different_request_than_the_one_proven() {
+    let fixture = Fixture::new();
+    let child = fixture.start();
+    let socket = fixture.socket();
+    let before = fs::read(&fixture.vault).expect("read vault");
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    let approved = grant_request(now + 600);
+    let other = grant_request(now + 900);
+    assert_ne!(
+        approved.digest().to_hex(),
+        other.digest().to_hex(),
+        "the two requests must have different digests"
+    );
+
+    let nonce = challenge(&socket, &fixture.token);
+    let proof =
+        Proof::compute(fixture.key.as_slice(), &nonce, &approved.digest()).expect("compute proof");
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce,
+                digest: approved.digest(),
+                proof,
+            },
+        ),
+        Response::Proven
+    );
+
+    // A different request is refused and leaves the approval for A waiting.
+    assert_eq!(
+        request(
+            &socket,
+            &fixture.token,
+            &Request::GrantCreate(GrantCreateRequest::from_grant_request(&other)),
+        ),
+        Response::Error(ResponseError::Denied)
+    );
+    assert_eq!(
+        fs::read(&fixture.vault).expect("read vault"),
+        before,
+        "a refused request must not write the vault"
+    );
+
+    // The request the human actually approved still succeeds exactly once.
+    let frame = protocol::encode(
+        &fixture.token,
+        &Request::GrantCreate(GrantCreateRequest::from_grant_request(&approved)),
+    )
+    .expect("encode");
+    let mut stream = UnixStream::connect(&socket).expect("connect");
+    stream.write_all(&frame).expect("write request");
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("shutdown write");
+    let mut answer = Vec::new();
+    stream.read_to_end(&mut answer).expect("read answer");
+    assert_eq!(
+        protocol::decode_response(&answer).expect("decode answer"),
+        Response::GrantApproved
+    );
+    assert_eq!(
+        request(
+            &socket,
+            &fixture.token,
+            &Request::GrantCreate(GrantCreateRequest::from_grant_request(&approved)),
+        ),
+        Response::Error(ResponseError::Denied),
+        "the approval is spent by its first use"
+    );
+    assert_eq!(
+        fs::read(&fixture.vault).expect("read vault"),
+        before,
+        "grant_create must not write the vault"
+    );
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    let output = child.wait_with_output().expect("wait for pmd");
+    assert!(output.status.success());
+}
+
 /// Ask for a challenge nonce, failing loudly on anything else.
 fn challenge(socket: &Path, token: &SessionToken) -> ChallengeNonce {
     match request(socket, token, &Request::Challenge) {
