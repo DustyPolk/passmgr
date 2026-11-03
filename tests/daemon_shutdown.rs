@@ -1,8 +1,9 @@
 //! Cancellation and shutdown tests for the unlock daemon (`pmd`).
 //!
-//! `lock`, `SIGTERM`/`SIGINT` and the idle timeout must kill every in-flight
-//! child (and its process group) and leave no socket, session file or key
-//! behind, even when a grandchild keeps the output pipes open.
+//! `lock` and `SIGTERM`/`SIGINT` must kill every in-flight child (and its
+//! process group) and leave no socket, session file or key behind, even when a
+//! grandchild keeps the output pipes open. The idle timeout wipes the key when
+//! nothing is running, but never kills a command that is still in flight.
 
 #![cfg(unix)]
 
@@ -11,10 +12,11 @@ mod support;
 use support::*;
 
 use std::fs;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use passmgr::protocol::{Request, Response};
+use passmgr::protocol::{Request, Response, RunExit, RunFrame};
 use passmgr::socket::RuntimePaths;
 
 /// A `run` whose child reports its pid, closes both output pipes and then
@@ -131,33 +133,67 @@ fn sigterm_cancels_a_run_whose_child_keeps_running() {
     wait_for_process_exit(pid);
 }
 
+/// The idle deadline must not kill a command that is still running. A run
+/// accepted 0.5 s before the deadline keeps the daemon (and its key) alive
+/// until the child finishes; then the timer starts again.
 #[test]
-fn idle_timeout_cancels_a_run_whose_child_keeps_running() {
+fn a_run_in_flight_is_not_killed_by_the_idle_timeout() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start_with(&["--idle-timeout", "3"]);
+    let socket = fixture.socket();
+
+    // Let the idle deadline get close before starting a command that outlives
+    // it by seconds.
+    std::thread::sleep(Duration::from_millis(2_500));
+    let ask = run_request(
+        &fixture.reference,
+        "API_KEY",
+        &["/bin/sh", "-c", "sleep 5; printf done"],
+    );
+    let (frames, _) = read_run(&socket, &fixture.token, &ask);
+
+    assert_eq!(
+        stdout_bytes(&frames),
+        b"done",
+        "the idle timeout killed the run: {frames:?}"
+    );
+    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert!(
+        child.try_wait().expect("try_wait").is_none(),
+        "the daemon stopped while the run was still going"
+    );
+
+    // With no run in flight, the idle timer expires normally.
+    let status = wait_for_exit(&mut child, WAIT);
+    assert!(status.success(), "pmd exit status after idle: {status:?}");
+    assert!(!socket.exists(), "an idle timeout removes the socket");
+}
+
+/// The idle timeout wipes the key when no run is in flight: the socket and the
+/// session file are gone and a reconnect is refused.
+#[test]
+fn idle_timeout_removes_the_socket_and_session_file_and_refuses_a_reconnect() {
     let fixture = Fixture::new();
     let mut child = fixture.start_with(&["--idle-timeout", "2"]);
     let socket = fixture.socket();
-    let pid_file = fixture.temp_path("child.pid");
-    let ask = detached_output_run(&fixture, &pid_file);
-    let token = fixture.token.clone();
-    let run_socket = socket.clone();
-    let run = std::thread::spawn(move || read_run(&run_socket, &token, &ask));
+    let session_path = store_session(&fixture);
 
-    let pid = wait_for_pid(&pid_file);
     let status = wait_for_exit(&mut child, WAIT);
     assert!(status.success(), "pmd exit status after idle: {status:?}");
-
-    let (frames, _) = run.join().expect("run thread");
-    assert!(
-        frames.is_empty(),
-        "an idle-cancelled run emits no exit frame"
-    );
-    wait_for_process_exit(pid);
     assert!(!socket.exists(), "an idle timeout removes the socket");
+    assert!(
+        !session_path.exists(),
+        "an idle timeout removes the session file"
+    );
+    assert!(
+        UnixStream::connect(&socket).is_err(),
+        "a daemon that went idle must not accept a reconnect"
+    );
 }
 
 /// A `run` whose child exits at once but leaves a grandchild (`sleep`) holding
 /// both output pipes, so the relay never sees EOF. This is the shape that made
-/// `lock`, `SIGTERM` and the idle timeout wait for the grandchild to exit.
+/// `lock` and `SIGTERM` wait for the grandchild to exit.
 fn grandchild_output_run(fixture: &Fixture, pid_file: &Path) -> Request {
     let script = format!("sleep 30 & echo $! > {}", pid_file.display());
     run_request(&fixture.reference, "API_KEY", &["/bin/sh", "-c", &script])
@@ -242,33 +278,4 @@ fn sigterm_cancels_a_run_whose_grandchild_holds_the_pipes() {
     wait_for_process_exit(grandchild);
     assert!(!socket.exists(), "SIGTERM removes the socket");
     assert!(!session_path.exists(), "SIGTERM removes the session file");
-}
-
-#[test]
-fn idle_timeout_cancels_a_run_whose_grandchild_holds_the_pipes() {
-    let fixture = Fixture::new();
-    let mut child = fixture.start_with(&["--idle-timeout", "2"]);
-    let socket = fixture.socket();
-    let session_path = store_session(&fixture);
-    let pid_file = fixture.temp_path("grandchild.pid");
-    let ask = grandchild_output_run(&fixture, &pid_file);
-    let token = fixture.token.clone();
-    let run_socket = socket.clone();
-    let run = std::thread::spawn(move || read_run(&run_socket, &token, &ask));
-
-    let grandchild = wait_for_pid(&pid_file);
-    let status = wait_for_exit(&mut child, WAIT);
-    assert!(status.success(), "pmd exit status after idle: {status:?}");
-
-    let (frames, _) = run.join().expect("run thread");
-    assert!(
-        frames.is_empty(),
-        "an idle-cancelled run emits no exit frame"
-    );
-    wait_for_process_exit(grandchild);
-    assert!(!socket.exists(), "an idle timeout removes the socket");
-    assert!(
-        !session_path.exists(),
-        "an idle timeout removes the session file"
-    );
 }

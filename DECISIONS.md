@@ -267,15 +267,19 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Idle timeout: default 900 s (`pmd --idle-timeout SECS`,
   `passmgr unlock --idle-timeout SECS`); zero is refused. Activity means a
   successfully decoded request after the peer check; malformed frames and
-  rejected tokens do not count.
-- `lock`, `SIGTERM`, `SIGINT` and the idle timeout all wipe the key, remove
+  rejected tokens do not count. Accepting a `run` is activity, and the idle
+  deadline is suspended while any run is in flight: a command longer than the
+  remaining budget finishes instead of being killed mid-work. Such a run is
+  bounded by `lock`/signals (and, from TODO 4.5, the run timeout). When the
+  last run finishes, the timer starts again.
+- `lock`, `SIGTERM` and `SIGINT` wipe the key, remove
   the socket, and remove the session file only if it still holds this
   daemon's token. A `run` is served on a worker thread so the accept loop
   stays responsive; those events set a shared cancel flag, and every in-flight
   child is killed and reaped before the daemon drops the key and exits. An
   interrupted run writes no terminal frame: the client sees EOF and reports a
-  `Daemon` error. A finished run refreshes the idle timer, but a run that is
-  still going does not keep the key alive past the idle timeout.
+  `Daemon` error. The idle timeout uses the same wipe path, but only once no
+  run is in flight.
 - Each child is spawned into its own process group (`setpgid(0, 0)`), and a
   cancel kills the group with `SIGTERM` then, after a 100 ms grace, `SIGKILL`.
   The pipe readers poll the cancel flag before every blocking read, so a

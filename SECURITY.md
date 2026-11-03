@@ -50,6 +50,9 @@ inherits every limit below.
   (`RLIMIT_CORE=0`, inherited by its children) and, on Linux, sets
   `PR_SET_DUMPABLE=0`. Every request is checked against the peer uid before it
   is read; malformed and unauthorized requests never refresh the idle timer.
+  Accepting a `run` does refresh it, and the idle deadline is suspended while
+  a run is in flight, so a long command is not killed mid-work; `lock` and
+  signals still cancel it.
 - **Vault.** Argon2id + AES-256-GCM, authenticated header, atomic 0600 writes,
   zeroized keys and plaintext. Mutating commands hold an exclusive `flock` on
   the sidecar `<vault>.lock` across the whole read-modify-write, so concurrent

@@ -1,3 +1,38 @@
+## 2026-11-02 — An in-flight run suspends the idle timeout (TODO R.7)
+
+- `src/daemon.rs`: `Handled::Run` now sets `last_activity = Instant::now()`,
+  and the idle check is `runs.is_empty() && last_activity.elapsed() >=
+  idle_timeout`. A command longer than the remaining budget finishes; the
+  timer restarts when the last run is joined (the join already refreshes it).
+  `lock`/`SIGTERM`/`SIGINT` still cancel an in-flight run as before.
+- Chose to suspend the deadline rather than merely refresh it on accept:
+  refreshing alone would still kill a run at the *next* deadline. Until TODO
+  4.5 adds a run timeout, an in-flight run is bounded only by `lock`/signals
+  (and by the human's own command). A session token holder can keep the key
+  alive with a long child, but that holder is already same-user and `lock`
+  always works; `DECISIONS.md` records the trade-off.
+- Tests: replaced the two idle tests that depended on killing an in-flight
+  run. `tests/daemon_shutdown.rs` now has
+  `a_run_in_flight_is_not_killed_by_the_idle_timeout` (idle 3 s, wait 2.5 s,
+  a 5 s child prints `done`; asserts the output and terminal frame, that
+  `pmd` is alive afterwards, then that it exits on the restarted timer) and
+  `idle_timeout_removes_the_socket_and_session_file_and_refuses_a_reconnect`
+  (no in-flight run). The grandchild tests now cover `lock` and `SIGTERM`
+  only, per the R.6 note. Verified the new in-flight test fails at HEAD with
+  `the idle timeout killed the run: []`.
+- Docs: `DECISIONS.md` (idle semantics), `README.md`, `SECURITY.md`,
+  `src/daemon.rs` module/`run` docs, `--help` text and
+  `tests/fixtures/help.txt`.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` green (173/34/28/16/6/8/13/8; CLI suite ~143 s).
+  `cargo audit` not installed; skipped.
+- **Next iteration must know:** R.8 (concurrency cap) is next. Adding a run
+  timeout (TODO 4.5) must interact with this rule: the timeout, not the idle
+  deadline, should bound an in-flight run, and its cancellation must keep the
+  existing "no terminal frame on cancel" behavior. `tests/daemon.rs`'s
+  `idle_timeout_wipes_the_key_and_stops_the_daemon` and
+  `successful_requests_refresh_the_idle_timeout` still hold.
+
 ## 2026-11-02 — Kill the whole process group on cancel; answer `lock` after the wipe (TODO R.6)
 
 - `src/runner.rs`: the child now gets its own process group (`pre_exec` +

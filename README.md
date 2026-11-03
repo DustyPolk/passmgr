@@ -192,12 +192,14 @@ names (`PATH`, `LD_*`, `BASH_ENV`, ...) are refused with exit code 5. The
 secret never crosses the socket to the CLI: only references and
 already-redacted output do.
 
-If the daemon is locked, receives `SIGTERM`/`SIGINT`, or goes idle while a
-command is running, it kills that command's whole process group (`SIGTERM`,
-then `SIGKILL` after a 100 ms grace) and the run ends as cancelled; a
-grandchild that inherited the output pipes cannot keep it alive. `passmgr
-lock` prints its confirmation only after the daemon has joined those
-children, removed the socket and session file, and zeroized the key.
+If the daemon is locked or receives `SIGTERM`/`SIGINT`, it kills that
+command's whole process group (`SIGTERM`, then `SIGKILL` after a 100 ms grace)
+and the run ends as cancelled; a grandchild that inherited the output pipes
+cannot keep it alive. `passmgr lock` prints its confirmation only after the
+daemon has joined those children, removed the socket and session file, and
+zeroized the key. The idle timeout does not interrupt a run that is still in
+flight (a build or test suite must not die at the deadline); it wipes the key
+once no command is running, with the timer restarting after the last run.
 
 `run` is the supported way to give an agent a credential. The agent supplies
 the reference (from `list --json`) and a command, never the value.

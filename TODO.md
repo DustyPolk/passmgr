@@ -48,7 +48,7 @@ come before Phase 3.
       each blocking read instead of closing fds, the child gets its own process
       group via `setpgid`, and `lock`'s answer is written by `run` after the
       join, the unlink and the key drop (see PROGRESS.md 2026-11-02 R.6).
-- [ ] **R.7 An in-flight `run` is not activity, so it is killed at the idle
+- [x] **R.7 An in-flight `run` is not activity, so it is killed at the idle
       deadline.**
       `src/daemon.rs:421` pushes a worker for `Handled::Run` without touching
       `last_activity`; only `Handled::Served` (`src/daemon.rs:416`) and a
@@ -66,6 +66,13 @@ come before Phase 3.
       the idle timeout" and the R.1 test. Test: idle timeout 3 s, wait 2.5 s,
       run a 5 s child that prints `done`; assert `done` is relayed and the
       daemon exits only after it finishes.
+      Done: `Handled::Run` refreshes `last_activity` and the idle check is
+      gated on `runs.is_empty()`. The two idle-cancel tests that relied on
+      killing an in-flight run were replaced: `tests/daemon_shutdown.rs` now
+      has `a_run_in_flight_is_not_killed_by_the_idle_timeout` and an idle
+      no-run test that also proves the socket, session file and reconnect are
+      gone. Until TODO 4.5 lands, an in-flight run is bounded only by
+      `lock`/signals; see PROGRESS.md.
 - [ ] **R.8 No bound on concurrent runs, worker threads or children.**
       `src/daemon.rs:421` spawns one worker per accepted `Run` (plus two
       reader threads and one child with the secret in its env) with no cap.

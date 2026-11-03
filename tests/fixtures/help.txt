@@ -159,7 +159,8 @@ Notes:
     session in that directory (mode 0600); 'lock' removes it. The token is a
     local convenience, not a human/agent boundary. The daemon stops on
     'lock', on SIGTERM/SIGINT, or after the idle timeout (default 15 minutes,
-    set with 'unlock --idle-timeout SECS').
+    set with 'unlock --idle-timeout SECS'). The idle timeout is suspended
+    while a command is running, so a long run is not killed mid-work.
   - 'run' needs the unlock daemon ('run' refuses with exit code 1 when it is
     not running). Its child receives only the fixed inherited environment
     listed above, then NAME; it never inherits the rest of the caller's

@@ -25,6 +25,9 @@
 //! `SIGTERM`/`SIGINT`, a successful `lock`, or
 //! [`DEFAULT_IDLE_TIMEOUT`] (configurable) without a successfully handled
 //! request wipe the key, remove the socket and the session file, and exit.
+//! The idle deadline is suspended while a run is in flight, so a long command
+//! is never killed mid-work; accepting a run refreshes the timer, which starts
+//! again when the last run finishes.
 //! Each `run` is served on its own worker thread so the accept loop stays
 //! responsive: `lock`, `ping` and a signal are observed even while a child is
 //! still running. Every in-flight child is killed and reaped -- together with
@@ -361,7 +364,9 @@ pub fn shutdown_requested() -> bool {
 ///
 /// `idle_timeout` is measured from the last authorized, successfully decoded
 /// request, not from the last byte received: a malformed, half-sent or
-/// unauthorized frame must not extend the key's lifetime.
+/// unauthorized frame must not extend the key's lifetime. Accepting a run
+/// counts as activity, and the deadline is suspended while any run is in
+/// flight, so a command longer than the remaining budget still finishes.
 ///
 /// On every exit path the session file is removed, but only if it still holds
 /// `token`: a newer session's file is never deleted.
@@ -408,7 +413,12 @@ pub fn run(
                     index += 1;
                 }
             }
-            if shutdown_requested() || last_activity.elapsed() >= idle_timeout {
+            // A run that is still going suspends the idle deadline: a build
+            // or test suite must not be killed because it outlived the
+            // remaining budget. It is bounded by `lock`/signals (and, from
+            // TODO 4.5, the run timeout) instead.
+            let idle_expired = runs.is_empty() && last_activity.elapsed() >= idle_timeout;
+            if shutdown_requested() || idle_expired {
                 // Out of activity or asked to stop: wipe the key and exit.
                 break;
             }
@@ -429,8 +439,11 @@ pub fn run(
                         Handled::Rejected => {}
                         // The request is authenticated and parsed; the child
                         // runs on a worker so the accept loop can still serve
-                        // `lock`, `ping` and a shutdown signal.
+                        // `lock`, `ping` and a shutdown signal. Accepting a run
+                        // is activity, and the idle timeout stays suspended
+                        // until the last run finishes.
                         Handled::Run(stream, request) => {
+                            last_activity = Instant::now();
                             runs.push(scope.spawn(move || {
                                 serve_run(stream, &request, vault_path, key, cancel_ref);
                             }));
