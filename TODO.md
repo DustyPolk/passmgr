@@ -81,10 +81,13 @@ Rules that apply to every item:
       marker would itself contain the value, a run of a byte absent from the
       value is used instead. Best-effort: a hostile child that holds the value
       can still exfiltrate it by other channels.)
-- [ ] **2.6b Protocol streaming `run` responses.** `stdout`, `stderr` and `exit`
+- [x] **2.6b Protocol streaming `run` responses.** `stdout`, `stderr` and `exit`
       frames with hex-encoded data (arbitrary bytes survive JSON), plus stable
       failure codes (`not_found`, `spawn_failed`). Tests: round-trip of binary
       payloads, chunk-size cap, unknown frame types rejected without panic.
+      (`RunFrame` is separate from `Response`; 16 KiB raw chunk cap; `exit`
+      carries `code` xor `signal`; protocol stays v2; response code moved to
+      `src/protocol/response.rs`.)
 - [ ] **2.6c Daemon executes `run`.** Decrypt, resolve the `pm://` ref, spawn the
       child with only the requested variable injected, stream redacted
       stdout/stderr, return its exit code. Tests: child sees the variable; the

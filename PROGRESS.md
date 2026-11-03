@@ -1,3 +1,36 @@
+## 2026-11-02 — Protocol streaming `run` responses (TODO 2.6b)
+
+- `src/protocol/response.rs` (new; moved out of `src/protocol.rs`, which is now
+  `src/protocol/mod.rs`) adds `RunFrame` (`Stdout`/`Stderr`/`Exit`/`Error`),
+  `RunExit` (`Code` or `Signal`), `RunStream` ordering state, and
+  `encode_run_frame`/`decode_run_frame`. `Response`/`ResponseError` and the
+  one-shot encoders moved with them; `crate::protocol::*` re-exports the same
+  public API.
+- Wire shape: `{"version":2,"response":{"type":"stdout","data":"<lowercase
+  hex>"}}`; `exit` carries exactly one of `code` 0..=255 or `signal` 1..=127;
+  `error` carries a stable code. Raw chunks are capped at `MAX_CHUNK_BYTES`
+  (16 KiB) on encode *and* decode, and the cap is checked before hex decoding.
+  `not_found` is added and deliberately also covers out-of-scope refs (no
+  existence oracle); `spawn_failed` is the child-spawn error.
+- Decisions: `RunFrame` is a distinct type from `Response` so one-shot and
+  streaming responses cannot be confused; nothing follows a terminal frame
+  (`RunStream`); signal deaths stay distinct from 128+N; protocol version
+  stays 2 because only new response types were added, no request change. All
+  recorded in `DECISIONS.md`.
+- Tests (lib `protocol`, 34 pass): binary/UTF-8-invalid payload round-trips,
+  chunk cap at/over the limit and hand-built oversized frames, malformed run
+  frames (wrong types, non-hex/uppercase/odd hex, unknown codes, version 1,
+  trailing bytes), one-shot/stream confusion, `RunStream` after-terminal
+  rejection, stable error codes, and `Debug` never rendering child bytes.
+- Gate: fmt clean, clippy `-D warnings` clean, full `cargo test` passes
+  (148 lib + 20 bin + 28 CLI + 12 daemon + 8 unlock). `cargo audit` is not
+  installed; skipped, not installed.
+- **Next iteration must know:** 2.6c owns the daemon side: answer `Request::Run`
+  by streaming `RunFrame`s through `encode_run_frame` (the daemon still
+  returns `unsupported` today) and redact before encoding. `src/protocol/mod.rs`
+  is 1045 lines (request/framing + its tests) and `response.rs` 776; split
+  further only if it grows. Do not add a plaintext-bearing frame variant.
+
 ## 2026-11-02 — Split the CLI into `src/cli/` modules (TODO H.2)
 
 - `src/main.rs` is now 7 lines (`mod cli;` + `fn main` -> `cli::main`).

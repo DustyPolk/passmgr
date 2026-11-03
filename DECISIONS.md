@@ -184,10 +184,21 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - **No request type returns plaintext, ever.** Any same-user process can reach
   the socket, so client-side checks protect nothing; every authorization
   decision is made in `pmd`.
-- Responses today: `pong`, `locked`, or a fixed error code `bad_request`,
-  `unsupported`, `unauthorized`. Streaming `stdout`/`stderr`/`exit` frames and
-  the `not_found`/`spawn_failed` codes are planned (2.6b). Errors never echo
-  field values or the token.
+- Responses: one-shot `pong`, `locked`, or a fixed error code (`bad_request`,
+  `unsupported`, `unauthorized`, `not_found`, `spawn_failed`), and for `run` a
+  stream of `RunFrame`s: zero or more `stdout`/`stderr` chunks (lowercase hex
+  of at most 16 KiB raw bytes each), then exactly one terminal `exit` or
+  `error`. Errors never echo field values or the token.
+- `RunFrame` is a separate type from `Response`, so a `ping` can never answer
+  with child output and a `run` stream can never answer `pong`. `RunStream`
+  refuses any frame after a terminal one.
+- An `exit` frame carries either `code` (0..=255) or `signal` (1..=127), never
+  both; "killed by signal N" stays distinct from exit code 128+N.
+- `not_found` also covers a reference outside the caller's scope, so a client
+  cannot use the daemon as an existence oracle for refs it may not use.
+- Protocol code layout: `src/protocol/mod.rs` owns framing, requests and
+  errors; `src/protocol/response.rs` owns one-shot responses and the `run`
+  stream. `crate::protocol::*` re-exports the public API unchanged.
 - Session token: 32 OS-random bytes as 64 lowercase hex in
   `$XDG_RUNTIME_DIR/passmgr/session`. Loading requires a regular 0600 file
   owned by the user, opened `O_NOFOLLOW`, at most 512 bytes; anything else is
