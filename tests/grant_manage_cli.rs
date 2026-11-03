@@ -326,3 +326,76 @@ fn grant_revoke_reports_unknown_ids_and_a_missing_daemon() {
         stderr(&output)
     );
 }
+
+/// A `not_found` answer to `--all` is a clean error, not a panic: `--all` has
+/// no id to name, and any same-user process can replace the socket and answer
+/// whatever it likes (TODO R.27).
+#[test]
+fn grant_revoke_all_reports_a_not_found_answer_without_panicking() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    let _guard = serial();
+    let fixture = Fixture::with_grants(1);
+    let paths = fixture.daemon_paths();
+    let token = passmgr::token::SessionToken::generate().expect("session token");
+    passmgr::session::store(&paths, &token).expect("session file");
+    let listener = UnixListener::bind(paths.socket()).expect("stub socket");
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream.set_read_timeout(Some(WAIT)).expect("read timeout");
+        let mut decoder = passmgr::protocol::FrameDecoder::new();
+        let mut buffer = [0u8; 4096];
+        let authenticated = loop {
+            let read = stream.read(&mut buffer).expect("read request");
+            assert!(read > 0, "the client closed before sending a request");
+            decoder.push(&buffer[..read]).expect("valid frame");
+            let Some(body) = decoder.next_frame().expect("decode frame") else {
+                continue;
+            };
+            let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&body);
+            break passmgr::protocol::decode(&frame).expect("decode request");
+        };
+        assert!(
+            matches!(
+                authenticated.request(),
+                passmgr::protocol::Request::GrantRevoke(passmgr::protocol::GrantRevokeRequest::All)
+            ),
+            "the CLI must ask to revoke every grant"
+        );
+        let answer = passmgr::protocol::encode_response(&passmgr::protocol::Response::Error(
+            passmgr::protocol::ResponseError::NotFound,
+        ))
+        .expect("encode response");
+        stream.write_all(&answer).expect("write response");
+    });
+
+    let output = run_with_env(
+        &["grant", "revoke", "--all"],
+        "",
+        &[("XDG_RUNTIME_DIR", fixture.runtime_text())],
+    );
+    server.join().expect("stub server finished");
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("the unlock daemon refused the revocation (not_found)"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        !stderr(&output).contains("panicked at"),
+        "an error answer must not panic: {}",
+        stderr(&output)
+    );
+    assert!(
+        !stderr(&output).contains("not_found implies an id"),
+        "{}",
+        stderr(&output)
+    );
+    // The stub wrote nothing, and the CLI never touched the vault.
+    let vault = Vault::open(&fixture.vault, MASTER).expect("open vault");
+    assert!(!vault.grants()[0].is_revoked());
+}

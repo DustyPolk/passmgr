@@ -459,9 +459,17 @@ pub(crate) fn command_grant_revoke(
     let revoked = match response {
         Response::GrantRevoked { revoked } => revoked,
         Response::Error(ResponseError::NotFound) => {
-            return Err(Error::GrantNotFound(
-                options.id.expect("not_found implies an id"),
-            ));
+            return Err(match options.id {
+                // An id the daemon does not know is a not-found (exit 3).
+                Some(id) => Error::GrantNotFound(id),
+                // `--all` carries no id, so a `not_found` answer cannot name
+                // one. Never `expect` here: any same-user process can replace
+                // the socket and answer whatever it likes (TODO R.27).
+                None => Error::Daemon(format!(
+                    "the unlock daemon refused the revocation ({})",
+                    ResponseError::NotFound.code()
+                )),
+            });
         }
         Response::Error(error) => {
             return Err(Error::Daemon(format!(

@@ -412,7 +412,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   and KDF parameters so the hot key stays valid. Revoking an already-revoked
   id is a successful no-op (`revoked: 0`), an unknown id is `not_found`, and
   `--all` targets only active grants, so the count never includes grants that
-  were already revoked.
+  were already revoked. The CLI maps a `not_found` answer to exit 3 only when
+  it named an id; `--all` has no id to name, so that answer becomes a daemon
+  error (exit 1) and never a panic, since any same-user process may replace
+  the socket (TODO R.27).
 - The presence proof is implemented in `src/presence.rs` (TODO 3.3). The MAC
   message is `DOMAIN || nonce || digest`, all fixed length, so the fields
   cannot be shifted into one another. The daemon issues nonces through the

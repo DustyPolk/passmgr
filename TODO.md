@@ -468,7 +468,7 @@ Rules that apply to every item:
       containing a hidden character is refused before any summary, and that
       answering `n` sends no `challenge`/`prove` and leaves no token file.
 
-- [ ] **R.27 `grant revoke --all` panics if the daemon answers `not_found`.**
+- [x] **R.27 `grant revoke --all` panics if the daemon answers `not_found`.**
       In the `Response::Error(ResponseError::NotFound)` arm,
       `src/cli/grant.rs:369` does
       `Err(Error::GrantNotFound(options.id.expect("not_found implies an id")))`.
@@ -486,6 +486,11 @@ Rules that apply to every item:
       Test: a stub `UnixListener` reads the `grant_revoke` frame and writes a
       `not_found` error; assert a nonzero exit, a normal message, and no
       `panicked at` or `not_found implies an id` in stderr.
+      Done: the arm matches `options.id`: `Some(id)` stays `GrantNotFound`
+      (exit 3), `None` (which `--all` and only `--all` produces) becomes
+      `Error::Daemon("the unlock daemon refused the revocation (not_found)")`
+      and exits 1. The new test fails against the old `expect` (exit 101 and
+      `not_found implies an id`).
 
 - [ ] **R.28 `grant revoke --all` revokes expired and exhausted grants while
       the help, decisions and test say "active".**

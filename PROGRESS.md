@@ -1,3 +1,32 @@
+## 2026-11-03 — Do not panic when `revoke --all` gets `not_found` (TODO R.27)
+
+- `src/cli/grant.rs` (`command_grant_revoke`): the
+  `Response::Error(ResponseError::NotFound)` arm now matches `options.id`
+  instead of calling `.expect("not_found implies an id")`. `Some(id)` still
+  gives `Error::GrantNotFound(id)` (exit 3); `None`, which only `--all`
+  produces, gives `Error::Daemon("the unlock daemon refused the revocation
+  (not_found)")` (exit 1). Any same-user process can replace the socket, so a
+  hostile or buggy peer must never turn into a panic and a backtrace.
+- No behavior change for a real daemon: `revoke_grants` (`src/daemon.rs`)
+  answers `not_found` only for an id, so `--all` keeps its current success
+  paths.
+- Test: `tests/grant_manage_cli.rs::
+  grant_revoke_all_reports_a_not_found_answer_without_panicking` binds a stub
+  `UnixListener`, decodes the frame and asserts it is
+  `GrantRevokeRequest::All`, answers the encoded `not_found` error, then
+  requires exit 1, the clean message, no `panicked at`, no
+  `not_found implies an id`, and an untouched vault. Verified it fails
+  (exit 101, the panic text) against the previous code.
+- Docs: `DECISIONS.md` records the `--all` + `not_found` mapping; TODO R.27 is
+  checked off with a Done note.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  the full `cargo test` pass. `cargo audit` is not installed; skipped as
+  instructed.
+- **Next iteration must know:** R.28 (the "active" wording of `--all`) and
+  R.29 (`--out` escaping) are the next Phase R items and touch the same file;
+  neither was changed here. `tests/grant_manage_cli.rs` is now ~420 lines and
+  has the stub-socket pattern this test needs if R.28/R.29 want one.
+
 ## 2026-11-03 — Show and confirm a grant before creating it (TODO R.26)
 
 - `pm grant create` now builds the `GrantRequest` first and prints it to
