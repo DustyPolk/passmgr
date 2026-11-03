@@ -28,8 +28,9 @@ use getrandom::fill;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::protocol::MAX_PATH_BYTES;
 use crate::store::{EntryId, MAX_TAGS_PER_CREDENTIAL, MAX_TIMESTAMP_UNIX, normalize_tags};
+
+use validate::{validate_commands, validate_label};
 
 /// Bytes in a grant id (rendered as 32 lowercase hex characters).
 pub const GRANT_ID_BYTES: usize = 16;
@@ -493,6 +494,47 @@ impl fmt::Display for Denied {
 
 impl std::error::Error for Denied {}
 
+/// Why a grant mutation did not happen.
+///
+/// Deliberately separate from [`Denied`]: `Denied` answers "may this request
+/// use the grant?" and is rendered in agent-facing messages and the audit log.
+/// A timestamp past what the vault format can hold is a caller or clock bug,
+/// not an authorization outcome, so it gets its own variant and nothing was
+/// recorded when it is returned.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UpdateError {
+    /// The grant is revoked, expired or used up; nothing was recorded.
+    Denied(Denied),
+    /// `now` is past [`MAX_TIMESTAMP_UNIX`] (31 Dec 9999). Storing it would
+    /// make every later open of the vault fail, so nothing was recorded.
+    TimestampOutOfRange,
+}
+
+impl fmt::Display for UpdateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Denied(denied) => denied.fmt(f),
+            Self::TimestampOutOfRange => write!(
+                f,
+                "timestamp is past the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds the vault can store"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for UpdateError {}
+
+/// Refuse a timestamp the payload format cannot represent.
+///
+/// `Grant::create` checks its own `now`; this is the same bound for the two
+/// mutators, so no grant this module produces can fail to survive a save.
+fn check_storable(now: u64) -> std::result::Result<(), UpdateError> {
+    if now > MAX_TIMESTAMP_UNIX {
+        return Err(UpdateError::TimestampOutOfRange);
+    }
+    Ok(())
+}
+
 /// Validated input for [`Grant::create`]. Maps to the flags of
 /// `pm grant create` (TODO 3.4) and to an approved access request (4.9).
 #[derive(Clone)]
@@ -614,6 +656,31 @@ impl Grant {
     /// timestamps beyond the maximum this build can represent. Errors are
     /// `InvalidInput`; the payload decoder maps them to `MalformedVault`.
     pub fn from_stored(stored: StoredGrant) -> Result<Self> {
+        Self::check_stored(&stored)?;
+        Ok(Self {
+            id: stored.id,
+            token_hash: stored.token_hash,
+            label: stored.label,
+            scope: stored.scope,
+            commands: stored.commands,
+            capabilities: stored.capabilities,
+            created: stored.created,
+            expires_at: stored.expires_at,
+            max_uses: stored.max_uses,
+            uses: stored.uses,
+            revoked_at: stored.revoked_at,
+            last_used: stored.last_used,
+        })
+    }
+
+    /// Check every invariant a stored grant must satisfy, without building it.
+    ///
+    /// [`Grant::from_stored`] runs this on every decode, and `store::encode`
+    /// runs it on [`Grant::to_stored`] output before writing a single byte, so
+    /// the payload writer can never emit a grant its own reader would refuse
+    /// (TODO R.17). A failure here means the caller holds a `Grant` that
+    /// cannot be persisted, not that the stored bytes are corrupt.
+    pub fn check_stored(stored: &StoredGrant) -> Result<()> {
         for (name, value) in [
             ("created", stored.created),
             ("expires_at", stored.expires_at),
@@ -654,7 +721,7 @@ impl Grant {
             ));
         }
         let specified = stored.commands.len();
-        let commands = validate_commands(stored.commands)?;
+        let commands = validate_commands(stored.commands.clone())?;
         if commands.len() != specified {
             return Err(Error::InvalidInput(
                 "a stored grant lists the same command twice".into(),
@@ -676,20 +743,27 @@ impl Grant {
                 stored.uses
             )));
         }
-        Ok(Self {
-            id: stored.id,
-            token_hash: stored.token_hash,
-            label: stored.label,
-            scope: stored.scope,
-            commands,
-            capabilities: stored.capabilities,
-            created: stored.created,
-            expires_at: stored.expires_at,
-            max_uses: stored.max_uses,
-            uses: stored.uses,
-            revoked_at: stored.revoked_at,
-            last_used: stored.last_used,
-        })
+        Ok(())
+    }
+
+    /// The stored form of this grant: exactly the fields the payload codec
+    /// writes. `store::encode` validates it with [`Grant::check_stored`]
+    /// before writing, so an unserializable grant can never reach the vault.
+    pub fn to_stored(&self) -> StoredGrant {
+        StoredGrant {
+            id: self.id,
+            token_hash: self.token_hash,
+            label: self.label.clone(),
+            scope: self.scope.clone(),
+            commands: self.commands.clone(),
+            capabilities: self.capabilities,
+            created: self.created,
+            expires_at: self.expires_at,
+            max_uses: self.max_uses,
+            uses: self.uses,
+            revoked_at: self.revoked_at,
+            last_used: self.last_used,
+        }
     }
 
     pub fn id(&self) -> GrantId {
@@ -794,22 +868,29 @@ impl Grant {
     }
 
     /// Record one use. Refuses an inactive grant so a caller can never count a
-    /// use it was not authorized to make.
-    pub fn mark_used(&mut self, now: u64) -> std::result::Result<(), Denied> {
-        self.check_active(now)?;
+    /// use it was not authorized to make, and refuses a `now` the vault format
+    /// cannot store, so no recorded use can make the vault unreadable.
+    pub fn mark_used(&mut self, now: u64) -> std::result::Result<(), UpdateError> {
+        check_storable(now)?;
+        self.check_active(now).map_err(UpdateError::Denied)?;
         self.uses = self.uses.saturating_add(1);
         self.last_used = Some(now);
         Ok(())
     }
 
-    /// Revoke the grant. Idempotent: the first revocation time is kept.
-    pub fn revoke(&mut self, now: u64) {
+    /// Revoke the grant. Idempotent: the first revocation time is kept. A
+    /// `now` the vault format cannot store is refused and changes nothing.
+    pub fn revoke(&mut self, now: u64) -> std::result::Result<(), UpdateError> {
+        check_storable(now)?;
         if self.revoked_at.is_none() {
             self.revoked_at = Some(now);
         }
+        Ok(())
     }
 
     fn check_active(&self, now: u64) -> std::result::Result<(), Denied> {
+        // Callers reach here only through `mark_used`, which bounds `now`
+        // first; the comparison is still safe for any `u64`.
         if self.revoked_at.is_some() {
             return Err(Denied::Revoked);
         }
@@ -842,117 +923,55 @@ impl fmt::Debug for Grant {
     }
 }
 
-fn validate_label(label: &str) -> Result<()> {
-    if label.trim().is_empty() {
-        return Err(Error::InvalidInput("a grant needs a label".into()));
+mod validate;
+
+pub use validate::validate_field_name;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn grant() -> Grant {
+        Grant::create(
+            GrantSpec {
+                label: "deploy prod".to_owned(),
+                scope: Scope::new(vec![EntryId::generate().unwrap()], Vec::new(), None).unwrap(),
+                commands: vec![PathBuf::from("/usr/bin/env")],
+                capabilities: Capabilities::RUN,
+                expires_at: 1_700_003_600,
+                max_uses: Some(2),
+            },
+            TokenHash::of(b"canary-store-symmetry-token"),
+            1_700_000_000,
+        )
+        .unwrap()
     }
-    if label.len() > MAX_LABEL_BYTES {
-        return Err(Error::InvalidInput(format!(
-            "a grant label holds at most {MAX_LABEL_BYTES} bytes"
-        )));
-    }
-    if label.chars().any(is_hidden_or_reordering) {
-        return Err(Error::InvalidInput(
-            "a grant label must not contain control, bidi or zero-width characters".into(),
+
+    /// The payload writer runs the reader's checks, so a `Grant` the decoder
+    /// would refuse can never be written. Without this, `Vault::save` would
+    /// replace a good vault with one that every later open rejects (R.17).
+    #[test]
+    fn the_payload_writer_refuses_a_grant_its_reader_would_reject() {
+        let mut revoked = grant();
+        revoked.revoked_at = Some(MAX_TIMESTAMP_UNIX + 1);
+        assert!(Grant::from_stored(revoked.to_stored()).is_err());
+        assert!(matches!(
+            crate::store::encode(&[], std::slice::from_ref(&revoked)).unwrap_err(),
+            Error::InvalidInput(message) if message.contains("revoked_at")
         ));
-    }
-    Ok(())
-}
 
-/// Characters that are invisible, reorder neighbouring text, or can hide part
-/// of a label from a human reading `pm grant list`.
-///
-/// The label is stored verbatim and later shown to a human, and from TODO 4.9
-/// it may come from an approved agent request, so this module rejects the
-/// whole class instead of trusting the renderer. Covered: C0/C1 controls;
-/// every Unicode **format** character (`Cf`) this build knows, which includes
-/// the bidi controls (U+061C, U+200E/U+200F, U+202A-U+202E, U+2066-U+2069),
-/// the zero-width set (U+200B-U+200D, U+2060-U+2064), soft hyphen, the tag
-/// characters and U+FEFF; the line and paragraph separators (U+2028/U+2029);
-/// and the variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF), which are
-/// invisible combining marks rather than `Cf`. Ordinary visible combining
-/// marks, emoji, accents and non-Latin scripts stay allowed.
-///
-/// Kept as an explicit table rather than a new dependency: a
-/// general-category crate for one check would be a new tree to vet, and a
-/// `Cf` character this list misses is rejected by the next review, not by a
-/// silent pass.
-fn is_hidden_or_reordering(character: char) -> bool {
-    if character.is_control() {
-        return true;
-    }
-    matches!(character,
-        '\u{00AD}'                       // soft hyphen
-        | '\u{0600}'..='\u{0605}'        // Arabic number signs
-        | '\u{061C}'                     // Arabic letter mark
-        | '\u{06DD}'                     // Arabic end of ayah
-        | '\u{070F}'                     // Syriac abbreviation mark
-        | '\u{0890}'..='\u{0891}'        // Arabic pound/piastre marks
-        | '\u{08E2}'                     // Arabic disputed end of ayah
-        | '\u{180E}'                     // Mongolian vowel separator
-        | '\u{200B}'..='\u{200F}'        // zero-width + LRM/RLM
-        | '\u{202A}'..='\u{202E}'        // bidi embeddings/overrides
-        | '\u{2060}'..='\u{2064}'        // word joiner + invisible operators
-        | '\u{2066}'..='\u{206F}'        // bidi isolates + deprecated formats
-        | '\u{2028}'..='\u{2029}'        // line/paragraph separators
-        | '\u{FE00}'..='\u{FE0F}'        // variation selectors
-        | '\u{FEFF}'                     // zero-width no-break space (BOM)
-        | '\u{FFF9}'..='\u{FFFB}'        // interlinear annotation
-        | '\u{110BD}' | '\u{110CD}'      // Kaithi number signs
-        | '\u{13430}'..='\u{1343F}'      // Egyptian hieroglyph controls
-        | '\u{1BCA0}'..='\u{1BCA3}'      // shorthand format controls
-        | '\u{1D173}'..='\u{1D17A}'      // musical symbol format controls
-        | '\u{E0001}'                    // language tag
-        | '\u{E0020}'..='\u{E007F}'      // tag characters
-        | '\u{E0100}'..='\u{E01EF}'      // variation selectors supplement
-    )
-}
+        // The check is not only about timestamps: any stored-field rule the
+        // reader enforces also blocks the writer.
+        let mut hidden = grant();
+        hidden.label = "deploy\u{202E}prod".to_owned();
+        assert!(Grant::from_stored(hidden.to_stored()).is_err());
+        assert!(matches!(
+            crate::store::encode(&[], std::slice::from_ref(&hidden)).unwrap_err(),
+            Error::InvalidInput(message) if message.contains("label")
+        ));
 
-fn validate_commands(commands: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
-    if commands.len() > MAX_COMMANDS {
-        return Err(Error::InvalidInput(format!(
-            "a grant allows at most {MAX_COMMANDS} commands"
-        )));
-    }
-    let mut commands = commands;
-    for command in &commands {
-        let text = command
-            .to_str()
-            .ok_or_else(|| Error::InvalidInput("a grant command must be valid UTF-8".into()))?;
-        if !command.is_absolute() {
-            return Err(Error::InvalidInput(format!(
-                "grant command '{text}' must be an absolute path"
-            )));
-        }
-        if text.is_empty() || text.contains('\0') {
-            return Err(Error::InvalidInput(
-                "a grant command must be a non-empty path without NUL bytes".into(),
-            ));
-        }
-        if text.len() > MAX_PATH_BYTES {
-            return Err(Error::InvalidInput(format!(
-                "grant command '{text}' exceeds {MAX_PATH_BYTES} bytes"
-            )));
-        }
-    }
-    commands.sort();
-    commands.dedup();
-    Ok(commands)
-}
-
-/// Field names (`password`, `token`, `api_key`, …): 1-32 bytes of
-/// `[a-z0-9_-]`, as fixed by TODO 6.1.
-pub fn validate_field_name(name: &str) -> Result<()> {
-    let valid = !name.is_empty()
-        && name.len() <= MAX_FIELD_NAME_BYTES
-        && name
-            .bytes()
-            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'));
-    if valid {
-        Ok(())
-    } else {
-        Err(Error::InvalidInput(format!(
-            "invalid field name '{name}': expected 1-{MAX_FIELD_NAME_BYTES} characters of [a-z0-9_-]"
-        )))
+        // The untouched grant is writable: the check rejects only bad state.
+        assert!(Grant::check_stored(&grant().to_stored()).is_ok());
+        assert!(crate::store::encode(&[], std::slice::from_ref(&grant())).is_ok());
     }
 }

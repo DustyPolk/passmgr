@@ -61,7 +61,7 @@ Rules that apply to every item:
       test where a proof succeeds after 16 agent-issued challenges while the
       evicted first nonce is denied.
 
-- [ ] **R.17 `store::encode` can write a payload its own decoder rejects, so
+- [x] **R.17 `store::encode` can write a payload its own decoder rejects, so
       one bad timestamp bricks the vault.**
       `Grant::from_stored` (`src/grant.rs:616-641`) rejects `revoked_at` /
       `last_used` above `MAX_TIMESTAMP_UNIX`, but `Grant::mark_used`
@@ -83,6 +83,16 @@ Rules that apply to every item:
       1)` and `revoke(MAX_TIMESTAMP_UNIX + 1)` must error, and a round-trip
       property test over every public `Grant` constructor must hold (`encode`
       then `decode` succeeds).
+      Done: `Grant::mark_used` and `Grant::revoke` now return
+      `Result<(), UpdateError>`, where the new `UpdateError::TimestampOutOfRange`
+      refuses `now > MAX_TIMESTAMP_UNIX` and changes nothing (`UpdateError` is
+      separate from `Denied`, which stays an authorization answer).
+      `Grant::from_stored` was split into `check_stored(&StoredGrant)` plus a
+      `to_stored()` builder; `store::encode` derives the stored form, runs the
+      decoder's check on it, and serializes **that** value, so writer and
+      reader cannot drift. Tests: the mutation bound (including the inclusive
+      maximum), a round trip over create/used/revoked, and a `src/grant.rs`
+      unit test that corrupts a private field and proves `encode` refuses it.
 
 - [ ] **R.18 The label rejection table is broader than every document and
       error message that describes it.**

@@ -567,6 +567,10 @@ pub fn encode(credentials: &[Credential], grants: &[Grant]) -> Result<Zeroizing<
     for credential in credentials {
         validate_timestamps(credential.timestamps)?;
     }
+    // The payload writer must never emit a grant its own reader would refuse
+    // (TODO R.17): derive the stored form once, run the decoder's validation
+    // on it, and later serialize that same value.
+    let mut stored_grants = Vec::with_capacity(grants.len());
     let mut seen_grants = HashSet::with_capacity(grants.len());
     for grant in grants {
         if !seen_grants.insert(grant.id()) {
@@ -575,6 +579,9 @@ pub fn encode(credentials: &[Credential], grants: &[Grant]) -> Result<Zeroizing<
                 grant.id()
             )));
         }
+        let stored = grant.to_stored();
+        Grant::check_stored(&stored)?;
+        stored_grants.push(stored);
     }
 
     let mut out = Zeroizing::new(Vec::with_capacity(total));
@@ -596,9 +603,9 @@ pub fn encode(credentials: &[Credential], grants: &[Grant]) -> Result<Zeroizing<
             write_string(&mut out, tag);
         }
     }
-    out.extend_from_slice(&(grants.len() as u32).to_le_bytes());
-    for grant in grants {
-        encode_grant(&mut out, grant);
+    out.extend_from_slice(&(stored_grants.len() as u32).to_le_bytes());
+    for stored in &stored_grants {
+        encode_grant(&mut out, stored);
     }
     debug_assert_eq!(out.len(), total);
     Ok(out)
@@ -624,35 +631,35 @@ pub fn encode(credentials: &[Credential], grants: &[Grant]) -> Result<Zeroizing<
 ///            when 1: u32 field count; each u32 + bytes
 /// u32        command count; each u32 + bytes absolute path (UTF-8)
 /// ```
-fn encode_grant(out: &mut Vec<u8>, grant: &Grant) {
-    out.extend_from_slice(grant.id().as_bytes());
-    out.extend_from_slice(grant.token_hash().as_bytes());
-    out.push(grant.capabilities().bits());
+fn encode_grant(out: &mut Vec<u8>, grant: &StoredGrant) {
+    out.extend_from_slice(grant.id.as_bytes());
+    out.extend_from_slice(grant.token_hash.as_bytes());
+    out.push(grant.capabilities.bits());
     let mut flags = 0u8;
-    if grant.revoked_at_unix().is_some() {
+    if grant.revoked_at.is_some() {
         flags |= GRANT_FLAG_REVOKED;
     }
-    if grant.last_used_unix().is_some() {
+    if grant.last_used.is_some() {
         flags |= GRANT_FLAG_LAST_USED;
     }
-    if grant.max_uses().is_some() {
+    if grant.max_uses.is_some() {
         flags |= GRANT_FLAG_MAX_USES;
     }
     out.push(flags);
-    out.extend_from_slice(&grant.created_unix().to_le_bytes());
-    out.extend_from_slice(&grant.expires_at_unix().to_le_bytes());
-    if let Some(revoked_at) = grant.revoked_at_unix() {
+    out.extend_from_slice(&grant.created.to_le_bytes());
+    out.extend_from_slice(&grant.expires_at.to_le_bytes());
+    if let Some(revoked_at) = grant.revoked_at {
         out.extend_from_slice(&revoked_at.to_le_bytes());
     }
-    if let Some(last_used) = grant.last_used_unix() {
+    if let Some(last_used) = grant.last_used {
         out.extend_from_slice(&last_used.to_le_bytes());
     }
-    if let Some(max_uses) = grant.max_uses() {
+    if let Some(max_uses) = grant.max_uses {
         out.extend_from_slice(&max_uses.to_le_bytes());
     }
-    out.extend_from_slice(&grant.uses().to_le_bytes());
-    write_string(out, grant.label());
-    let scope = grant.scope();
+    out.extend_from_slice(&grant.uses.to_le_bytes());
+    write_string(out, &grant.label);
+    let scope = &grant.scope;
     out.extend_from_slice(&(scope.refs().len() as u32).to_le_bytes());
     for entry in scope.refs() {
         out.extend_from_slice(entry.as_bytes());
@@ -671,8 +678,8 @@ fn encode_grant(out: &mut Vec<u8>, grant: &Grant) {
             }
         }
     }
-    out.extend_from_slice(&(grant.commands().len() as u32).to_le_bytes());
-    for command in grant.commands() {
+    out.extend_from_slice(&(grant.commands.len() as u32).to_le_bytes());
+    for command in &grant.commands {
         let text = command
             .to_str()
             .expect("grant commands were validated as UTF-8");
@@ -1669,7 +1676,7 @@ mod tests {
         )
         .unwrap();
         run.mark_used(1_700_000_100).unwrap();
-        run.revoke(1_700_000_200);
+        run.revoke(1_700_000_200).unwrap();
         let list = test_grant("read only", Capabilities::LIST);
 
         let encoded = encode(&[credential("svc", "u", "p")], &[run.clone(), list.clone()]).unwrap();
@@ -1678,6 +1685,40 @@ mod tests {
         assert_eq!(decoded.grants.len(), 2);
         assert_grants_equal(&decoded.grants[0], &run);
         assert_grants_equal(&decoded.grants[1], &list);
+    }
+
+    #[test]
+    fn every_grant_mutation_round_trips_through_the_payload() {
+        // Every public way to build a `Grant` state must survive a save, so
+        // the writer never emits what the reader refuses (TODO R.17).
+        let base = || {
+            Grant::create(
+                GrantSpec {
+                    label: "rotate db".to_owned(),
+                    scope: Scope::new(vec![EntryId::generate().unwrap()], Vec::new(), None)
+                        .unwrap(),
+                    commands: vec![std::path::PathBuf::from("/usr/bin/env")],
+                    capabilities: Capabilities::RUN,
+                    expires_at: 1_700_003_600,
+                    max_uses: Some(2),
+                },
+                TokenHash::of(b"canary-roundtrip-token"),
+                1_700_000_000,
+            )
+            .unwrap()
+        };
+        let mut used_then_revoked = base();
+        used_then_revoked.mark_used(1_700_000_100).unwrap();
+        used_then_revoked.revoke(1_700_000_150).unwrap();
+        let mut revoked = base();
+        revoked.revoke(1_700_000_200).unwrap();
+
+        for grant in [base(), used_then_revoked, revoked] {
+            let encoded = encode(&[], std::slice::from_ref(&grant)).unwrap();
+            let decoded = decode(&encoded).unwrap();
+            assert_eq!(decoded.grants.len(), 1);
+            assert_grants_equal(&decoded.grants[0], &grant);
+        }
     }
 
     #[test]

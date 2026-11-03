@@ -1132,7 +1132,7 @@ mod tests {
         assert_eq!(loaded.max_uses(), Some(2));
         assert_eq!(loaded.scope().refs(), [entry]);
         assert!(loaded.matches_token(&TokenHash::of(b"canary-vault-grant-token")));
-        vault.grant_mut(id).unwrap().revoke(1_700_000_200);
+        vault.grant_mut(id).unwrap().revoke(1_700_000_200).unwrap();
         vault.save(master).unwrap();
         drop(vault);
 

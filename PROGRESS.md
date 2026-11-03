@@ -1,3 +1,46 @@
+## 2026-11-03 — The payload writer validates grants before writing (TODO R.17)
+
+- `src/grant.rs`: `from_stored` is now `check_stored(&StoredGrant) -> Result<()>`
+  plus a constructor, and the new `to_stored(&self) -> StoredGrant` builds
+  exactly the fields the codec writes. `store::encode` derives the stored form,
+  runs `check_stored` on it, and serializes **that** value instead of reading
+  the `Grant` accessors again, so writer and reader cannot drift and a save can
+  never emit a payload `decode` refuses. A failing grant is `InvalidInput`
+  (exit 2); nothing is written.
+- `mark_used`/`revoke` now return `Result<(), UpdateError>`. The new
+  `UpdateError::TimestampOutOfRange` refuses `now > MAX_TIMESTAMP_UNIX` before
+  touching the grant (`Denied` stays purely an authorization answer, which the
+  daemon will render and audit in 3.6). `UpdateError::Denied` wraps the old
+  refusal. `check_active` is unchanged; it is only reachable after the bound.
+- Tests: `grant_mutations_refuse_timestamps_the_store_cannot_hold` (nothing is
+  counted or revoked on refusal; `revoke(MAX_TIMESTAMP_UNIX)` is accepted, so
+  the bound is inclusive), `every_grant_mutation_round_trips_through_the_payload`
+  (create / used / revoked all `encode` then `decode` and compare equal), and
+  the `src/grant.rs` unit test
+  `the_payload_writer_refuses_a_grant_its_reader_would_reject` (corrupts
+  `revoked_at` and the label through private fields, proves both `from_stored`
+  and `encode` refuse; a valid grant still encodes).
+- Docs: `FORMAT.md` grant-validation paragraph now says the same checks run
+  before every write; `DECISIONS.md` records the codec symmetry and the
+  `UpdateError` split.
+- Size rule: the additions pushed `src/grant.rs` to 1,087 lines, so the label,
+  command and field-name validators moved verbatim to `src/grant/validate.rs`
+  (`grant.rs` is ~980 lines now). No behavior change;
+  `pub use validate::validate_field_name` keeps `passmgr::grant::validate_field_name`
+  working, and `mark_used`/`revoke` still use the same `MAX_*` constants.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  the full `cargo test` are green (209 lib tests). `cargo audit` is not
+  installed; skipped.
+- **Next iteration must know:** R.18 is next, then 3.4. There is still no
+  production caller of `mark_used`/`revoke`, so 3.5/3.6 must map
+  `UpdateError::Denied` to the protocol denial and treat
+  `TimestampOutOfRange` as an internal error (it needs a broken clock).
+  `StoredGrant` is now constructed by `Grant::to_stored` as well as by the
+  decoder; keep the two field lists identical when a new grant field lands
+  (`store` version bump), or the codec test will not catch the omission.
+  R.18's label table now lives in `src/grant/validate.rs`, not `src/grant.rs`;
+  its line numbers in TODO R.18 are stale.
+
 ## 2026-11-03 — A full challenge pool evicts instead of refusing (TODO R.16)
 
 - `src/presence.rs`: `Challenges::issue` prunes expired nonces, then evicts

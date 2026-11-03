@@ -144,8 +144,11 @@ stolen vault cannot be replayed against the daemon. Grant ids must be unique
 within a payload and duplicates are rejected as malformed. Optional fields use
 flags rather than a magic `0` timestamp, so "no last use" stays distinct from
 a real timestamp. Every rule `Grant::create` enforces is checked again on
-read, so a hand-edited payload cannot produce a grant this build would never
-have created: at most 1,024 grants; label 1-64 bytes without control, bidi or
+read **and before every write**: `store::encode` validates the stored form
+(`Grant::to_stored` -> `Grant::check_stored`) and then serializes exactly that
+value, so neither a hand-edited payload nor a buggy writer can produce a grant
+this build would never have created. At most 1,024 grants; label 1-64 bytes
+without control, bidi or
 zero-width characters; capability bits and flag bits limited to the known
 set; `created` and `expires_at` at most 253402300799 and at most 30 days
 apart; at most 256 refs, 32 tags, 32 field names (each 1-32 bytes matching

@@ -83,6 +83,15 @@ code does not implement yet.
   format); `src/grant.rs` stays a pure model. Decoding builds `StoredGrant`
   and re-enters `Grant::from_stored`, which re-checks every `Grant::create`
   invariant, so the vault reader and the grant creator cannot drift apart.
+  Encoding builds the same `StoredGrant` (`Grant::to_stored`), runs
+  `Grant::check_stored` on it and serializes **that** value, so a save can
+  never write a grant its own reader would refuse (TODO R.17). A grant that
+  fails the check is `InvalidInput` (exit 2) and nothing is written.
+- `Grant::mark_used` and `Grant::revoke` refuse a `now` above
+  `MAX_TIMESTAMP_UNIX` with `UpdateError::TimestampOutOfRange` and change
+  nothing. `UpdateError` is deliberately separate from `Denied`, which stays
+  an authorization answer that the daemon renders and audits; `Grant::create`
+  applies the same upper bound to its own `now`.
 - Entry id: 16 random bytes, rendered `pm://<32 lowercase hex>`. Full ids
   only: no prefixes, no service-based refs. Upper-case input is accepted and
   lower-cased; anything else is `InvalidInput` (exit 2).

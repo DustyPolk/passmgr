@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use passmgr::grant::{
     AccessRequest, Capabilities, Capability, Denied, Grant, GrantId, GrantSpec,
-    MAX_GRANT_LIFETIME_SECS, MAX_LABEL_BYTES, Scope, StoredGrant, Target, TokenHash,
+    MAX_GRANT_LIFETIME_SECS, MAX_LABEL_BYTES, Scope, StoredGrant, Target, TokenHash, UpdateError,
     validate_field_name,
 };
 use passmgr::store::{EntryId, MAX_TIMESTAMP_UNIX};
@@ -393,7 +393,7 @@ fn authorizes_decides_expiry_revocation_and_use_limits() {
     assert_eq!(expired.authorizes(&request, NOW + 1), Err(Denied::Expired));
 
     let mut revoked = grant(Capabilities::RUN);
-    revoked.revoke(NOW - 10);
+    revoked.revoke(NOW - 10).expect("revoke");
     assert_eq!(revoked.authorizes(&request, NOW), Err(Denied::Revoked));
     assert_eq!(revoked.revoked_at_unix(), Some(NOW - 10));
 
@@ -412,13 +412,39 @@ fn authorizes_decides_expiry_revocation_and_use_limits() {
     assert_eq!(limited.uses(), 1);
     assert_eq!(limited.last_used_unix(), Some(NOW));
     assert_eq!(limited.authorizes(&request, NOW), Err(Denied::UsedUp));
-    assert_eq!(limited.mark_used(NOW), Err(Denied::UsedUp));
+    assert_eq!(
+        limited.mark_used(NOW),
+        Err(UpdateError::Denied(Denied::UsedUp))
+    );
     assert_eq!(limited.uses_left(), Some(0));
 
     let mut revoke_twice = grant(Capabilities::RUN);
-    revoke_twice.revoke(NOW);
-    revoke_twice.revoke(NOW + 100);
+    revoke_twice.revoke(NOW).expect("first revoke");
+    revoke_twice.revoke(NOW + 100).expect("second revoke");
     assert_eq!(revoke_twice.revoked_at_unix(), Some(NOW));
+}
+
+#[test]
+fn grant_mutations_refuse_timestamps_the_store_cannot_hold() {
+    let mut grant = grant(Capabilities::RUN);
+    let before = grant.revoked_at_unix();
+
+    assert_eq!(
+        grant.mark_used(MAX_TIMESTAMP_UNIX + 1),
+        Err(UpdateError::TimestampOutOfRange)
+    );
+    assert_eq!(grant.uses(), 0, "a refused use was counted");
+    assert_eq!(grant.last_used_unix(), None);
+
+    assert_eq!(
+        grant.revoke(MAX_TIMESTAMP_UNIX + 1),
+        Err(UpdateError::TimestampOutOfRange)
+    );
+    assert_eq!(grant.revoked_at_unix(), before, "a refused revoke landed");
+
+    // The maximum itself is storable, so the bound is inclusive.
+    assert_eq!(grant.revoke(MAX_TIMESTAMP_UNIX), Ok(()));
+    assert_eq!(grant.revoked_at_unix(), Some(MAX_TIMESTAMP_UNIX));
 }
 
 #[test]
