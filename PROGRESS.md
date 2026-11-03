@@ -1,3 +1,44 @@
+## 2026-11-02 — Grant model and authorization check (TODO 3.2a)
+
+- New pure module `src/grant.rs` (no I/O, no clock): `GrantId` (16 random
+  bytes, 32 hex), `TokenHash` (SHA-256 of the raw token, constant-time
+  `matches`, `Debug` prints `<redacted>`, no `Display`), `Capabilities` bit
+  field (`list`=1, `run`=2, unknown bits rejected), `Scope`,
+  `AccessRequest`, `Denied`, `GrantSpec`, and `Grant` with `create`,
+  `authorizes`, `scope_allows`, `allows_command`, `mark_used`, `revoke`.
+- Split the original 3.2 into 3.2a (this: model + rules) and 3.2b (store v5
+  persistence, `FORMAT.md`, vault plumbing). It packed a format bump, a model
+  and two new crates into one iteration; the rules are the part everything
+  else (3.6, 4.4, 4.9) depends on.
+- Rules and why (all in `DECISIONS.md`): scope = listed ref **or** every
+  listed tag (reuses the AND semantics of `list --tag`); a field-restricted
+  grant refuses a request that names no field (conservative until 6.1);
+  expiry is exclusive (`now >= expires_at`); check order is revoked, expired,
+  used up, capability, scope, command; commands compare as exact `Path`s
+  because the daemon canonicalizes first; a run grant needs >= 1 command,
+  a list-only grant may have none; grant lifetime <= 30 days.
+- Dependency: added `sha2` 0.10 (RustCrypto) only; it reuses the `digest`
+  0.10 already in the tree via `blake2`/Argon2, so no duplicate major.
+  `hmac` was moved to TODO 3.3 (its first use, the presence proof) so no
+  unused crate lands now.
+- Tests: 14 integration tests in `tests/grant.rs` (public API only) cover a
+  FIPS SHA-256 vector, id round-trip/bad hex, capability bits, every
+  `create` rejection, command sorting/dedup, scope ref/tag/field matching, the
+  full denial table (expired, revoked, used up, not capable, out of scope,
+  command not allowed, missing target/command), `mark_used`/`revoke`, the
+  `Target::from(&Credential)` conversion, and that `Debug` contains neither
+  the token hash nor the token.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` green. `cargo audit` not installed; skipped.
+- **Next iteration must know:** 3.2a has no persistence and no CLI, so
+  nothing can create a grant yet. 3.2b must add a decoder-side constructor
+  (`Grant::restore`) because `create` derives `created`/`uses`/`revoked_at`
+  from "now" and validates a future expiry; a stored expired grant must
+  still decode. `Scope` and `Grant` have no `PartialEq` (only `Scope` does);
+  if 3.2b's round-trip test wants grant equality, compare field by field or
+  add a deliberate `PartialEq`. `src/grant.rs` is 763 lines, `tests/grant.rs`
+  465; keep both under the ~1,000 line rule.
+
 ## 2026-11-02 — Make MCP.md honest about redaction and command resolution (TODO R.10)
 
 - Docs only: `MCP.md` now says redaction replaces an **exact, contiguous byte

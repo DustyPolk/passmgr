@@ -21,17 +21,30 @@ approval flow", "Audit"). Follow it.
       Done: `Vault::open_for_update`/`open_for_add` take the sidecar lock
       before reading and hold it until drop; `save` refuses a read-only
       `Vault`. `add`/`edit`/`delete` use it; reads stay lock-free.
-- [ ] **3.2 Grant model in the vault (next store version).** Fields per
-      `MCP.md`: id, SHA-256 token hash, label, scope (refs, tags, optional
-      field names), command allowlist, capabilities, expires_at, max_uses,
-      uses, created, revoked_at, last_used. Migration from the previous store
-      version gives an empty grant list. Pure scope-check function
-      `Grant::authorizes(&Request, now) -> Result<(), Denied>` with
-      table-driven tests: expired, revoked, used up, ref out of scope, tag
-      match, command not allowed. Add `sha2` and `hmac` (RustCrypto) and
-      justify them in `PROGRESS.md`.
-- [ ] **3.3 Human-presence proof.** Daemon `challenge` request returns a
-      nonce. The CLI answers with
+- [x] **3.2a Grant model and authorization check.** New pure module
+      `src/grant.rs` with the fields per `MCP.md`: id, SHA-256 token hash,
+      label, scope (refs, tags, optional field names), command allowlist,
+      capabilities (`list`, `run`), expires_at, max_uses, uses, created,
+      revoked_at, last_used. Validation for every field, and
+      `Grant::authorizes(&AccessRequest, now) -> Result<(), Denied>` as the
+      single decision point, plus `scope_allows` for list filtering,
+      `mark_used` and `revoke`. Add `sha2` (RustCrypto) for the token hash;
+      `hmac` moves to 3.3 where the presence proof first uses it. No store
+      change yet. Table-driven tests: expired, revoked, used up, missing
+      capability, ref out of scope, tag match, field scope, command not
+      allowed, a known SHA-256 vector, and a redacting `Debug`.
+      Done: model + pure check in `src/grant.rs`, tests in `tests/grant.rs`;
+      `hmac` deferred to 3.3 so no unused dependency lands. Grants are not
+      persisted yet.
+- [ ] **3.2b Persist grants in store version 5.** Add the grant list after
+      the credentials in the payload, encode/decode with the same length
+      caps, v5 keeps credentials byte-identical to v4 and earlier versions
+      migrate to an empty grant list. `Vault` gains grant accessors used by
+      `save`. Update `FORMAT.md` and `DECISIONS.md`. Tests: v4 -> v5
+      migration, every older version decodes with no grants, a round trip,
+      duplicate grant ids and a truncated grant record are `MalformedVault`.
+- [ ] **3.3 Human-presence proof.** Add `hmac` (RustCrypto) here, its first
+      use. Daemon `challenge` request returns a nonce. The CLI answers with
       `HMAC-SHA256(key, "passmgr-approve-v1" || nonce || digest)`. The daemon
       verifies in constant time, and a nonce is single-use with a 60 s
       expiry. Tests: correct proof accepted, wrong key/reused

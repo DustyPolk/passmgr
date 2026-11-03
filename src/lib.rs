@@ -10,6 +10,7 @@ pub mod crypto;
 #[cfg(unix)]
 pub mod daemon;
 pub mod error;
+pub mod grant;
 pub mod password;
 pub mod protocol;
 pub mod redact;

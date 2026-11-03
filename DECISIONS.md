@@ -315,6 +315,35 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 
 ## Grants, approval and MCP (planned, per `MCP.md`)
 
+- The grant model lives in `src/grant.rs` (TODO 3.2a) and is pure: no I/O,
+  no clock. `Grant::authorizes(&AccessRequest, now)` is the single decision
+  point. It checks, in order: revoked, `now >= expires_at` (expiry is
+  exclusive), uses exhausted, missing capability, then scope and command.
+- Scope matching: an entry is in scope when its id is listed, **or** when it
+  carries **every** tag the grant lists. A grant must list at least one ref
+  or tag. `pm list --tag` AND semantics are reused, so "all" is consistent.
+- Field scope: `Scope::fields = None` covers every field; `Some(names)`
+  covers exactly those names, and a request that names no field is out of
+  scope for a field-restricted grant (conservative until 6.1 defines the bare
+  ref). Field names are `[a-z0-9_-]{1,32}`.
+- Commands: a command must equal an allowlisted absolute path exactly
+  (`Path` equality). `src/grant.rs` never touches the filesystem; the daemon
+  canonicalizes first (TODO 3.6/4.5) and hands the check a canonical path.
+  A run-capable grant needs at least one command; a list-only grant may have
+  none. Commands are sorted and deduplicated, max 32, each <= `MAX_PATH_BYTES`
+  and valid UTF-8.
+- Grant limits: label 1..=64 bytes with no control characters, at least one
+  capability, expiry in `(now, now + 30 days]`, and `max_uses = Some(0)` is
+  refused (omit it for unlimited). Capabilities are a bit field
+  (`list` = 1, `run` = 2) with unknown bits rejected on decode.
+- A grant stores `TokenHash` = SHA-256 of the raw 32 token bytes, never the
+  token. `Debug` renders `TokenHash(<redacted>)`; there is no `Display` and no
+  hex rendering. `TokenHash::matches` is constant-time.
+- `sha2` (RustCrypto, `0.10`, sharing `digest` 0.10 with the existing
+  `blake2`/Argon2 tree) is the only dependency added by 3.2a. `hmac` moves to
+  TODO 3.3, its first use; adding an unused crate now would hide that.
+- Grant persistence (grant list in the store payload, next store version) is
+  TODO 3.2b; until then nothing in the vault or CLI can create a grant.
 - Agents get access only through grants stored in the encrypted vault: scope
   (refs, tags, optional field names), a command allowlist of canonical
   absolute paths, capabilities, `expires_at` (max 30 days), optional
@@ -352,8 +381,9 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 
 ## Dependencies
 
-- Allowed: `aes-gcm`, `argon2`, `getrandom`, `libc`, `serde_json`,
-  `tempfile`, `zeroize`; `proptest` as a dev-dependency only (TODO 9.2).
+- Allowed: `aes-gcm`, `argon2`, `getrandom`, `libc`, `serde_json`, `sha2`,
+  `tempfile`, `zeroize`; `hmac` joins them in TODO 3.3; `proptest` as a
+  dev-dependency only (TODO 9.2).
 - Rejected: an MCP SDK, an async runtime, a CLI framework (hand-written
   argument parsing is deliberate), any HTTP/network crate, and `serde` derive
   on `Credential` (it could add a password field by accident).
