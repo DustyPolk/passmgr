@@ -831,7 +831,7 @@ Rules that apply to every item:
       Test: start that run, drop the client, assert the child is gone within
       2 s and `pmd` exits within ~4 s under `--idle-timeout 2`.
 
-- [ ] **R.38 A detached grandchild keeps the secret after the run ends,
+- [x] **R.38 A detached grandchild keeps the secret after the run ends,
       after `lock`, and after `pmd` exits.**
       `src/runner.rs:234-245`: after a normal finish (both pipes at EOF,
       leader reaped) the process group is never signalled.
@@ -849,6 +849,12 @@ Rules that apply to every item:
       the `daemon.rs` comment.
       Test: the scenario above leaves no live grandchild after the run
       returns; a `tests/docs.rs` contract for the documented `setsid` limit.
+      Done: `runner::leader_exited` uses
+      `waitid(P_PID, pid, WEXITED|WNOHANG|WNOWAIT)` instead of `try_wait`, so
+      the finished path kills the still-pinned process group with `SIGKILL`
+      and only then reaps. The kill is unconditional (no `SIGTERM` grace):
+      both pipes are already at EOF, so a survivor is a straggler that must
+      not keep the value. `tests/docs.rs` pins the limit-1 wording.
 
 - [ ] **R.39 `grant revoke` (and `grant create`) fails with `internal`
       whenever a concurrent `run` writes the vault.**

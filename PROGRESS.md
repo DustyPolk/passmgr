@@ -1,3 +1,37 @@
+## 2026-11-03 — Kill what is left of the group when a run completes (TODO R.38)
+
+- `src/runner.rs`: the finished path no longer reaps with `Child::try_wait`.
+  New `leader_exited(pid)` uses
+  `waitid(P_PID, pid, WEXITED|WNOHANG|WNOWAIT)`, so the exited leader stays a
+  zombie and its pid/pgid cannot be recycled. The path then sends `SIGKILL` to
+  the group, reaps the leader with `child.wait()`, joins the readers and
+  returns the exit status. Before this, a child that backgrounded a daemon and
+  redirected its stdio left the value in that daemon's environment after the
+  run, `lock` and `pmd`.
+- `SIGKILL` with no `SIGTERM` grace on this path: both pipes are already at
+  EOF, so a survivor is a straggler that would only keep the secret longer; a
+  grace period would add 100 ms to every completed run. The cancel path keeps
+  `SIGTERM` + grace + `SIGKILL`.
+- Docs: `SECURITY.md` limit 1 now says the group is killed on cancel *and* on
+  normal completion, and that a descendant which starts a new session
+  (`setsid`) escapes the cleanup and can keep the value (accepted, with
+  "start long-lived services outside a passmgr run"). `src/daemon.rs`'s "no
+  copy of the injected secret outlives the key" is corrected;
+  `DECISIONS.md` and `README.md` describe the normal-completion kill.
+- Tests: `runner::tests::a_background_process_does_not_outlive_a_completed_run`
+  runs `sh -c 'sleep 60 </dev/null >/dev/null 2>&1 &'`, asserts exit 0 and no
+  output, then requires the grandchild pid to be gone within 2 s. It fails on
+  the old code with "a background process outlived the completed run". New
+  `tests/docs.rs::security_documents_post_run_survivors_and_the_setsid_escape`
+  pins the limit-1 wording (kill, `setsid` gap, advice).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  the full `cargo test` suite pass (`cargo audit` not installed, skipped).
+- **Next iteration must know:** R.39 is next (revoke races a concurrent run's
+  vault write). A run that deliberately starts a long-lived helper (for
+  example `ssh-agent`) is now killed when the run returns; that is the
+  intended security trade, not a bug to relax. The `setsid` escape remains a
+  known limit and a hostile child can use it.
+
 ## 2026-11-03 — Cancel a run when its client disconnects (TODO R.37)
 
 - `runner::execute` now takes a `Stop` instead of the cancel flag: `cancel`

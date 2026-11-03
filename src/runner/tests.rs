@@ -571,3 +571,32 @@ fn a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes() {
         }
     }
 }
+
+#[test]
+fn a_background_process_does_not_outlive_a_completed_run() {
+    // The shape real tools leave behind: the shell backgrounds a daemon and
+    // exits 0. The daemon redirects its stdio, so both pipes reach EOF and
+    // the relay finishes normally -- but the daemon inherited the injected
+    // value in its environment. Before the fix the run returned, `lock` and
+    // `pmd` followed, and the value stayed readable in
+    // `/proc/<grandchild>/environ` for as long as the daemon lived.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pid_file = dir.path().join("grandchild.pid");
+    let script = format!(
+        "sleep 60 </dev/null >/dev/null 2>&1 & echo $! > {}",
+        pid_file.display()
+    );
+    let (frames, result) = collect(&["/bin/sh", "-c", &script], "PM_TEST", "secret-1234");
+    assert_eq!(result.expect("run"), RunExit::Code(0));
+    assert!(stdout_bytes(&frames).is_empty());
+
+    let grandchild = wait_for_pid_file(&pid_file);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !process_is_gone(grandchild) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a background process outlived the completed run with the secret in its environment"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

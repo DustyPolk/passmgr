@@ -352,11 +352,18 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   run is in flight.
 - Each child is spawned into its own process group (`setpgid(0, 0)`), and a
   cancel kills the group with `SIGTERM` then, after a 100 ms grace, `SIGKILL`.
-  The relay never calls `try_wait` while a pipe is still open: the leader stays
-  an unreaped zombie, so its pid (and therefore the pgid) cannot be recycled
-  before a later group signal, however long a grandchild holds the pipes. Only
-  the completed path reaps, once both pipes reached EOF. The pipe readers poll
-  the cancel flag before every blocking read, so a
+  A run that finishes normally kills whatever is left in the group with
+  `SIGKILL` before it returns: a child can background a daemon that inherits
+  the injected value and redirect its output, so without this the value
+  survives the run, `lock` and `pmd`. A descendant that starts a new session
+  (`setsid`) leaves the group and escapes the kill; that is accepted and
+  documented in `SECURITY.md` limit 1. The relay never reaps while a pipe is
+  still open: the leader stays an unreaped zombie, so its pid (and therefore
+  the pgid) cannot be recycled before a later group signal, however long a
+  grandchild holds the pipes. The completed path detects the leader's exit
+  with `waitid(.., WNOWAIT)`, signals the group while the zombie still pins
+  the pid, and only then reaps. The pipe readers poll the cancel flag before
+  every blocking read, so a
   grandchild that inherits the output pipes and outlives the child can keep
   neither the relay nor the shutdown waiting. The `lock` acknowledgement is
   written only after the workers are joined, the socket and session file are

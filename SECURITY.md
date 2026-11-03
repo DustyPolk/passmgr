@@ -103,6 +103,15 @@ it does not apply to the child, which is a separate process. macOS has no
 `PR_SET_DUMPABLE` equivalent set by passmgr, so same-user `ptrace`/memory
 inspection of `pmd` is not closed here, even though core dumps are disabled.
 
+The run's whole process group is killed when the run ends -- on a cancel and
+on normal completion -- so a background process that a child leaves behind
+(an `ssh` `ControlPersist` master, a build daemon, a credential cache) does
+not keep the value after the run, after `lock` or after `pmd` exits. A
+descendant that starts a new session (`setsid`) leaves the group and escapes
+that cleanup: passmgr cannot find it afterwards, so such a survivor can keep
+the value in its environment indefinitely. Start long-lived services outside
+a passmgr run, without the credential.
+
 Consequences:
 
 - passmgr prevents accidents and makes deliberate misuse require an explicit

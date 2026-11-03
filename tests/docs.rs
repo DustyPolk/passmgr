@@ -117,6 +117,31 @@ fn security_documents_the_proc_environ_limit() {
     );
 }
 
+/// TODO R.38: the run's process group is killed when the run ends, but a
+/// descendant that starts a new session escapes that cleanup. Both the
+/// mitigation and the accepted gap belong in limit 1, next to the
+/// `/proc/<pid>/environ` exposure they are about.
+#[test]
+fn security_documents_post_run_survivors_and_the_setsid_escape() {
+    let limit = security_limit(1);
+    assert!(
+        limit.contains("whole process group is killed when the run ends"),
+        "SECURITY.md limit 1 must say the run's group is killed when the run ends"
+    );
+    assert!(
+        limit.contains("does not keep the value after the run, after lock or after pmd exits"),
+        "SECURITY.md limit 1 must say a background process does not keep the value"
+    );
+    assert!(
+        limit.contains("setsid") && limit.contains("escapes that cleanup"),
+        "SECURITY.md limit 1 must document that a new session escapes the group kill"
+    );
+    assert!(
+        limit.contains("Start long-lived services outside a passmgr run"),
+        "SECURITY.md limit 1 must give the reader a way to avoid the gap"
+    );
+}
+
 /// Regression for TODO R.5: the disclosure phrase is only accepted from
 /// limit 1, never from another section of the same document.
 #[test]

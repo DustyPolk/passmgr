@@ -57,10 +57,12 @@
 //! so a client cannot multiply workers, threads and injected environments
 //! without bound. Every in-flight child is killed and reaped -- together with
 //! its process group, so pipe-holding grandchildren die too -- before the
-//! daemon returns, so no copy of the injected secret outlives the key. A
-//! `lock` is only acknowledged after that join, the socket unlink, the
-//! session removal and the key wipe: the message `passmgr lock` prints is
-//! true by the time the client sees it.
+//! daemon returns. A run that finishes normally also kills whatever is left
+//! in its process group, so a child that backgrounds a daemon does not carry
+//! the secret past the run; a descendant that starts a new session can
+//! (`SECURITY.md` limit 1). A `lock` is only acknowledged after that join, the
+//! socket unlink, the session removal and the key wipe: the message
+//! `passmgr lock` prints is true by the time the client sees it.
 //!
 //! # Authorization
 //!

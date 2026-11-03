@@ -210,9 +210,14 @@ command's whole process group (`SIGTERM`, then `SIGKILL` after a 100 ms grace)
 and the run ends as cancelled; a grandchild that inherited the output pipes
 cannot keep it alive. `passmgr lock` prints its confirmation only after the
 daemon has joined those children, removed the socket and session file, and
-zeroized the key. The idle timeout does not interrupt a run that is still in
-flight (a build or test suite must not die at the deadline); it wipes the key
-once no command is running, with the timer restarting after the last run.
+zeroized the key. A run that finishes normally also kills anything left in
+its process group, so a child that backgrounds a daemon (`ssh`'s
+`ControlPersist`, a build daemon) does not carry the injected value past the
+run; a descendant that calls `setsid` leaves the group and can survive with it
+(`SECURITY.md`, limit 1). The idle timeout does not interrupt a run that is
+still in flight (a build or test suite must not die at the deadline); it wipes
+the key once no command is running, with the timer restarting after the last
+run.
 
 At most 16 commands run at once. A `run` beyond that is refused with exit
 code 1 and the terminal `busy` error before the vault is opened, so a caller

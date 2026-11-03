@@ -37,6 +37,14 @@
 //! tool call: without it the child keeps running with the secret in its
 //! environment, and the idle timeout stays suspended for as long as the child
 //! lives.
+//!
+//! A run that finishes normally also kills whatever is left in its process
+//! group before returning: a child that backgrounds a daemon (`gradle`,
+//! `ssh`'s `ControlPersist`, a credential cache) would otherwise keep the
+//! injected value in its environment after the run, after `lock` and after
+//! `pmd` exits. A descendant that leaves the group by starting a new session
+//! (`setsid`) escapes that cleanup; that is an accepted limit, documented in
+//! `SECURITY.md` limit 1.
 
 use std::ffi::OsString;
 use std::io::{self, Read};
@@ -271,6 +279,7 @@ where
 
     let mut child = command.spawn().map_err(RunError::Spawn)?;
     drop(command);
+    let pgid = child.id() as libc::pid_t;
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
@@ -302,14 +311,26 @@ where
             // running, so keep waiting for it -- but poll the stop conditions
             // as well. A plain `wait()` here would make `lock`, `SIGTERM`, the
             // idle timeout and a vanished client wait for a child that closed
-            // its output on purpose. `try_wait` is a `waitpid(WNOHANG)`.
+            // its output on purpose. `leader_exited` is a `waitid(WNOHANG)`
+            // that leaves the leader unreaped; the reap happens after the
+            // group below has been signalled.
             loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
+                match leader_exited(pgid) {
+                    Ok(true) => {
+                        // The leader has exited but is still an unreaped
+                        // zombie, so its pid -- and the process-group id
+                        // derived from it -- cannot be recycled: the group
+                        // signal below can only reach this run. Everything
+                        // left in the group inherited the injected value and
+                        // the run is over (both pipes are at EOF), so none of
+                        // it may outlive the run. Signal before reaping; a
+                        // reaped pid could already belong to another group.
+                        signal_group(pgid, libc::SIGKILL);
+                        let status = child.wait();
                         join_all(readers);
-                        return Ok(exit_status(status));
+                        return status.map(exit_status).map_err(RunError::Output);
                     }
-                    Ok(None) => {
+                    Ok(false) => {
                         if stop.requested() {
                             abort(&mut child, receiver, readers, &readers_stop);
                             return Err(RunError::Cancelled);
@@ -388,6 +409,35 @@ where
             Err(RecvTimeoutError::Timeout) => {}
         }
     }
+}
+
+/// Whether the group leader has exited, without reaping it.
+///
+/// [`Child::try_wait`] reaps, which frees the pid and therefore the
+/// process-group id while descendants may still be using it. `WNOWAIT`
+/// observes the exit and leaves the zombie in place, so a following
+/// `kill(-pgid)` cannot signal an unrelated group.
+fn leader_exited(pid: libc::pid_t) -> io::Result<bool> {
+    // SAFETY: `siginfo_t` is plain-old data; zeroing and passing it for the
+    // kernel to fill is valid, and no pointer is stored in it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `P_PID` selects one child by pid; `infop` points at the valid
+    // `siginfo_t` above. Failure is reported through `last_os_error`.
+    let result = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // `si_pid()` reads the leading pid field, which is the same offset in the
+    // `SIGCHLD` and `kill` shapes of the union; 0 means nothing is reapable.
+    // SAFETY: the kernel filled `info`.
+    Ok(unsafe { info.si_pid() } == pid)
 }
 
 /// Kill the child and every process it started, then stop the readers.
