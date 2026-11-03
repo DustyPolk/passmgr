@@ -328,6 +328,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Deterministic tests: a temp dir per test, `XDG_*`/`HOME` set per test, no
   real credentials, no network, no dependency on test order, and polling with
   a deadline instead of fixed sleeps as synchronization.
+- Documentation contracts are scoped to the section that must carry the
+  claim: `tests/docs.rs` extracts a `### N.` limit and asserts contiguous
+  phrases from its body, so an unrelated sentence elsewhere in the file cannot
+  satisfy it (TODO R.5).
 - Test through public interfaces and keep pure logic reachable by unit tests.
   CLI e2e tests run the real binary with the real default KDF parameters (the
   suite is Argon2-bound and slow).

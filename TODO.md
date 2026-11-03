@@ -118,7 +118,7 @@ Phase 3: R.1 breaks a containment guarantee that the design already claims.
       uses the daemon's vault. `--help`, the golden fixture and README state
       the rule; `tests/docs.rs` pins it. E2E proves the child never runs and
       the refusal contains no secret.
-- [ ] **R.5 The SECURITY.md disclosure test can pass without the
+- [x] **R.5 The SECURITY.md disclosure test can pass without the
       disclosure.** `tests/docs.rs:29` asserts `SECURITY.contains("same
       user")`, but the first matching sentence is `SECURITY.md:16` ("a process
       running as the same user can read the 0600 session file"), not the
@@ -129,6 +129,14 @@ Phase 3: R.1 breaks a containment guarantee that the design already claims.
       Test: assert on a stable, specific phrase from the limit itself (e.g.
       `/proc/<pid>/environ` plus `same user`), and use the same style of
       contract for the R.3 and R.4 claims so a doc edit cannot regress them.
+      Done: `tests/docs.rs` gained `markdown_limit`/`security_limit`, which
+      scope a contract to one `### N.` limit; a missing limit is a hard
+      failure. `security_documents_the_proc_environ_limit` now requires three
+      contiguous phrases from limit 1, so the session-file sentence at
+      `SECURITY.md:16` cannot satisfy it. `limit_contracts_reject_the_
+      phrase_from_another_section` proves the same phrase outside limit 1 is
+      rejected, and the limit 3 contracts (sandbox, encodings) are scoped the
+      same way. Verified by rewording limit 1: the test fails.
 
 ## Phase 3 — grants and audit log
 

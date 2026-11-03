@@ -1,3 +1,34 @@
+## 2026-11-02 — Scope documentation contracts to the limit that carries them (TODO R.5)
+
+- Test-only change in `tests/docs.rs`; no product code and no document text
+  changed. New pure helper `markdown_limit(markdown, number)` returns the
+  normalized body of one `### N.` subsection, and `security_limit(number)`
+  panics when the section is missing, so deleting a limit fails its contract
+  instead of making it vacuous.
+- `security_documents_the_proc_environ_limit` no longer asks the whole file
+  for `same user` (which matched the session-file sentence at
+  `SECURITY.md:16`). It now requires three contiguous phrases from limit 1:
+  the `/proc/<pid>/environ` sentence, "it does not apply to the child, which
+  is a separate process", and the "does not defend against malware already
+  running as you" consequence.
+- Applied the same scoping to the R.3 contracts: the "follow encodings or
+  transformations" and "It is not a sandbox." assertions now read limit 3
+  only. The R.4 contract already compares exact phrases in README and
+  `--help`.
+- Tests: new `limit_contracts_reject_the_phrase_from_another_section` feeds a
+  synthetic document whose intro contains the exact disclosure sentence but
+  whose limit 1 does not; the limit-1 contract rejects it while limits 1 and 2
+  still extract their own bodies. Also verified manually that rewording limit
+  1's key sentence now makes `security_documents_the_proc_environ_limit`
+  fail (restored before commit).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` pass (`cargo audit` not installed; skipped).
+- **Next iteration must know:** Phase R is now empty; the next unchecked item
+  is 3.1 (vault write lock). When a document's wording changes, update the
+  contiguous phrase in `tests/docs.rs` in the same commit; the helper accepts
+  only one-phrase bodies, not "the idea appears somewhere".
+- NEEDS HUMAN REVIEW: none.
+
 ## 2026-11-02 — Refuse `--db`/`PASSMGR_DB` for `run` (TODO R.4)
 
 - `src/cli/args.rs`: `parse_args` now reads `PASSMGR_DB` once, passes it to

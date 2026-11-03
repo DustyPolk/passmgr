@@ -28,17 +28,81 @@ fn help_text() -> String {
     String::from_utf8(output.stdout).expect("--help must be UTF-8")
 }
 
+/// Body of one numbered `### N.` subsection, normalized with [`plain`].
+///
+/// A global `contains` check can be satisfied by an unrelated sentence
+/// elsewhere in the document (the failure recorded as TODO R.5), so limit
+/// contracts must be scoped to the limit that carries them. Returns `None`
+/// when the subsection does not exist.
+fn markdown_limit(markdown: &str, number: u8) -> Option<String> {
+    let marker = format!("### {number}.");
+    let mut collecting = false;
+    let mut body = Vec::new();
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(marker.as_str())
+            && trimmed.as_bytes().get(marker.len()) == Some(&b' ')
+        {
+            collecting = true;
+            body.push(trimmed);
+            continue;
+        }
+        if collecting && (trimmed.starts_with("## ") || trimmed.starts_with("### ")) {
+            break;
+        }
+        if collecting {
+            body.push(trimmed);
+        }
+    }
+    if body.is_empty() {
+        return None;
+    }
+    Some(plain(&body.join("\n")))
+}
+
+/// `markdown_limit` for `SECURITY.md`; missing section is a hard failure so
+/// deleting a limit cannot turn its contract into a vacuous pass.
+fn security_limit(number: u8) -> String {
+    markdown_limit(SECURITY, number).unwrap_or_else(|| panic!("SECURITY.md has no limit {number}"))
+}
+
 /// The `/proc/<pid>/environ` limit is not optional: every injection path that
-/// puts a value in a child's environment must disclose it.
+/// puts a value in a child's environment must disclose it, in limit 1 itself.
+/// The old test accepted `same user` from `SECURITY.md:16` (the session-file
+/// sentence), so rewording the accepted limit stayed green (TODO R.5).
 #[test]
 fn security_documents_the_proc_environ_limit() {
+    let limit = security_limit(1);
     assert!(
-        SECURITY.contains("/proc/<pid>/environ"),
-        "SECURITY.md must name /proc/<pid>/environ"
+        limit.contains("any process running as the same user can read /proc/<pid>/environ"),
+        "SECURITY.md limit 1 must say that any same-user process can read it"
     );
     assert!(
-        SECURITY.contains("same user"),
-        "SECURITY.md must say that any same-user process can read it"
+        limit.contains("it does not apply to the child, which is a separate process"),
+        "SECURITY.md limit 1 must say that pmd hardening does not cover the child"
+    );
+    assert!(
+        limit.contains("does not defend against malware already running as you"),
+        "SECURITY.md limit 1 must keep the consequence for a hostile same-user process"
+    );
+}
+
+/// Regression for TODO R.5: the disclosure phrase is only accepted from
+/// limit 1, never from another section of the same document.
+#[test]
+fn limit_contracts_reject_the_phrase_from_another_section() {
+    let doc = "Intro. Any process running as the same user can read \
+               /proc/<pid>/environ.\n\n\
+               ### 1. A same-user process can read an injected value from \
+               /proc\n\nThe child receives the value in its environment.\n\n\
+               ### 2. Next\n\nUnrelated.\n";
+    let limit = markdown_limit(doc, 1).expect("synthetic limit 1");
+    assert!(!limit.contains("any process running as the same user can read /proc/<pid>/environ"));
+    assert!(limit.contains("The child receives the value in its environment."));
+    assert!(
+        markdown_limit(doc, 2)
+            .expect("synthetic limit 2")
+            .contains("Unrelated.")
     );
 }
 
@@ -59,8 +123,8 @@ fn security_documents_interpreter_exfiltration() {
 #[test]
 fn security_documents_that_redaction_is_not_a_sandbox() {
     assert!(
-        plain(SECURITY).contains("It is not a sandbox."),
-        "SECURITY.md must state that redaction is not a sandbox"
+        security_limit(3).contains("It is not a sandbox."),
+        "SECURITY.md limit 3 must state that redaction is not a sandbox"
     );
 }
 
@@ -120,7 +184,7 @@ fn docs_say_run_refuses_an_explicit_vault() {
 #[test]
 fn docs_agree_that_redaction_does_not_follow_encodings() {
     assert!(
-        plain(SECURITY).contains("follow encodings or transformations"),
+        security_limit(3).contains("follow encodings or transformations"),
         "SECURITY.md limit 3 must keep the encoding/transformation limit"
     );
 
