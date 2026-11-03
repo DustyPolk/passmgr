@@ -1,3 +1,36 @@
+## 2026-11-02 — Stop promising encoded-secret redaction (TODO R.3)
+
+- Docs only; no code changed. `README.md`, `src/cli/help.rs` and its golden
+  `tests/fixtures/help.txt` now say an **exact, contiguous occurrence** of the
+  injected secret is replaced with `[REDACTED]`, and that encoded or
+  transformed copies (base64, hex, percent-encoding, case changes) are not;
+  the README cites `SECURITY.md` limit 3 instead of promising "common
+  encodings".
+- Chose R.3's documentation branch, not "implement 4.6 first": 4.6 (hex,
+  base64 std/url-safe with and without padding, percent-encoding, plus
+  refusing <8-byte secrets for agent runs) is a multi-concept change and must
+  not share an iteration with a review fix. The leak is now disclosed instead
+  of falsely denied; `SECURITY.md` already described it correctly.
+- `tests/docs.rs`: new `help_text()` helper runs the real `passmgr --help`;
+  `docs_agree_that_redaction_does_not_follow_encodings` asserts README,
+  `--help` and `SECURITY.md` limit 3 all state the exact-byte rule and that no
+  document claims "common encodings". This is the contract style R.4 and R.5
+  should reuse.
+- `tests/run.rs`: `redaction_replaces_only_the_exact_secret_not_its_encodings`
+  runs a child that prints the canary and its base64; the raw value is
+  `[REDACTED]` and the encoded copy is relayed verbatim, pinning the
+  documented limit. The base64 is computed in the test, so it needs no
+  external binary on the child's fixed `PATH`.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  `cargo test` pass. `cargo audit` is not installed; skipped.
+- **Next iteration must know:** the redactor is still exact-bytes only, so
+  `run --env K=pm://… -- sh -c 'printf %s "$K" | base64'` still yields the
+  value; that is limit 3 and the reason TODO 4.6 exists (and why an
+  interpreter needs `--allow-interpreter`). When 4.6 lands, update README,
+  `--help` + fixture, `SECURITY.md` limit 3, this docs contract and the
+  `tests/run.rs` pin in one commit.
+- NEEDS HUMAN REVIEW: none beyond the accepted limit itself.
+
 ## 2026-11-02 — Run children in the caller's cwd and resolve commands client-side (TODO R.2)
 
 - `src/protocol/mod.rs`: protocol version 3. `RunRequest` gains a required

@@ -71,7 +71,7 @@ Phase 3: R.1 breaks a containment guarantee that the design already claims.
       is a usage error (exit 2); an absolute nonexistent path still reaches
       the daemon and fails as `spawn_failed` (exit 1). E2E tests cover both the
       cwd and the `PATH` split; `tests/daemon.rs` now runs in `/`.
-- [ ] **R.3 README and `--help` promise encoded-secret redaction that does
+- [x] **R.3 README and `--help` promise encoded-secret redaction that does
       not exist.** `README.md:173-174` says stdout/stderr are relayed with
       "the secret (and common encodings)" replaced by `[REDACTED]`, and
       `src/cli/help.rs:73` (fixture `tests/fixtures/help.txt:68`) repeats it,
@@ -87,6 +87,15 @@ Phase 3: R.1 breaks a containment guarantee that the design already claims.
       contract that README, `--help` and `SECURITY.md` agree on that limit,
       and an e2e test with a base64-encoded secret showing the documented
       behavior.
+      Done: took the documentation branch. `README.md`, `src/cli/help.rs` and
+      `tests/fixtures/help.txt` now say an **exact, contiguous occurrence** of
+      the secret is replaced, and that encoded or transformed copies (base64,
+      hex, percent-encoding, case changes) are not; README cites `SECURITY.md`
+      limit 3. `tests/docs.rs` runs the real `passmgr --help` and pins the
+      agreement of all three documents (and the absence of the old "common
+      encodings" promise). `tests/run.rs` proves the documented behavior with
+      a canary and its base64: the raw value is redacted, the encoded copy is
+      relayed verbatim. No code changed; 4.6 still owns the fix.
 - [ ] **R.4 `--db`/`PASSMGR_DB` are documented as global but silently
       ignored by `run`.** `src/cli/help.rs:89` lists `--db PATH` under
       "Global options" and `README.md:47`/`:53` show it, but

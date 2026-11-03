@@ -26,7 +26,14 @@ code does not implement yet.
   misuse require an explicit human grant.
 - `SECURITY.md` is the canonical list of accepted limits and out-of-scope
   threats. A behavior change that alters one updates it in the same commit;
-  `tests/docs.rs` pins the load-bearing statements.
+  `tests/docs.rs` pins the load-bearing statements (it also runs the real
+  `passmgr --help`, so a doc contract can compare README, `--help` and
+  `SECURITY.md`).
+- Child-output redaction replaces only an **exact, contiguous occurrence** of
+  the injected value. Encoded or transformed copies (base64, hex,
+  percent-encoding, case changes) are not redacted until TODO 4.6; README,
+  `--help` and `SECURITY.md` must say so, and `tests/run.rs`
+  (`redaction_replaces_only_the_exact_secret_not_its_encodings`) proves it.
 
 ## Crypto
 

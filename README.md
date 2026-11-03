@@ -175,9 +175,12 @@ caller's `PATH` (never the daemon's, which belongs to the shell that ran
 unresolvable program is refused with exit code 2 before the daemon is asked to
 run anything. The child receives a small fixed environment (`PATH`, `HOME`,
 `USER`, `LOGNAME`, `LANG`, `TZ`, `TMPDIR`, `TERM`, `LC_*`) plus that one
-variable. Its stdout and stderr are relayed with the secret (and common
-encodings) replaced by `[REDACTED]`, and `passmgr` exits with the child's
-status, or 128+N when the child was killed by signal N. Loader and shell-hook
+variable. Its stdout and stderr are relayed with an exact, contiguous
+occurrence of the secret replaced by `[REDACTED]`; encoded or transformed
+copies (base64, hex, percent-encoding, case changes) are not replaced —
+redaction is best-effort, not a sandbox (see `SECURITY.md`, limit 3).
+`passmgr` exits with the child's status, or 128+N when the child was killed by
+signal N. Loader and shell-hook
 names (`PATH`, `LD_*`, `BASH_ENV`, ...) are refused with exit code 5. The
 secret never crosses the socket to the CLI: only references and
 already-redacted output do.

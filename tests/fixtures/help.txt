@@ -64,10 +64,12 @@ Commands:
                              credential injected as the environment variable
                              NAME. The daemon injects it: no secret passes
                              through this process, and the child's stdout and
-                             stderr are relayed with the secret (and common
-                             encodings) replaced by [REDACTED]. passmgr exits
-                             with the child's status, or 128+N when the child
-                             was killed by signal N.
+                             stderr are relayed with an exact, contiguous
+                             occurrence of the secret replaced by [REDACTED].
+                             Encoded or transformed copies (base64, hex,
+                             percent-encoding, case changes) are not
+                             replaced. passmgr exits with the child's status,
+                             or 128+N when the child was killed by signal N.
                              Needs a running unlock daemon; the master
                              password is not prompted, so this is the
                              agent-facing way to use a secret. NAME must be a

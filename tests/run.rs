@@ -221,6 +221,66 @@ fn run_injects_a_secret_and_redacts_both_streams() {
 }
 
 #[test]
+fn redaction_replaces_only_the_exact_secret_not_its_encodings() {
+    // This pins the documented limit (README, `--help`, SECURITY.md limit 3):
+    // redaction is streaming and exact-bytes only, so a base64 copy of the
+    // canary is relayed verbatim. If encoded redaction (TODO 4.6) lands, the
+    // documents and this test must change together; until then, an agent that
+    // encodes the value itself gets it back, and no document may claim
+    // otherwise.
+    let daemon = Daemon::start();
+    let encoded = base64(SECRET.as_bytes());
+    assert_ne!(encoded, SECRET, "the fixture must actually be encoded");
+    let output = run(
+        &daemon,
+        &[
+            "run",
+            "--env",
+            &env_argument(&daemon, "API_KEY"),
+            "--",
+            "/bin/sh",
+            "-c",
+            // Print the raw value (must be redacted), a newline, then the
+            // base64 of the value (documented as not redacted).
+            r#"printf %s "$API_KEY"; printf '\n'; printf %s "$1""#,
+            "sh",
+            encoded.as_str(),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let expected = format!("[REDACTED]\n{encoded}");
+    assert_eq!(output.stdout, expected.as_bytes(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert!(
+        !output
+            .stdout
+            .windows(SECRET.len())
+            .any(|w| w == SECRET.as_bytes()),
+        "the raw canary reached the CLI output"
+    );
+}
+
+/// Standard base64 with padding, computed here so the test does not depend on
+/// an external `base64` binary being on the child's fixed `PATH`.
+fn base64(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in input.chunks(3) {
+        let b1 = u32::from(chunk[0]);
+        let b2 = u32::from(*chunk.get(1).unwrap_or(&0));
+        let b3 = u32::from(*chunk.get(2).unwrap_or(&0));
+        let triple = (b1 << 16) | (b2 << 8) | b3;
+        let index = |shift: u32| ALPHABET[((triple >> shift) & 0x3f) as usize] as char;
+        out.push(index(18));
+        out.push(index(12));
+        out.push(if chunk.len() > 1 { index(6) } else { '=' });
+        out.push(if chunk.len() > 2 { index(0) } else { '=' });
+    }
+    out
+}
+
+#[test]
 fn run_executes_relative_programs_in_the_callers_working_directory() {
     // The daemon was started from a directory that also contains `rel.sh`.
     // Running the daemon's copy instead of the caller's would hand the secret

@@ -17,6 +17,16 @@ fn plain(markdown: &str) -> String {
         .join(" ")
 }
 
+/// `--help` as an agent would read it (stdout of the real binary).
+fn help_text() -> String {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_passmgr"))
+        .arg("--help")
+        .output()
+        .expect("run passmgr --help");
+    assert!(output.status.success(), "--help must exit 0");
+    String::from_utf8(output.stdout).expect("--help must be UTF-8")
+}
+
 /// The `/proc/<pid>/environ` limit is not optional: every injection path that
 /// puts a value in a child's environment must disclose it.
 #[test]
@@ -75,4 +85,39 @@ fn readme_points_at_security_md() {
         README.contains("SECURITY.md"),
         "README.md must link to SECURITY.md"
     );
+}
+
+/// Redaction replaces only an exact, contiguous occurrence of the value; it
+/// does not follow encodings (TODO 4.6). README and `--help` once promised
+/// "common encodings" and thereby overstated the guarantee, so this contract
+/// pins all three documents to the same limit. When 4.6 lands, update the
+/// documents and this test together, and keep
+/// `redaction_replaces_only_the_exact_secret_not_its_encodings` in
+/// `tests/run.rs` honest.
+#[test]
+fn docs_agree_that_redaction_does_not_follow_encodings() {
+    assert!(
+        plain(SECURITY).contains("follow encodings or transformations"),
+        "SECURITY.md limit 3 must keep the encoding/transformation limit"
+    );
+
+    let documents = [
+        ("README.md", plain(README)),
+        ("--help", plain(&help_text())),
+    ];
+    for (name, text) in documents {
+        let text = text.to_lowercase();
+        assert!(
+            text.contains("exact, contiguous occurrence of the secret"),
+            "{name} must say that only an exact occurrence is redacted"
+        );
+        assert!(
+            text.contains("encoded or transformed copies"),
+            "{name} must state that encoded copies are not redacted"
+        );
+        assert!(
+            !text.contains("common encodings"),
+            "{name} must not claim that common encodings are redacted"
+        );
+    }
 }
