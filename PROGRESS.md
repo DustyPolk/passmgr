@@ -1,3 +1,34 @@
+## 2026-11-03 — Make `TokenHash` comparisons constant-time by construction (TODO R.13)
+
+- `src/grant.rs`: `TokenHash` now derives only `Clone, Copy`; `PartialEq` and
+  `Eq` are gone, so `a == b` on a secret-derived digest no longer compiles and
+  `TokenHash::matches` (the constant-time loop) is the only comparison. No
+  caller used `==` (grep of `src/` and `tests/` confirmed before the change).
+  `as_bytes` stays public for payload encoding, with a doc line saying never
+  to compare those bytes with `==`.
+- Docs on the type now state the rule and carry two doctests: a
+  `compile_fail` one (`left == right` must not compile) and a companion one
+  that compiles the same setup and uses `matches`, so the compile-fail test
+  cannot pass merely because the snippet is broken somewhere else.
+- Chose a `compile_fail` doctest over the TODO's `trybuild` option: no new
+  dev-dependency (so there is none to justify), the real compiler is the
+  oracle, and it runs under the existing `cargo test`. `trybuild` would have
+  pulled a new tree in for one assertion; a source-guard text parse would
+  prove only the source text, not the type's API.
+- Verified the test is real: with `#[derive(Clone, Copy, PartialEq, Eq)]`
+  temporarily restored, `cargo test --doc` fails with "Test compiled
+  successfully, but it's marked `compile_fail`"; reverted, it passes.
+- `DECISIONS.md`: the grant-token line now records the no-`PartialEq` rule and
+  the doctest that pins it.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` (including the two doctests) green. `cargo audit` not
+  installed; skipped.
+- **Next iteration must know:** `TokenHash` cannot be compared, sorted or used
+  as a map key; 3.2b/3.6 must look grants up with `matches`/`matches_token`
+  (hash the presented token, then scan). `as_bytes` remains a way to compare
+  bytes manually, so a later review may want it restricted to encoding. Next
+  item is R.14 (bidi/zero-width grant labels).
+
 ## 2026-11-03 — Stop the relay from reaping the process-group leader (TODO R.12)
 
 - `src/runner.rs`: `relay` no longer takes `&mut Child`, and its timeout arm no

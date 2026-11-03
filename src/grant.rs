@@ -124,7 +124,30 @@ fn hex_digit(byte: u8) -> Option<u8> {
 /// The raw token exists only in the MCP server's memory; the vault and every
 /// log hold this hash instead. It is not reversible, but it is still never
 /// printed, so a debugging aid cannot leak a grant's fingerprint.
-#[derive(Clone, Copy, PartialEq, Eq)]
+///
+/// Compare with [`TokenHash::matches`], never `==`: there is deliberately no
+/// `PartialEq` implementation, because an early-exit comparison would turn a
+/// secret-derived digest into a timing oracle. The equality syntax below must
+/// not compile; `cargo test` runs this doctest.
+///
+/// ```compile_fail
+/// use passmgr::grant::TokenHash;
+///
+/// let left = TokenHash::of(b"token");
+/// let right = TokenHash::of(b"token");
+/// assert!(left == right);
+/// ```
+///
+/// The only supported comparison compiles and is constant-time:
+///
+/// ```
+/// use passmgr::grant::TokenHash;
+///
+/// let left = TokenHash::of(b"token");
+/// assert!(left.matches(&TokenHash::of(b"token")));
+/// assert!(!left.matches(&TokenHash::of(b"other")));
+/// ```
+#[derive(Clone, Copy)]
 pub struct TokenHash([u8; TOKEN_HASH_BYTES]);
 
 impl TokenHash {
@@ -139,12 +162,14 @@ impl TokenHash {
         Self(bytes)
     }
 
+    /// The raw digest, for encoding the vault payload only. Never compare
+    /// these bytes with `==`; use [`TokenHash::matches`].
     pub fn as_bytes(&self) -> &[u8; TOKEN_HASH_BYTES] {
         &self.0
     }
 
     /// Constant-time comparison, so a caller cannot learn the hash byte by
-    /// byte from timing. Used instead of `==` by the daemon's token lookup.
+    /// byte from timing. The only comparison this type supports.
     pub fn matches(&self, other: &Self) -> bool {
         let mut difference = 0u8;
         for (left, right) in self.0.iter().zip(other.0.iter()) {

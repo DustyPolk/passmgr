@@ -59,7 +59,7 @@ continuing Phase 3; each names the test that must prove the fix.
       `a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes`
       proves the zombie survives three poll slices and is reaped only by the
       cancel path.
-- [ ] **R.13 `TokenHash` exposes a non-constant-time `==`.** `src/grant.rs:127`
+- [x] **R.13 `TokenHash` exposes a non-constant-time `==`.** `src/grant.rs:127`
       derives `PartialEq, Eq` on `TokenHash`, while `SessionToken` documents
       the opposite convention ("deliberately no `PartialEq` implementation
       that could be used by accident", `src/token.rs:27-31`) and
@@ -72,6 +72,11 @@ continuing Phase 3; each names the test that must prove the fix.
       not compile; if a new dev-dependency is refused, a source-guard test
       that parses the `TokenHash` derive list and fails if `PartialEq`/`Eq`
       returns.
+      Done: the derive is `Clone, Copy` only; `matches` is the sole
+      comparison. A `compile_fail` doctest in `src/grant.rs` proves `==` does
+      not compile, and its companion doctest proves `matches` does. Chose a
+      doctest over `trybuild`/a source guard: no new dependency and the
+      compiler, not a text parse, is the oracle.
 - [ ] **R.14 Grant labels accept bidi and zero-width characters.**
       `validate_label` (`src/grant.rs:699-713`) rejects only
       `char::is_control` (`src/grant.rs:708`), which is Unicode Cc. Verified:

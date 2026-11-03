@@ -347,7 +347,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   (`list` = 1, `run` = 2) with unknown bits rejected on decode.
 - A grant stores `TokenHash` = SHA-256 of the raw 32 token bytes, never the
   token. `Debug` renders `TokenHash(<redacted>)`; there is no `Display` and no
-  hex rendering. `TokenHash::matches` is constant-time.
+  hex rendering. `TokenHash` deliberately has **no** `PartialEq`/`Eq`: the only
+  comparison is `TokenHash::matches`, which is constant-time. A `compile_fail`
+  doctest in `src/grant.rs` fails the gate if `==` becomes usable again
+  (TODO R.13); `as_bytes` is for payload encoding only.
 - `sha2` (RustCrypto, `0.10`, sharing `digest` 0.10 with the existing
   `blake2`/Argon2 tree) is the only dependency added by 3.2a. `hmac` moves to
   TODO 3.3, its first use; adding an unused crate now would hide that.
