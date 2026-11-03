@@ -67,9 +67,9 @@ Rules that apply to every item:
       field; `unauthorized` is a distinct response and does not refresh the
       idle timer. `lock` and a daemon exit remove the file. Clients refuse a
       token file that is not a regular 0600 file owned by the user.)
-- [ ] **2.6 `run --env NAME=<ref> -- <cmd>` via the daemon.** Split into ordered
+- [x] **2.6 `run --env NAME=<ref> -- <cmd>` via the daemon.** Split into ordered
       pieces because the item spans the redactor, the wire protocol, the daemon
-      and the CLI.
+      and the CLI. (All pieces landed: 2.6a–2.6d.)
 - [x] **2.6a Streaming redactor (`src/redact.rs`).** Pure, reusable byte-stream
       redactor: replaces every occurrence of the injected value with a fixed
       marker and holds back a partial-match suffix so a value split across two
@@ -98,12 +98,14 @@ Rules that apply to every item:
       names and starts the child from a fixed env allowlist, not the daemon's
       environment. **Transitional:** `run` is authorized by the session token
       until TODO 3.6 adds grants.)
-- [ ] **2.6d CLI `run` + client reader.** `passmgr run --env NAME=<ref> -- <cmd>`
+- [x] **2.6d CLI `run` + client reader.** `passmgr run --env NAME=<ref> -- <cmd>`
       forwards frames to its own stdout/stderr and exits with the child's status;
       refuses malformed specs and non-daemon operation with stable exit codes.
       Tests: end-to-end injection, output relay, redaction, exit-code
       propagation, and agent-mode use (this is the intended agent surface).
       Audit-log assertions belong to 3.3, when the log exists.
+      (Exactly one `--env` per run because the protocol injects one value;
+      signal N renders as 128+N. Reader is `client::run`; e2e in `tests/run.rs`.)
 - [ ] **2.7 `SECURITY.md` limit note**: same-user process can read
       `/proc/<pid>/environ` while the child runs. Not optional.
 

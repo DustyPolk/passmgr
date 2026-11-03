@@ -5,11 +5,13 @@
 mod args;
 mod commands;
 mod help;
+mod run;
 mod unlock;
 
 pub(crate) use args::*;
 pub(crate) use commands::*;
 pub(crate) use help::*;
+pub(crate) use run::*;
 pub(crate) use unlock::*;
 
 use std::env;
@@ -31,7 +33,7 @@ use std::path::PathBuf;
 
 pub(crate) fn main() -> std::process::ExitCode {
     match run() {
-        Ok(()) => std::process::ExitCode::from(EXIT_OK),
+        Ok(code) => code,
         Err(CliError::Usage(message)) => {
             eprintln!("passmgr: {message}");
             eprintln!();
@@ -59,7 +61,7 @@ impl From<Error> for CliError {
     }
 }
 
-fn run() -> Result<(), CliError> {
+fn run() -> Result<std::process::ExitCode, CliError> {
     let parsed = parse_args(env::args_os().skip(1).collect()).map_err(CliError::Usage)?;
     let path = parsed.db_path;
     let agent_mode = parsed.agent;
@@ -76,8 +78,9 @@ fn run() -> Result<(), CliError> {
         Command::Show { reference, json } => command_show(&reference, json, &path)?,
         Command::Unlock { idle_timeout } => command_unlock(agent_mode, &path, idle_timeout)?,
         Command::Lock => command_lock()?,
+        Command::Run(options) => return Ok(command_run(options)?),
     }
-    Ok(())
+    Ok(std::process::ExitCode::SUCCESS)
 }
 pub(crate) fn stdout_write(arguments: std::fmt::Arguments<'_>) -> Result<(), Error> {
     let stdout = io::stdout();
@@ -517,5 +520,126 @@ mod tests {
         let text = serde_json::to_string(&entry).unwrap();
         assert!(!text.contains("1970-0"));
         assert!(!text.contains("correct horse battery"));
+    }
+    const RUN_REF: &str = "pm://00112233445566778899aabbccddeeff";
+
+    #[test]
+    fn parses_run_env_and_command_argv() {
+        let Command::Run(options) = parse(&[
+            "run",
+            "--env",
+            &format!("API_KEY={RUN_REF}"),
+            "--",
+            "/usr/bin/printenv",
+            "API_KEY",
+            "--flag",
+        ])
+        .unwrap() else {
+            panic!("expected run command");
+        };
+        assert_eq!(options.env, "API_KEY");
+        assert_eq!(options.reference, RUN_REF);
+        // Everything after `--` is argv: flags and values are not re-parsed.
+        assert_eq!(options.command, ["/usr/bin/printenv", "API_KEY", "--flag"]);
+
+        let Command::Run(options) = parse(&[
+            "run",
+            &format!("--env=GH_TOKEN={RUN_REF}"),
+            "--",
+            "gh",
+            "api",
+            "user",
+        ])
+        .unwrap() else {
+            panic!("expected run command");
+        };
+        assert_eq!(options.env, "GH_TOKEN");
+        assert_eq!(options.command, ["gh", "api", "user"]);
+    }
+
+    #[test]
+    fn run_rejects_malformed_specs_before_connecting() {
+        for values in [
+            vec!["run", "--", "true"],                     // no --env
+            vec!["run", "--env", "--", "true"],            // --env without value
+            vec!["run", "--env", "API_KEY", "--", "true"], // no '='
+            vec!["run", "--env", "=pm://x", "--", "true"], // empty name
+            vec![
+                "run",
+                "--env",
+                "1BAD=pm://00112233445566778899aabbccddeeff",
+                "--",
+                "true",
+            ],
+            vec![
+                "run",
+                "--env",
+                "BAD-NAME=pm://00112233445566778899aabbccddeeff",
+                "--",
+                "true",
+            ],
+            vec!["run", "--env", "API_KEY=not-a-ref", "--", "true"], // bad reference
+            vec!["run", "--env", "API_KEY=pm://x", "--", "true"],    // short reference
+            vec![
+                "run",
+                "--env",
+                "API_KEY=pm://00112233445566778899aabbccddeeff",
+            ],
+            vec![
+                "run",
+                "--env",
+                "API_KEY=pm://00112233445566778899aabbccddeeff",
+                "--",
+            ],
+            vec![
+                "run",
+                "--env",
+                "A=pm://00112233445566778899aabbccddeeff",
+                "--env",
+                "B=pm://00112233445566778899aabbccddeeff",
+                "--",
+                "true",
+            ],
+            vec!["run", "--bogus", "--", "true"],
+            vec![
+                "run",
+                "API_KEY=pm://00112233445566778899aabbccddeeff",
+                "--",
+                "true",
+            ],
+            vec![
+                "run",
+                "--env",
+                "API_KEY=pm://00112233445566778899aabbccddeeff",
+                "--",
+                "",
+            ],
+        ] {
+            assert!(parse(&values).is_err(), "should reject {values:?}");
+        }
+        // A missing command after `--` is a usage error, not a run of nothing.
+        let error = parse(&[
+            "run",
+            "--env",
+            "API_KEY=pm://00112233445566778899aabbccddeeff",
+            "--",
+        ])
+        .unwrap_err();
+        assert!(error.contains("missing command"), "{error}");
+    }
+
+    #[test]
+    fn run_only_adds_refusal_in_agent_mode() {
+        let parsed = parse_args(vec![
+            OsString::from("--agent"),
+            OsString::from("run"),
+            OsString::from("--env"),
+            OsString::from("API_KEY=pm://00112233445566778899aabbccddeeff"),
+            OsString::from("--"),
+            OsString::from("true"),
+        ])
+        .unwrap();
+        assert!(parsed.agent);
+        assert!(matches!(parsed.command, Command::Run(_)));
     }
 }

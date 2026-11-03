@@ -106,7 +106,17 @@ code does not implement yet.
   counts even when empty) and no `--agent`. Checked before unlocking, so a
   refusal never prompts. The decision lives in `src/agent.rs`.
 - `--agent` can only add refusal. `unlock` is human-only under the same rule;
-  `lock` needs no TTY because it can only stop the daemon.
+  `lock` and `run` need no TTY because neither reveals a value (`lock` only
+  stops the daemon, `run` only uses a reference).
+- `run` grammar: `passmgr run --env NAME=<ref> -- <command> [args...]`.
+  Exactly one `--env` (the protocol injects one secret per run), required,
+  with `NAME` and `<ref>` validated before connecting; `--` is required and
+  everything after it is argv, never re-parsed. A malformed spec is exit 2; a
+  loader/shell-hook NAME is refused locally with exit 5 before any socket is
+  opened (the daemon independently refuses it too). Daemon refusals map to:
+  `not_found` -> 3, `spawn_failed`/`bad_request`/`internal`/`unauthorized`/
+  `unsupported` -> 1. A normal exit passes through; signal `N` renders as
+  `128 + N` at the CLI only (the wire keeps the two cases distinct).
 - `rm` is a pure alias of `delete` (same message, same exit code).
 - `edit` rotation rule: a bare `edit` or one with `--generate` rotates the
   password; `--username`/`--rename`/`--tag`/`--clear-tags` alone is a
@@ -204,7 +214,7 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   `$XDG_RUNTIME_DIR/passmgr/session`. Loading requires a regular 0600 file
   owned by the user, opened `O_NOFOLLOW`, at most 512 bytes; anything else is
   an error, never repaired.
-- The session token authorizes `ping` and `lock` today. It is **not** a
+- The session token authorizes `ping`, `lock` and `run` today. It is **not** a
   human/agent boundary and must never be enough to use a secret. TODO 3.6
   makes `run` (and every credential-touching request) require a grant.
   **Transitional gap (2.6c until 3.6):** `pmd` authorizes `run` with the
@@ -231,6 +241,11 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - `lock`, `SIGTERM`, `SIGINT` and the idle timeout all wipe the key, remove
   the socket, and remove the session file only if it still holds this
   daemon's token.
+- The streaming client (`client::run`) reads frames until the terminal frame,
+  with no idle/read timeout: a legitimate child may stay silent for minutes,
+  and the daemon closes the socket when it exits. EOF before a terminal frame
+  is a `Daemon` error, never a silent success. The CLI relays only
+  non-terminal frames and stops at the first terminal frame.
 - `client`, `daemon`, `session` and `socket` are `#[cfg(unix)]`; the CLI has
   non-Unix stubs, and no unchecked accept path exists on an unsupported
   platform.

@@ -573,6 +573,22 @@ fn validate_request(request: &Request) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// Whether `env` is a syntactically valid environment variable name.
+///
+/// This is syntax only: the daemon additionally refuses names that would let
+/// an agent hijack the child (see [`crate::runner::denied_env_name`]). It is
+/// public so the CLI can reject a malformed `--env` before it connects, with a
+/// usage exit code instead of a daemon round-trip.
+pub fn valid_env_name(env: &str) -> bool {
+    if env.is_empty() || env.len() > MAX_ENV_NAME_BYTES {
+        return false;
+    }
+    let mut bytes = env.bytes();
+    let first = bytes.next().expect("checked non-empty");
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 fn validate_env_name(env: &str) -> Result<(), ProtocolError> {
     if env.is_empty() {
         return Err(ProtocolError::InvalidRequest(
@@ -898,6 +914,25 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(keys, ["command", "env", "ref", "type"]);
+    }
+
+    #[test]
+    fn env_name_syntax_is_shared_with_the_cli() {
+        // The CLI pre-checks with `valid_env_name`; both paths must agree so a
+        // name can never pass the client and fail at the daemon (or vice
+        // versa) because the two grammars drifted.
+        for name in ["A", "_", "A_B9", "a", "_0"] {
+            assert!(valid_env_name(name), "{name}");
+            assert!(validate_env_name(name).is_ok(), "{name}");
+        }
+        for name in ["", "1BAD", "BAD-NAME", "A B", "A.B", "é", "_é"] {
+            assert!(!valid_env_name(name), "{name}");
+            assert!(validate_env_name(name).is_err(), "{name}");
+        }
+        let long = "A".repeat(MAX_ENV_NAME_BYTES + 1);
+        assert!(!valid_env_name(&long));
+        assert!(validate_env_name(&long).is_err());
+        assert!(valid_env_name(&"A".repeat(MAX_ENV_NAME_BYTES)));
     }
 
     #[test]

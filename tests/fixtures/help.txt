@@ -59,6 +59,24 @@ Commands:
   lock                       Ask the unlock daemon to wipe its key and stop.
                              Requires no terminal: it only shuts the daemon
                              down, so an agent may use it.
+  run --env NAME=<ref> -- <command> [args...]
+                             Run <command> with the secret from the referenced
+                             credential injected as the environment variable
+                             NAME. The daemon injects it: no secret passes
+                             through this process, and the child's stdout and
+                             stderr are relayed with the secret (and common
+                             encodings) replaced by [REDACTED]. passmgr exits
+                             with the child's status, or 128+N when the child
+                             was killed by signal N.
+                             Needs a running unlock daemon; the master
+                             password is not prompted, so this is the
+                             agent-facing way to use a secret. NAME must be a
+                             valid variable name and may not be a loader or
+                             shell-hook variable (PATH, LD_*, BASH_ENV, ...).
+                             The command is executed directly, never through a
+                             shell string; it receives a small fixed inherited
+                             environment (PATH, HOME, USER, LOGNAME, LANG,
+                             TZ, TMPDIR, TERM, LC_*) plus NAME.
   help                       Show this help.
   version                    Show version information.
 
@@ -92,6 +110,8 @@ Examples:
   passmgr show pm://0123456789abcdef0123456789abcdef
   passmgr unlock --idle-timeout 300
   passmgr lock
+  passmgr run --env GH_TOKEN=pm://0123456789abcdef0123456789abcdef \
+      -- gh auth status
   passmgr --db ~/.secrets/work.dat list
 
 Notes:
@@ -128,5 +148,10 @@ Notes:
     local convenience, not a human/agent boundary. The daemon stops on
     'lock', on SIGTERM/SIGINT, or after the idle timeout (default 15 minutes,
     set with 'unlock --idle-timeout SECS').
+  - 'run' needs the unlock daemon ('run' refuses with exit code 1 when it is
+    not running). Its child receives only the fixed inherited environment
+    listed above, then NAME; it never inherits the rest of the caller's
+    environment. The secret is used, not read: output is redacted, and
+    nothing on this side of the daemon ever holds the value.
   - Vaults are encrypted with Argon2id and AES-256-GCM.
   - The legacy C vault format is not readable; this version uses a new format.

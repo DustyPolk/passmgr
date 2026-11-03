@@ -18,6 +18,8 @@ encrypted vault file; there is no server, account, or network access.
 - Passwords are never accepted as command-line arguments and are not echoed
   while typing.
 - Sensitive buffers are zeroized when dropped.
+- Daemon-backed injection (`passmgr run`): a reference, an argv and a running
+  `pmd`; the secret is used, never printed, and the relayed output is redacted.
 - A small dependency set: `aes-gcm`, `argon2`, `getrandom`, `tempfile`,
   `zeroize`, and `libc` for terminal handling.
 
@@ -53,8 +55,9 @@ order:
 3. `./passwords.dat`
 
 The master password is prompted for every command except `generate`, `help`,
-and `version`. Prompts are written to stderr, so stdout only contains command
-data. When stdin is a pipe, passwords are read as ordinary lines, which makes
+`version`, `lock`, and `run`; `lock` and `run` talk to an already-unlocked
+daemon instead, and `unlock` prompts once to start it. Prompts are written to
+stderr, so stdout only contains command data. When stdin is a pipe, passwords are read as ordinary lines, which makes
 the tool scriptable:
 
 ```bash
@@ -148,8 +151,33 @@ and the global `--agent` flag was not passed. `--agent` can only add refusal: it
 makes metadata commands explicitly agent-safe and is never a way to obtain a
 secret. There is no bypass flag, and the check happens before the vault is
 opened, so a pipe or an agent never reaches the plaintext. Do not try to feed secrets to
-another program with `--reveal`. Injection commands (planned `run --env`) are
-the supported way to use a secret without reading it.
+another program with `--reveal`. Use injection (below) to let a command use a
+secret without reading it.
+
+### Use a credential without reading it
+
+`run` lets a command use a secret while the value stays out of the caller's
+process. It needs an unlocked daemon, so it does not prompt for the master
+password:
+
+```bash
+passmgr unlock
+passmgr run --env GH_TOKEN=pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5 \
+    -- gh auth status
+```
+
+The daemon decrypts the referenced credential, injects it as the named
+environment variable, and runs the command directly (argv, never a shell
+string). The child receives a small fixed environment (`PATH`, `HOME`, `USER`,
+`LOGNAME`, `LANG`, `TZ`, `TMPDIR`, `TERM`, `LC_*`) plus that one variable. Its
+stdout and stderr are relayed with the secret (and common encodings) replaced
+by `[REDACTED]`, and `passmgr` exits with the child's status, or 128+N when the
+child was killed by signal N. Loader and shell-hook names (`PATH`, `LD_*`,
+`BASH_ENV`, ...) are refused with exit code 5. The secret never crosses the
+socket to the CLI: only references and already-redacted output do.
+
+`run` is the supported way to give an agent a credential. The agent supplies
+the reference (from `list --json`) and a command, never the value.
 
 ### List services
 

@@ -1,3 +1,37 @@
+## 2026-11-02 — CLI `run` streams through the daemon (TODO 2.6d)
+
+- New `src/cli/run.rs`: `command_run` validates the env name against the
+  daemon's denylist (local refusal, exit 5, no socket), loads the session
+  token, sends one `RunRequest`, and relays non-terminal frames to its own
+  stdout/stderr (flushed per frame). Exits with the child's code; signal N
+  renders as 128+N (the wire keeps them distinct). Terminal refusals map:
+  `not_found` 3, `spawn_failed`/`bad_request`/`internal`/`unauthorized`/
+  `unsupported` 1; no daemon -> 1 with "start one with 'passmgr unlock'".
+- New `client::run(paths, token, &RunRequest, on_frame) -> RunOutcome`:
+  streaming reader over `FrameDecoder` + `RunStream` ordering guard. No read
+  timeout (silent children are legitimate); EOF before a terminal frame is a
+  `Daemon` error. `decode_frame_body` restores the length prefix the decoder
+  strips. Exposed `protocol::valid_env_name` so the CLI grammar cannot drift
+  from the wire grammar (agreement test).
+- `src/cli/args.rs`: `Command::Run(RunOptions)` via `parse_run`; exactly one
+  `--env NAME=<ref>` (protocol injects one value), `--` required, argv after
+  it is never re-parsed, limits (`MAX_ARGS`, `MAX_ARG_BYTES`, ref syntax)
+  checked locally for a usage exit 2.
+- Help text gained a `run` entry, example and note; `tests/fixtures/help.txt`
+  regenerated deliberately; README documents `run`; DECISIONS gained the
+  grammar/exit/stream-reader rules.
+- Tests: 5 client unit tests (relay order, refusal, truncation, stop at first
+  terminal, malformed frame), 3 parser tests, 2 code-mapping unit tests, a
+  protocol grammar-agreement test, and 8 `tests/run.rs` e2e tests (injection +
+  both-stream redaction, exit 7 passthrough, SIGTERM -> 143, agent mode with
+  non-TTY stdio, no-daemon message, loader-name refusal with no spawn, usage
+  exit 2, not-found 3 + spawn failure 1 with the daemon still healthy).
+- Gate: fmt, clippy -D warnings, full test suite pass.
+- **Next iteration must know:** `--db` is ignored by `run` (the daemon owns
+  the vault it was started with); there is no multi-secret run yet; `run`
+  frames are still unaudited until 3.8, and `run` is still session-token
+  authorized until 3.6, so MCP must not expose it yet.
+
 ## 2026-11-02 — Daemon executes `run` with redacted output (TODO 2.6c)
 
 - New `src/runner.rs` (cfg(unix)): `execute(argv, env_name, secret, inherited,

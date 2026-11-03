@@ -40,8 +40,19 @@ pub(crate) enum Command {
         idle_timeout: Option<std::time::Duration>,
     },
     Lock,
+    Run(RunOptions),
     Help,
     Version,
+}
+
+#[derive(Debug)]
+pub(crate) struct RunOptions {
+    /// Environment variable the daemon injects the secret into.
+    pub(crate) env: String,
+    /// Credential reference (`pm://...`) the daemon resolves.
+    pub(crate) reference: String,
+    /// argv for the child. Never joined into a shell string.
+    pub(crate) command: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -186,6 +197,7 @@ pub(crate) fn parse_command(command: OsString, rest: Vec<OsString>) -> Result<Co
             require_no_arguments("lock", &rest)?;
             Ok(Command::Lock)
         }
+        "run" => parse_run(rest),
         other => Err(format!("unknown command '{other}' (try 'passmgr --help')")),
     }
 }
@@ -209,6 +221,110 @@ pub(crate) fn require_no_arguments(command: &str, args: &[OsString]) -> Result<(
     } else {
         Err(format!("'{command}' takes no arguments"))
     }
+}
+
+/// `run --env NAME=<ref> -- <command> [args...]`.
+///
+/// The command is everything after `--`; it is never re-parsed or joined into
+/// a shell string. Exactly one `--env` is accepted because the daemon protocol
+/// injects one secret per run.
+pub(crate) fn parse_run(args: Vec<OsString>) -> Result<Command, String> {
+    const USAGE: &str = "'run' usage: passmgr run --env NAME=<ref> -- <command> [args...]";
+
+    let mut env_spec = None;
+    let mut index = 0;
+    let command_start = loop {
+        let Some(argument) = args.get(index) else {
+            return Err(format!("{USAGE} (missing '--')"));
+        };
+        let Some(text) = argument.to_str() else {
+            return Err("arguments must be valid UTF-8".to_owned());
+        };
+        if text == "--" {
+            break index + 1;
+        }
+        if text == "--env" {
+            let value = flag_value(&args, index, "--env")?;
+            set_run_env(&mut env_spec, value)?;
+            index += 2;
+            continue;
+        }
+        if let Some(value) = text.strip_prefix("--env=") {
+            set_run_env(&mut env_spec, value.to_owned())?;
+            index += 1;
+            continue;
+        }
+        return Err(format!("unexpected argument '{text}' for 'run'; {USAGE}"));
+    };
+
+    let spec = env_spec.ok_or_else(|| format!("{USAGE} (missing --env)"))?;
+    let (env, reference) = spec
+        .split_once('=')
+        .ok_or_else(|| "--env expects NAME=<ref>, with one '=' between them".to_owned())?;
+    if !passmgr::protocol::valid_env_name(env) {
+        return Err(format!(
+            "--env name '{env}' is invalid: use 1-{} ASCII letters, digits or '_', \
+             not starting with a digit",
+            passmgr::protocol::MAX_ENV_NAME_BYTES
+        ));
+    }
+    if reference.is_empty() {
+        return Err("--env reference is empty".to_owned());
+    }
+    if reference.len() > passmgr::protocol::MAX_REFERENCE_BYTES {
+        return Err(format!(
+            "--env reference exceeds {} bytes",
+            passmgr::protocol::MAX_REFERENCE_BYTES
+        ));
+    }
+    if passmgr::store::EntryId::parse_ref(reference).is_err() {
+        return Err(format!(
+            "--env reference '{reference}' is not a pm:// reference (see 'passmgr list')"
+        ));
+    }
+
+    let command: Vec<String> = args[command_start..]
+        .iter()
+        .map(|argument| {
+            argument
+                .to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "command arguments must be valid UTF-8".to_owned())
+        })
+        .collect::<Result<_, _>>()?;
+    if command.is_empty() {
+        return Err(format!("{USAGE} (missing command after '--')"));
+    }
+    if command.len() > passmgr::protocol::MAX_ARGS {
+        return Err(format!(
+            "command has more than {} arguments",
+            passmgr::protocol::MAX_ARGS
+        ));
+    }
+    for (position, argument) in command.iter().enumerate() {
+        if argument.len() > passmgr::protocol::MAX_ARG_BYTES {
+            return Err(format!(
+                "command argument {position} exceeds {} bytes",
+                passmgr::protocol::MAX_ARG_BYTES
+            ));
+        }
+    }
+    if command[0].is_empty() {
+        return Err("the command path must not be empty".to_owned());
+    }
+
+    Ok(Command::Run(RunOptions {
+        env: env.to_owned(),
+        reference: reference.to_owned(),
+        command,
+    }))
+}
+
+fn set_run_env(slot: &mut Option<String>, spec: String) -> Result<(), String> {
+    if slot.replace(spec).is_some() {
+        return Err("'run' accepts exactly one --env (one secret per command)".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
