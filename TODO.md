@@ -856,7 +856,7 @@ Rules that apply to every item:
       both pipes are already at EOF, so a survivor is a straggler that must
       not keep the value. `tests/docs.rs` pins the limit-1 wording.
 
-- [ ] **R.39 `grant revoke` (and `grant create`) fails with `internal`
+- [x] **R.39 `grant revoke` (and `grant create`) fails with `internal`
       whenever a concurrent `run` writes the vault.**
       `src/daemon.rs` `revoke_grants` (~`:723-768`) opens the vault without
       the lock, then `lock_for_update()` maps `VaultChanged` to
@@ -877,6 +877,12 @@ Rules that apply to every item:
       Test: concurrent runs plus one `grant_revoke`; the first revoke must
       return `Ok(1)` and the grant must be revoked on disk, in each of ~20
       trials. Same shape for `grant create` against concurrent runs.
+      Done: `Vault::open_with_key_for_update` (lock, *then* read) is now used
+      by `revoke_grants`, `record_use` (retry loop gone) and `grant create`;
+      the CLI's advisory pre-check keeps its `lock_for_update` for `add`/`edit`.
+      Tests: `tests/daemon_concurrency.rs::revocation_succeeds_while_runs_record_their_use`
+      (20 trials), `src/daemon/tests.rs::revocation_does_not_lose_to_a_concurrent_vault_write`
+      and `tests/grant_cli.rs::grant_create_keeps_a_concurrent_vault_write_and_still_succeeds`.
 
 - [ ] **R.40 `Vault::save(master)` re-salts and resets the KDF parameters,
       stranding a running `pmd` and silently downgrading stronger

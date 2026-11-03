@@ -126,8 +126,10 @@ code does not implement yet.
 - Writers serialize on an exclusive `flock` over the sidecar `<vault>.lock`
   (0600, `O_NOFOLLOW`, never unlinked), held from before the read until the
   `Vault` is dropped. `Vault::open`/`open_with_key` are read-only and take no
-  lock (atomic rename makes reads safe); only `open_for_update`/`open_for_add`
-  and `lock_for_update` may `save`, and they give up after 30 s with
+  lock (atomic rename makes reads safe); only `open_for_update`,
+  `open_for_add` and `open_with_key_for_update` may `save` (the last one takes
+  the lock and *then* reads, so a writer that got in first is seen, not
+  refused), and they give up after 30 s with
   `VaultBusy` (exit 1, nothing changed). Do not unlink a held lock file: a
   second writer would lock a fresh inode.
 - Commands that prompt for a secret (`add`, `edit`) must not hold the lock
@@ -545,7 +547,14 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   (which does take a new salt, and is run while no daemon is unlocked) still
   works. `lock_for_update` byte-compares the container the CLI read before
   saving, so a concurrent human write becomes `VaultChanged`, not a lost
-  update. Interpreters are refused at approval time (`--allow-interpreter`),
+  update; that compare-and-lock is for commands with an unattended wait
+  (a human typing) and stays local to them. A writer with no such wait in
+  front of it — the daemon's `record_use` and `grant_revoke`, and
+  `pm grant create` once the approval is spent — instead opens with
+  `Vault::open_with_key_for_update`, which takes the lock *first* and reads
+  the newest container, so a busily used vault can never turn a revocation or
+  an approved creation into `internal` (TODO R.39). Interpreters are refused
+  at approval time (`--allow-interpreter`),
   not by the digest: the CLI enforces it before proving the request.
   Implemented in TODO 3.4b as `crypto::encrypt_with_key` plus
   `Vault::save_with_key`; the latter also refuses, with `Error::Crypto`, a
@@ -628,8 +637,12 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   step fails. The token never goes to stdout/stderr. The vault stores only
   its SHA-256. The CLI derives the key once, opens the vault read-only to run
   `Vault::check_grant_writable` before `challenge`, then proves and sends
-  `grant_create`, and only after `grant_approved` takes the write lock and
-  saves with `save_with_key` so the daemon's key stays valid.
+  `grant_create`, and only after `grant_approved` opens the vault with
+  `open_with_key_for_update` (lock first, fresh state) and saves with
+  `save_with_key` so the daemon's key stays valid. The lock is taken after the
+  approval on purpose: a run that recorded a use while the human was deciding
+  must not make the approved creation fail, and the grant is added to the
+  state read under the lock, so that use is kept (TODO R.39).
 - `pm mcp serve` is a hand-written synchronous JSON-RPC 2.0 stdio server (no
   MCP SDK, no async runtime): 1 MiB line cap with resync to the next newline,
   batches rejected, stdout carries only JSON-RPC, diagnostics on stderr, and

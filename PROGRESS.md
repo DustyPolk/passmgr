@@ -1,3 +1,35 @@
+## 2026-11-03 — Open the vault under the lock for daemon writes (TODO R.39)
+
+- `src/vault.rs`: new `Vault::open_with_key_for_update(path, key)` — takes the
+  write lock *before* reading, the key-based counterpart of
+  `open_for_update`. A writer that got in first is now seen instead of
+  tripping `VaultChanged`.
+- `src/daemon.rs::revoke_grants`, `src/daemon/run.rs::record_use` and
+  `src/cli/grant.rs` (the save after `grant_approved`) all use it. The
+  daemon's revocation no longer maps a lost race to `internal`, and an
+  approved creation is added to the state read under the lock. `record_use`'s
+  retry loop stays but is only for real I/O failures (8 → 3 attempts);
+  `lock_for_update` keeps its compare-and-lock job for `add`/`edit`, which
+  prompt a human while avoiding the lock.
+- Docs: `DECISIONS.md` (which constructors may save; why compare-and-lock is
+  only for prompted writers) and `MCP.md` (`grant_revoke` locks before it
+  reads). No wire or format change.
+- Tests: `tests/daemon_concurrency.rs::revocation_succeeds_while_runs_record_their_use`
+  (20 trials, 8 concurrent runs per revoke; fails on the old code at trial 0
+  with `Error(Internal)`), `src/daemon/tests.rs::revocation_does_not_lose_to_a_concurrent_vault_write`
+  (a writer holds the lock and saves while the revocation is on its way;
+  fails on old code with `Err(Internal)`), and
+  `tests/grant_cli.rs::grant_create_keeps_a_concurrent_vault_write_and_still_succeeds`
+  (PTY create blocked at the lock, a recorded use saved first; old code fails
+  with "changed while it was open"). The last two also assert the concurrent
+  write survives, so an "ignore the change" fix cannot pass.
+- Gate: fmt, clippy, full `cargo test` green.
+- **Next iteration must know:** `record_use` still re-runs the whole
+  authorization on a failed save; with the lock-first open that is now only an
+  I/O path, not a race path. A run that arrives while another writer holds the
+  lock waits up to 30 s (`VaultBusy`) — unchanged and intended. R.40 (`save`
+  re-salts) is untouched and still next.
+
 ## 2026-11-03 — Kill what is left of the group when a run completes (TODO R.38)
 
 - `src/runner.rs`: the finished path no longer reaps with `Child::try_wait`.

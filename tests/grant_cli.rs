@@ -582,3 +582,100 @@ fn grant_create_refuses_a_command_with_a_hidden_character_before_the_summary() {
     assert!(!output.stderr.contains("Enter Master Password:"));
     assert!(!out.exists());
 }
+
+/// A vault write that lands after the human approved but before the CLI saved
+/// must not refuse the approved creation, and must not be lost (TODO R.39).
+///
+/// The CLI used to read the vault, ask the daemon, then compare-and-lock; a
+/// run recording its use in that window answered `internal` after the human
+/// had already typed the password and the approval was spent. The CLI now
+/// opens the vault under the write lock and adds the grant to that state.
+#[test]
+fn grant_create_keeps_a_concurrent_vault_write_and_still_succeeds() {
+    use passmgr::grant::{Grant, GrantSpec, Scope};
+    use std::time::Duration;
+
+    let _guard = serial();
+    let fixture = Fixture::new();
+    fixture.unlock();
+
+    let container = fs::read(&fixture.vault).expect("read vault");
+    let key = passmgr::crypto::unlock_key(&container, MASTER).expect("derive key");
+    let now = unix_now();
+
+    // A grant to record a use against, added under the same lock the CLI will
+    // need, so this test holds a real vault write in flight.
+    let seeded = Grant::create(
+        GrantSpec {
+            label: "an earlier grant".into(),
+            scope: Scope::new(vec![], vec!["prod".into()], None).expect("scope"),
+            commands: vec![std::path::PathBuf::from("/usr/bin/true")],
+            capabilities: Capabilities::RUN,
+            expires_at: now + 3_600,
+            max_uses: None,
+        },
+        TokenHash::of(b"seeded grant token"),
+        now,
+    )
+    .expect("seed grant");
+    let seeded_id = seeded.id();
+    let mut writer =
+        Vault::open_with_key_for_update(&fixture.vault, key.as_slice()).expect("lock vault");
+    writer.add_grant(seeded).expect("add grant");
+    writer.save_with_key(key.as_slice()).expect("save grant");
+
+    let out = fixture.temp_path("raced.token");
+    let out_text = out.to_str().expect("path is UTF-8");
+    let output = std::thread::scope(|scope| {
+        let create = scope.spawn(|| {
+            fixture.run_pty(
+                &[
+                    "--db",
+                    fixture.db(),
+                    "grant",
+                    "create",
+                    "--label",
+                    "raced create",
+                    "--ref",
+                    &fixture.reference,
+                    "--command",
+                    "/usr/bin/true",
+                    "--expires",
+                    "1h",
+                    "--out",
+                    out_text,
+                ],
+                &format!("y\n{MASTER}\n"),
+            )
+        });
+        // Long enough for the approved CLI to be waiting at the lock. If it is
+        // still earlier, it reads the new state and the race simply did not
+        // happen; either way the creation must succeed and nothing is lost.
+        std::thread::sleep(Duration::from_millis(300));
+        writer
+            .grant_mut(seeded_id)
+            .expect("seeded grant")
+            .mark_used(now)
+            .expect("mark used");
+        writer.save_with_key(key.as_slice()).expect("save use");
+        drop(writer);
+        create.join().expect("create thread")
+    });
+    assert_ok(&output);
+
+    let vault = Vault::open(&fixture.vault, MASTER).expect("open vault");
+    assert_eq!(vault.grants().len(), 2, "the approved grant must be saved");
+    assert_eq!(
+        vault.grant(seeded_id).expect("seeded grant").uses(),
+        1,
+        "the creation must keep the concurrent write"
+    );
+    assert!(
+        vault
+            .grants()
+            .iter()
+            .any(|grant| grant.label() == "raced create"),
+        "the approved grant must be in the vault"
+    );
+    assert!(out.exists(), "the token file must have been written");
+}

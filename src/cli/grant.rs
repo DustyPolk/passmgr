@@ -189,11 +189,12 @@ pub(crate) fn command_grant_create(
 
     let grant = request.clone().create_grant(now)?;
 
-    let mut vault = vault::Vault::open_with_key(vault_path, &key)?;
+    let precheck = vault::Vault::open_with_key(vault_path, &key)?;
     // The daemon cannot check vault limits (it never opens the vault), so a
     // vault that cannot hold another grant must fail *before* the human's
     // approval is spent (TODO R.22).
-    vault.check_grant_writable(&grant)?;
+    precheck.check_grant_writable(&grant)?;
+    drop(precheck);
 
     let digest = request.digest();
     let nonce = client::challenge(&paths, &session_token)?;
@@ -230,8 +231,13 @@ pub(crate) fn command_grant_create(
     }
 
     // A failed write here spends the approval but changes nothing; the error
-    // says so and a retry asks for a new approval.
-    vault.lock_for_update()?;
+    // says so and a retry asks for a new approval. The vault is opened under
+    // the write lock *after* the approval, so a run that recorded a use while
+    // the human was deciding cannot make an approved creation fail (TODO
+    // R.39); the pre-check above was on a lock-free read and is repeated on
+    // this fresh state.
+    let mut vault = vault::Vault::open_with_key_for_update(vault_path, &key)?;
+    vault.check_grant_writable(&grant)?;
     vault.add_grant(grant)?;
     vault.save_with_key(&key)?;
 

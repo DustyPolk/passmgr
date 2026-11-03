@@ -91,6 +91,30 @@ impl Vault {
         })
     }
 
+    /// Open and decrypt an existing vault for modification with an
+    /// already-derived key, taking the write lock **before** reading.
+    ///
+    /// This is the key-based counterpart of [`Vault::open_for_update`], for a
+    /// writer that holds the daemon's key rather than the master password:
+    /// the daemon recording a use or a revocation (`src/daemon.rs`), and `pm
+    /// grant create` once the human has approved. Reading before locking would
+    /// let another writer slip a change in between, and the caller would then
+    /// either fail with [`Error::VaultChanged`] on a request that is
+    /// authorized by design (a revocation must not be flaky, TODO R.39) or
+    /// spend an approval and write nothing. Taking the lock first means the
+    /// state that is read is the state that is modified.
+    ///
+    /// The key must come from [`crypto::unlock_key`] for this vault file.
+    /// [`Vault::save_with_key`] authenticates it, so a wrong key changes
+    /// nothing.
+    pub fn open_with_key_for_update(path: impl AsRef<Path>, key: &[u8]) -> Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let lock = acquire_write_lock(&path)?;
+        let mut vault = Self::open_with_key(&path, key)?;
+        vault.write_lock = Some(lock);
+        Ok(vault)
+    }
+
     /// Open a vault for modification, starting with an empty one if the file
     /// does not exist.
     ///
@@ -136,7 +160,10 @@ impl Vault {
     ///
     /// Use this after a lock-free [`Vault::open`] when the read-modify-write
     /// has to prompt the human in between: a prompt can last minutes, and a
-    /// writer that holds the lock that long blocks unrelated commands. The
+    /// writer that holds the lock that long blocks unrelated commands. Anything
+    /// that does *not* have to prompt first should use one of the
+    /// `open*_for_update` constructors instead, so it never reads a state it
+    /// cannot write back (TODO R.39). The
     /// lock is the same exclusive `flock` as [`Vault::open_for_update`] uses,
     /// and the container is compared byte for byte with the one this vault was
     /// decrypted from, so a change made while the human was typing is reported

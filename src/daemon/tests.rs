@@ -483,3 +483,90 @@ fn revoke_all_leaves_expired_and_exhausted_grants_alone() {
         "exhausted is left untouched"
     );
 }
+
+/// A vault write that lands while a revocation is on its way must not refuse
+/// the revocation (TODO R.39).
+///
+/// A run records its use by taking the write lock and replacing the container.
+/// Revocation used to read the vault lock-free and then compare-and-lock, so a
+/// write in that window answered `internal` — on the kill switch, exactly when
+/// an agent was busy. The daemon now opens the vault *under* the lock, so the
+/// revocation sees the newest state and only ever refuses a real failure.
+#[test]
+fn revocation_does_not_lose_to_a_concurrent_vault_write() {
+    use crate::grant::{Capabilities, Grant, GrantSpec, Scope, TokenHash};
+    use crate::store::EntryId;
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("vault.dat");
+    let master = "test master password";
+    let now = 1_700_000_000u64;
+    let entry = EntryId::generate().expect("entry id");
+
+    let make = |label: &str| {
+        Grant::create(
+            GrantSpec {
+                label: label.to_owned(),
+                scope: Scope::new(vec![entry], Vec::new(), None).expect("scope"),
+                commands: vec![std::path::PathBuf::from("/usr/bin/true")],
+                capabilities: Capabilities::RUN,
+                expires_at: now + 3_600,
+                max_uses: None,
+            },
+            TokenHash::of(label.as_bytes()),
+            now,
+        )
+        .expect("grant")
+    };
+
+    let target = make("target");
+    let target_id = target.id();
+    // Cheap KDF parameters: this test is about the lock, not the KDF.
+    let plaintext = crate::store::encode(&[], &[target]).expect("encode payload");
+    let container = crate::crypto::encrypt(
+        &plaintext,
+        master,
+        crate::crypto::KdfParams::new(8 * 1024, 1, 1),
+    )
+    .expect("encrypt vault");
+    std::fs::write(&path, &container).expect("write vault");
+
+    let key = crate::crypto::unlock_key(&container, master).expect("derive key");
+    let key = LockedKey::new(key).expect("lock key");
+
+    let concurrent = make("concurrent");
+    let concurrent_id = concurrent.id();
+
+    // The test plays the concurrent run: it takes the write lock *before* the
+    // revocation can read, then replaces the container.
+    let mut writer = Vault::open_with_key_for_update(&path, key.as_slice()).expect("lock vault");
+    let outcome = std::thread::scope(|scope| {
+        let revocation =
+            scope.spawn(|| revoke_grants(&path, &key, GrantRevokeRequest::Id(target_id), now));
+        // Long enough for the revocation thread to start and reach the lock.
+        // If it had read before locking, the change below would be invisible
+        // to it and its byte comparison would fail.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        writer.add_grant(concurrent).expect("add concurrent grant");
+        writer
+            .save_with_key(key.as_slice())
+            .expect("save concurrent grant");
+        drop(writer);
+        revocation.join().expect("revocation thread")
+    });
+
+    assert_eq!(
+        outcome,
+        Ok(1),
+        "a concurrent vault write must not refuse the revocation"
+    );
+    let vault = Vault::open_with_key(&path, key.as_slice()).expect("reopen");
+    assert!(
+        vault.grant(target_id).expect("target").is_revoked(),
+        "the revocation must be on disk"
+    );
+    assert!(
+        vault.grant(concurrent_id).is_some(),
+        "the revocation must not undo the concurrent write"
+    );
+}

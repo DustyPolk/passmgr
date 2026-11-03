@@ -249,9 +249,12 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   one target, either `{"type":"grant_revoke","id":"<32 hex>"}` or
   `{"type":"grant_revoke","all":true}`; both keys at once, `"all": false`, a
   non-boolean `all` or a bad id is `bad_request`, never a guess. The daemon
-  opens the vault with the key it already holds, sets `revoked_at` (the first
-  timestamp wins, so revoking twice changes nothing), saves it with the same
-  salt and KDF parameters, and answers `{"type":"grant_revoked","revoked":N}`
+  takes the vault's write lock *before* reading it, so a `run` that is
+  recording its use at that moment cannot make the revocation fail with
+  `internal`; it then opens the vault with the key it already holds, sets
+  `revoked_at` (the first timestamp wins, so revoking twice changes nothing),
+  saves it with the same salt and KDF parameters, and answers
+  `{"type":"grant_revoked","revoked":N}`
   with the number of grants it newly revoked. An unknown id is `not_found`;
   `--all` targets only grants active at that instant, so expired, exhausted and
   already-revoked grants are left untouched, and `--all` with nothing active

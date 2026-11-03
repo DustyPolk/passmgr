@@ -19,7 +19,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use passmgr::daemon::MAX_CONCURRENT_RUNS;
-use passmgr::protocol::{Request, Response, RunFrame};
+use passmgr::protocol::{Request, Response, RunFrame, RunRequest};
 
 const REFUSED_REQUESTS: usize = 64;
 
@@ -205,4 +205,111 @@ fn runs_past_the_cap_are_refused_busy_and_do_not_block_ping_or_lock() {
     for pid in pids {
         wait_for_process_exit(pid);
     }
+}
+
+/// How many times the revocation race is replayed. A lost race used to show up
+/// within a handful of tries, so 20 leaves a wide margin.
+const REVOCATION_TRIALS: usize = 20;
+
+/// A revocation must not fail because an agent is busy using the vault
+/// (TODO R.39). Every `run` records its use, which rewrites the vault; the
+/// daemon used to read the vault before taking the write lock, so one lost
+/// race answered `internal` — on the kill switch, exactly when it was needed.
+#[test]
+fn revocation_succeeds_while_runs_record_their_use() {
+    use passmgr::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope};
+    use passmgr::protocol::GrantRevokeRequest;
+    use passmgr::vault::Vault;
+
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+    let program = fs::canonicalize("/bin/true").expect("canonical /bin/true");
+    let entry = Vault::open_with_key(&fixture.vault, fixture.key.as_slice())
+        .expect("open vault")
+        .list()
+        .first()
+        .expect("the fixture has one credential")
+        .id();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+
+    for trial in 0..REVOCATION_TRIALS {
+        let grant_token = GrantToken::generate().expect("grant token");
+        let grant_id = {
+            let mut vault = Vault::open_with_key_for_update(&fixture.vault, fixture.key.as_slice())
+                .expect("lock vault");
+            let grant = Grant::create(
+                GrantSpec {
+                    label: format!("revocation race {trial}"),
+                    scope: Scope::new(vec![entry], Vec::new(), None).expect("scope"),
+                    commands: vec![program.clone()],
+                    capabilities: Capabilities::RUN,
+                    expires_at: now + 3_600,
+                    max_uses: None,
+                },
+                grant_token.hash(),
+                now,
+            )
+            .expect("grant");
+            let id = grant.id();
+            vault.add_grant(grant).expect("add grant");
+            vault
+                .save_with_key(fixture.key.as_slice())
+                .expect("save grant");
+            id
+        };
+
+        // Several runs record their use concurrently with the revocation, so
+        // the two writers really do meet at the vault lock.
+        let requests: Vec<Request> = (0..8)
+            .map(|_| {
+                Request::Run(RunRequest {
+                    env: "API_KEY".into(),
+                    reference: fixture.reference.clone(),
+                    command: vec![program.to_str().expect("program path is UTF-8").to_owned()],
+                    cwd: "/".into(),
+                    grant: grant_token.clone(),
+                })
+            })
+            .collect();
+        let runs = spawn_runs(&socket, &fixture.token, requests);
+
+        assert_eq!(
+            request(
+                &socket,
+                &fixture.token,
+                &Request::GrantRevoke(GrantRevokeRequest::Id(grant_id)),
+            ),
+            Response::GrantRevoked { revoked: 1 },
+            "trial {trial}: a concurrent run must not refuse the revocation"
+        );
+
+        for frames in join_requests(runs) {
+            // A run that lost the race to the revocation is denied, which is
+            // the point of revoking; it must never be an internal error.
+            assert!(
+                frames.iter().all(|frame| !matches!(
+                    frame,
+                    RunFrame::Error(passmgr::protocol::ResponseError::Internal)
+                )),
+                "trial {trial}: a concurrent run failed internally: {frames:?}"
+            );
+        }
+
+        let vault =
+            Vault::open_with_key(&fixture.vault, fixture.key.as_slice()).expect("reopen vault");
+        assert!(
+            vault.grant(grant_id).expect("grant").is_revoked(),
+            "trial {trial}: the revocation must be on disk"
+        );
+    }
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
 }

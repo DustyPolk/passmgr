@@ -724,19 +724,20 @@ fn handle_connection(
 /// Revoke one grant or every active grant, returning how many were newly
 /// revoked.
 ///
-/// The vault is opened with the daemon's hot key, changed under the write
-/// lock, and saved with [`Vault::save_with_key`] so the salt and KDF
-/// parameters (and therefore the key itself) stay valid. A concurrent writer
-/// makes `lock_for_update` fail without changing anything; the caller may
-/// retry. When no grant needs changing, nothing is written at all.
+/// The vault is opened with the daemon's hot key **under the write lock**, so
+/// the state it revokes is the state on disk and no concurrent run that records
+/// a use can make it answer `internal` (TODO R.39). It is saved with
+/// [`Vault::save_with_key`] so the salt and KDF parameters (and therefore the
+/// key itself) stay valid. When no grant needs changing, nothing is written at
+/// all.
 fn revoke_grants(
     path: &Path,
     key: &LockedKey,
     request: GrantRevokeRequest,
     now: u64,
 ) -> Result<u32, ResponseError> {
-    let mut vault =
-        Vault::open_with_key(path, key.as_slice()).map_err(|_| ResponseError::Internal)?;
+    let mut vault = Vault::open_with_key_for_update(path, key.as_slice())
+        .map_err(|_| ResponseError::Internal)?;
     let targets: Vec<GrantId> = match request {
         GrantRevokeRequest::Id(id) => {
             if vault.grant(id).is_none() {
@@ -755,9 +756,6 @@ fn revoke_grants(
         return Ok(0);
     }
 
-    vault
-        .lock_for_update()
-        .map_err(|_| ResponseError::Internal)?;
     let mut revoked = 0u32;
     for id in targets {
         let grant = vault.grant_mut(id).ok_or(ResponseError::Internal)?;

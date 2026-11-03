@@ -25,13 +25,15 @@ use super::{LockedKey, unix_now, write_run_frame};
 /// [`protocol::MAX_MESSAGE_BYTES`].
 const READ_CHUNK: usize = 4096;
 
-/// How many times a `run` retries when another writer changed the vault
-/// between opening it and taking the write lock.
+/// How many times a `run` retries recording its use when the vault write
+/// fails.
 ///
-/// Concurrent runs each record a use, so one of them can lose that race. The
-/// window is tiny and the fresh vault is re-authorized from scratch, so a
-/// bounded retry is safe; after this many attempts the run fails closed.
-const USE_RECORD_ATTEMPTS: usize = 8;
+/// One attempt is the normal path now that the vault is opened under the write
+/// lock (TODO R.39), so a failed save is a real I/O or crypto failure and only
+/// a retry that re-reads the vault could help. It is bounded so a broken vault
+/// fails closed instead of spinning, and never runs a use the vault does not
+/// know about.
+const USE_RECORD_ATTEMPTS: usize = 3;
 
 /// Why a use could not be recorded. Every variant fails closed.
 enum RecordError {
@@ -176,8 +178,9 @@ fn client_closed(fd: RawFd) -> bool {
 ///
 /// The use is written before the secret is copied and before the child can
 /// start, so a crash or a bug cannot let a use-limited grant exceed its limit.
-/// If another process (or another run) changed the vault in between, the whole
-/// decision is retried against the new state rather than merged.
+/// The vault is read **under the write lock**, so the grant that is authorized
+/// and marked is the one on disk: a concurrent run recording its own use (or a
+/// revocation) can never turn this into `internal` (TODO R.39).
 fn record_use(
     vault_path: &Path,
     key: &LockedKey,
@@ -188,8 +191,8 @@ fn record_use(
 ) -> Result<Zeroizing<String>, RecordError> {
     let token_hash = request.grant.hash();
     for _ in 0..USE_RECORD_ATTEMPTS {
-        let mut vault =
-            Vault::open_with_key(vault_path, key.as_slice()).map_err(|_| RecordError::Internal)?;
+        let mut vault = Vault::open_with_key_for_update(vault_path, key.as_slice())
+            .map_err(|_| RecordError::Internal)?;
         let Some(grant) = vault
             .grants()
             .iter()
@@ -220,10 +223,6 @@ fn record_use(
         }
         let grant_id: GrantId = grant.id();
 
-        if vault.lock_for_update().is_err() {
-            // Another writer won the race. Re-open and re-authorize.
-            continue;
-        }
         let marked = vault
             .grant_mut(grant_id)
             .ok_or(RecordError::Internal)?
@@ -235,7 +234,8 @@ fn record_use(
         }
         if vault.save_with_key(key.as_slice()).is_err() {
             // The write failed, so the use was not recorded. Never run on a
-            // use that the vault does not know about.
+            // use that the vault does not know about; re-read and re-authorize
+            // from scratch instead of merging.
             continue;
         }
         // Copy only the one value, then drop the decrypted vault (which
