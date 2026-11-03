@@ -16,7 +16,7 @@ Findings from the security review of `49d9915..3500f6d` (details in
 the test that must fail before the fix and pass after it. They come before
 Phase 3: R.1 breaks a containment guarantee that the design already claims.
 
-- [ ] **R.1 A long-running `run` defeats `lock`, the idle timeout and SIGTERM.**
+- [x] **R.1 A long-running `run` defeats `lock`, the idle timeout and SIGTERM.**
       `src/daemon.rs:383-397` accepts and serves one connection at a time, and
       `src/daemon.rs:452`/`:481` (`serve_run`) calls `runner::execute`
       synchronously, so a second connection (`passmgr lock`) is never read.
@@ -40,6 +40,11 @@ Phase 3: R.1 breaks a containment guarantee that the design already claims.
       `lock` returns `Locked` within 2 s and the child is reaped, that SIGTERM
       terminates `pmd` within 2 s, and that a 1 s idle timeout shuts the
       daemon down (killing the child) while the run is still live.
+      Done: `Run` is served on a scoped worker thread and the accept loop stays
+      responsive; `lock`, a signal and the idle timeout set a shared cancel flag
+      that kills and reaps the child (the `Relay::Finished` path polls
+      `try_wait` every 100 ms). The idle-timeout e2e test uses 2 s, not 1 s, so
+      it is not timing-sensitive; it still proves the child is killed.
 - [ ] **R.2 `run` resolves the command in `pmd`'s cwd and `PATH`, not the
       caller's.** `src/runner.rs:158-159` builds `Command::new(program)` and
       `command.args(&argv[1..])` with no `current_dir`, `src/cli/run.rs` sends

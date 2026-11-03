@@ -22,9 +22,13 @@
 //!
 //! # Lifetime
 //!
-//! One request per connection. `SIGTERM`/`SIGINT`, a successful `lock`, or
+//! `SIGTERM`/`SIGINT`, a successful `lock`, or
 //! [`DEFAULT_IDLE_TIMEOUT`] (configurable) without a successfully handled
 //! request wipe the key, remove the socket and the session file, and exit.
+//! Each `run` is served on its own worker thread so the accept loop stays
+//! responsive: `lock`, `ping` and a signal are observed even while a child is
+//! still running. Every in-flight child is killed and reaped before the
+//! daemon returns, so no copy of the injected secret outlives the key.
 //!
 //! # Authorization
 //!
@@ -375,41 +379,86 @@ pub fn run(
     socket.listener().set_nonblocking(true)?;
 
     let mut last_activity = Instant::now();
-    while !shutdown_requested() {
-        if last_activity.elapsed() >= idle_timeout {
-            // Out of activity: wipe the key, unlink the socket and exit.
-            break;
-        }
-        match socket.accept_peer() {
-            Ok((mut stream, _peer)) => {
-                let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
-                let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
-                match handle_connection(&mut stream, token, vault_path, key) {
-                    // `lock`: response is written, now wipe on the way out.
-                    Handled::Locked => break,
-                    // Only a request that was decoded and answered counts as
-                    // activity; garbage must not keep the key alive.
-                    Handled::Served => last_activity = Instant::now(),
-                    Handled::Rejected => {}
+    // Scoped threads let a `run` worker borrow the key and paths without
+    // copying them; the scope cannot end until every worker has been joined.
+    // `cancel` lives outside the scope so a worker closure may borrow it.
+    let cancel = AtomicBool::new(false);
+    let cancel_ref = &cancel;
+    let fatal = std::thread::scope(|scope| {
+        let mut runs: Vec<std::thread::ScopedJoinHandle<'_, ()>> = Vec::new();
+        let mut fatal = None;
+        loop {
+            // A finished run counts as a successfully handled request, and
+            // joining it here means no worker outlives the loop.
+            let mut index = 0;
+            while index < runs.len() {
+                if runs[index].is_finished() {
+                    let handle = runs.swap_remove(index);
+                    let _ = handle.join();
+                    last_activity = Instant::now();
+                } else {
+                    index += 1;
                 }
             }
-            Err(SocketError::Io { source, .. }) if source.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(POLL_INTERVAL);
+            if shutdown_requested() || last_activity.elapsed() >= idle_timeout {
+                // Out of activity or asked to stop: wipe the key and exit.
+                break;
             }
-            // Another uid was rejected before any bytes were read. Keep
-            // serving the owner.
-            Err(SocketError::PeerRejected { .. } | SocketError::PeerCheckFailed(_)) => {}
-            Err(err) => return Err(err.into()),
+            match socket.accept_peer() {
+                Ok((stream, _peer)) => {
+                    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+                    let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
+                    match handle_connection(stream, token) {
+                        // `lock`: response is written, now wipe on the way out.
+                        Handled::Locked => break,
+                        // Only a request that was decoded and answered counts
+                        // as activity; garbage must not keep the key alive.
+                        Handled::Served => last_activity = Instant::now(),
+                        Handled::Rejected => {}
+                        // The request is authenticated and parsed; the child
+                        // runs on a worker so the accept loop can still serve
+                        // `lock`, `ping` and a shutdown signal.
+                        Handled::Run(stream, request) => {
+                            runs.push(scope.spawn(move || {
+                                serve_run(stream, &request, vault_path, key, cancel_ref);
+                            }));
+                        }
+                    }
+                }
+                Err(SocketError::Io { source, .. })
+                    if source.kind() == io::ErrorKind::WouldBlock =>
+                {
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                // Another uid was rejected before any bytes were read. Keep
+                // serving the owner.
+                Err(SocketError::PeerRejected { .. } | SocketError::PeerCheckFailed(_)) => {}
+                Err(err) => {
+                    fatal = Some(err);
+                    break;
+                }
+            }
         }
-    }
+
+        // Cancel and reap every in-flight child before the key is dropped.
+        // `abort` in the runner kills and waits, so no child survives this.
+        cancel.store(true, Ordering::SeqCst);
+        for handle in runs {
+            let _ = handle.join();
+        }
+        fatal
+    });
 
     // Dropping `socket` unlinks the socket and releases the instance lock.
     session::remove_if_matches(&paths, token);
-    Ok(())
+    match fatal {
+        Some(err) => Err(err.into()),
+        None => Ok(()),
+    }
 }
 
 /// What one connection amounted to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 enum Handled {
     /// A well-formed request was decoded and answered. Refreshes the idle
     /// timer (the `lock` case is reported separately).
@@ -418,38 +467,36 @@ enum Handled {
     Rejected,
     /// A `lock` request was answered: wipe and stop.
     Locked,
+    /// A `run` request that passed authorization and parsing. The socket is
+    /// handed to a worker thread; the accept loop must not block on it.
+    Run(UnixStream, protocol::RunRequest),
 }
 
-/// Serve one connection.
+/// Read and authenticate one request, then answer or hand the socket off.
 ///
 /// Nothing here can panic on attacker input: every parse failure becomes
 /// `bad_request`, and write failures (client vanished) are ignored so one
 /// aborted client cannot take the daemon down.
-fn handle_connection(
-    stream: &mut UnixStream,
-    token: &SessionToken,
-    vault_path: &Path,
-    key: &LockedKey,
-) -> Handled {
-    let authorized = match read_request(stream) {
+fn handle_connection(mut stream: UnixStream, token: &SessionToken) -> Handled {
+    let authorized = match read_request(&mut stream) {
         Ok(authorized) => authorized,
-        Err(_) => return reject(stream, ResponseError::BadRequest),
+        Err(_) => return reject(&mut stream, ResponseError::BadRequest),
     };
     // The token check comes first: a request that is not for this session
     // gets a fixed answer and cannot refresh the idle timer.
     if !authorized.token().matches(token) {
-        return reject(stream, ResponseError::Unauthorized);
+        return reject(&mut stream, ResponseError::Unauthorized);
     }
     match authorized.into_request() {
         Request::Ping => {
-            let _ = write_response(stream, &Response::Pong);
+            let _ = write_response(&mut stream, &Response::Pong);
             Handled::Served
         }
         Request::Lock => {
-            let _ = write_response(stream, &Response::Locked);
+            let _ = write_response(&mut stream, &Response::Locked);
             Handled::Locked
         }
-        Request::Run(request) => serve_run(stream, &request, vault_path, key),
+        Request::Run(request) => Handled::Run(stream, request),
     }
 }
 
@@ -475,37 +522,40 @@ fn write_run_frame(stream: &mut UnixStream, frame: &RunFrame) -> io::Result<()> 
 
 /// Handle one `run`: decrypt, resolve, spawn, stream redacted output.
 ///
-/// Every failure becomes a terminal [`RunFrame::Error`] after the request has
-/// been authenticated; nothing here can kill the daemon, and the vault is
-/// closed again before the child starts.
+/// Runs on its own thread. Every failure becomes a terminal
+/// [`RunFrame::Error`] after the request has been authenticated; nothing here
+/// can kill the daemon, and the vault is closed again before the child starts.
+/// `cancel` is shared with the accept loop and is set by `lock`, a signal or
+/// the idle timeout; the runner kills and reaps the child when it observes it.
 fn serve_run(
-    stream: &mut UnixStream,
+    mut stream: UnixStream,
     request: &protocol::RunRequest,
     vault_path: &Path,
     key: &LockedKey,
-) -> Handled {
+    cancel: &AtomicBool,
+) {
     // The protocol guarantees these, but the daemon must not rely on a
     // client-side check for a security decision.
     let Ok(id) = EntryId::parse_ref(&request.reference) else {
-        let _ = write_run_frame(stream, &RunFrame::Error(ResponseError::BadRequest));
-        return Handled::Served;
+        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::BadRequest));
+        return;
     };
     if runner::denied_env_name(&request.env) {
-        let _ = write_run_frame(stream, &RunFrame::Error(ResponseError::BadRequest));
-        return Handled::Served;
+        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::BadRequest));
+        return;
     }
 
     let vault = match Vault::open_with_key(vault_path, key.as_slice()) {
         Ok(vault) => vault,
         Err(_) => {
-            let _ = write_run_frame(stream, &RunFrame::Error(ResponseError::Internal));
-            return Handled::Served;
+            let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::Internal));
+            return;
         }
     };
     let Some(credential) = vault.get_by_ref(id) else {
         drop(vault);
-        let _ = write_run_frame(stream, &RunFrame::Error(ResponseError::NotFound));
-        return Handled::Served;
+        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::NotFound));
+        return;
     };
     // Copy only the one value, then drop the decrypted vault (which zeroizes
     // the rest) before the child can run.
@@ -518,21 +568,20 @@ fn serve_run(
         &request.env,
         secret.as_str(),
         &inherited,
-        &SHUTDOWN,
-        |frame| write_run_frame(stream, &frame),
+        cancel,
+        |frame| write_run_frame(&mut stream, &frame),
     );
     match result {
         Ok(exit) => {
-            let _ = write_run_frame(stream, &RunFrame::Exit(exit));
+            let _ = write_run_frame(&mut stream, &RunFrame::Exit(exit));
         }
         Err(runner::RunError::Spawn(_)) => {
-            let _ = write_run_frame(stream, &RunFrame::Error(ResponseError::SpawnFailed));
+            let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::SpawnFailed));
         }
         // The caller vanished or the daemon is stopping: the child is gone
         // and there is nobody left to tell.
         Err(runner::RunError::Output(_) | runner::RunError::Cancelled) => {}
     }
-    Handled::Served
 }
 
 /// Read one framed request from a stream, without unbounded allocation.

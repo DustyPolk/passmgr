@@ -243,7 +243,12 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   rejected tokens do not count.
 - `lock`, `SIGTERM`, `SIGINT` and the idle timeout all wipe the key, remove
   the socket, and remove the session file only if it still holds this
-  daemon's token.
+  daemon's token. A `run` is served on a worker thread so the accept loop
+  stays responsive; those events set a shared cancel flag, and every in-flight
+  child is killed and reaped before the daemon drops the key and exits. An
+  interrupted run writes no terminal frame: the client sees EOF and reports a
+  `Daemon` error. A finished run refreshes the idle timer, but a run that is
+  still going does not keep the key alive past the idle timeout.
 - The streaming client (`client::run`) reads frames until the terminal frame,
   with no idle/read timeout: a legitimate child may stay silent for minutes,
   and the daemon closes the socket when it exits. EOF before a terminal frame

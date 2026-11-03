@@ -198,16 +198,29 @@ where
     match emit_result {
         Relay::Finished => {
             // Both pipes reached EOF. The child may have closed them and kept
-            // running; wait for it to actually end.
-            let status = match child.wait() {
-                Ok(status) => status,
-                Err(err) => {
-                    abort(&mut child, receiver, readers);
-                    return Err(RunError::Output(err));
+            // running, so keep waiting for it -- but poll the cancel flag as
+            // well. A plain `wait()` here would make `lock`, `SIGTERM` and the
+            // idle timeout wait for a child that closed its output on purpose.
+            // `try_wait` is a `waitpid(WNOHANG)` internally.
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        join_all(readers);
+                        return Ok(exit_status(status));
+                    }
+                    Ok(None) => {
+                        if cancel.load(Ordering::SeqCst) {
+                            abort(&mut child, receiver, readers);
+                            return Err(RunError::Cancelled);
+                        }
+                        std::thread::sleep(CANCEL_POLL);
+                    }
+                    Err(err) => {
+                        abort(&mut child, receiver, readers);
+                        return Err(RunError::Output(err));
+                    }
                 }
-            };
-            join_all(readers);
-            Ok(exit_status(status))
+            }
         }
         Relay::OutputError(err) => {
             abort(&mut child, receiver, readers);
@@ -243,6 +256,11 @@ where
 {
     let mut finished = 0usize;
     loop {
+        // Observe cancellation even while a noisy child keeps the channel
+        // full: a `lock` or signal must not wait for the output to pause.
+        if cancel.load(Ordering::SeqCst) {
+            return Relay::Cancelled;
+        }
         match receiver.recv_timeout(CANCEL_POLL) {
             Ok(Message::Frame(frame)) => {
                 if let Err(err) = emit(frame) {
@@ -258,9 +276,6 @@ where
             // The sender side is gone: both readers stopped without a Done.
             Err(RecvTimeoutError::Disconnected) => return Relay::Finished,
             Err(RecvTimeoutError::Timeout) => {
-                if cancel.load(Ordering::SeqCst) {
-                    return Relay::Cancelled;
-                }
                 // A child that exited before closing a pipe held by a
                 // grandchild is exactly the case TODO 4.5's timeout and
                 // process-group kill handles; keep waiting for the pipe here.

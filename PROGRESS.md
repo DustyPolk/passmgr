@@ -1,3 +1,32 @@
+## 2026-11-02 — Serve runs concurrently and cancel them on lock/signal/idle (TODO R.1)
+
+- `src/daemon.rs`: `run` is decoded and authenticated on the accept thread,
+  but `serve_run` now runs on a `std::thread::scope` worker, so `ping`,
+  `lock` and signal handling stay responsive while a child runs. The loop
+  reaps finished workers (and counts them as activity) on every iteration.
+  A shared `AtomicBool` cancel flag is set on `lock`, `SIGTERM`/`SIGINT` and
+  the idle timeout; the scope joins every worker before the key is dropped.
+- `src/runner.rs`: the `Relay::Finished` path no longer blocks in
+  `child.wait()`; it polls `try_wait` (i.e. `waitpid(WNOHANG)`) every 100 ms
+  and aborts when cancelled. The relay loop also checks the flag before each
+  receive, so a child that keeps the channel full cannot delay cancellation.
+  An interrupted run writes no terminal frame, so the client reports a
+  `Daemon` error rather than a fake exit status.
+- Tests (tests/daemon.rs): three e2e cases run a child that closes both
+  pipes and sleeps 30 s — `lock` returns `Locked` in under 2 s and the child
+  is reaped, `SIGTERM` stops `pmd` in under 2 s and reaps the child, and a
+  `--idle-timeout 2` daemon exits and reaps the child while the run is live.
+  Each polls with deadlines and asserts the socket is gone.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass.
+- **Next iteration must know:** concurrent runs are now possible in the
+  daemon; R.1 did not add a cap on simultaneous runs or connections (that is
+  TODO 9.4's slowloris/idle-client work). Each worker re-opens the vault, so
+  N parallel runs mean N Argon2-free key unlocks (key is already derived).
+  A cancelled run is indistinguishable from a client disconnect to
+  `serve_run`; neither writes a frame, which the CLI already maps to a
+  `Daemon` error.
+
 ## 2026-11-02 — Review of 49d9915..3500f6d
 
 - Reviewed the whole range (26 files, +6340/−2583): the new `src/runner.rs`,
