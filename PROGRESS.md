@@ -1,3 +1,61 @@
+## 2026-11-03 — Review of 388faab..4662526
+
+Scope: `4662526` (`grant_create` request and daemon handler, TODO 3.4c),
+`13944b8` (R.19 challenge ordering) and the four pure splits
+`8c04c19`/`def4f60`/`ea9cc2d`/`a67ed6a`, reviewed against `388faab`. Read the
+full diff, the new files (`src/grant/request.rs`, `src/grant/validate.rs`,
+`src/grant/capabilities.rs`, `src/protocol/codec.rs`, `src/daemon/tests.rs`,
+`tests/grant_create.rs`), the surrounding daemon/presence/vault paths and the
+doc changes; re-ran the gate on the range head.
+
+Findings: 4 — unsafe input / agent-visible text 1 (R.21), authorization plus an
+overstated guarantee 1 (R.22), test gap 1 (R.23), doc drift 1 (R.24). Secret
+exposure 0, crypto misuse 0, maintainability 0, panic/DoS 0.
+
+Judged fine (do not redo):
+- No secret-exposure path in the diff: the new request's `Debug` is redacted
+  (`TokenHash` still has no `==`, the compile-fail doctest still guards it),
+  the `grant_approved` answer is a fixed bare object pinned byte for byte, and
+  no new `println!`/`eprintln!`/error string carries the token hash or a
+  secret. The daemon never opens the vault on this path, so the e2e canary
+  (`tests/support/mod.rs` `SECRET`) is genuinely injected by the fixture.
+- Authorization: `grant_create` only works for a digest recorded by a verified
+  HMAC proof, spends it once, and answers `denied` identically for "never
+  approved", "already spent" and "different request". An agent that holds the
+  session token can neither mint nor widen a grant, and `proven` alone
+  authorizes nothing. Any session-token holder that knows the full request and
+  its token hash can spend that approval, which is the documented same-user
+  DoS limit (MCP.md, SECURITY.md), not escalation.
+- Input handling: the frame body is capped at `MAX_MESSAGE_BYTES` = 64 KiB
+  (`src/protocol/mod.rs:128`) before any allocation, every length is
+  range-checked before slicing, `TokenHash::from_hex` cannot panic on
+  non-ASCII input, `Scope::new`/`GrantRequest::new` re-normalize and re-cap
+  refs/tags/fields/commands, and `validate_expiry` subtracts only after the
+  `<= now` guard. The digest length prefixes cannot truncate because the caps
+  hold before `digest()` is reachable.
+- Crypto: no nonce, KDF or AEAD parameter changed; `RequestDigest` stays a
+  SHA-256 (documented public, not a MAC), so the non-constant-time digest
+  comparison in `Approvals::take` leaks nothing useful.
+- R.19 fix is correct: `verify_and_consume` now uses `remove(index)` so the
+  pool keeps issue order, and the new e2e test would have failed under
+  `swap_remove`. `Challenges::issue` evicting index 0 is the documented policy
+  (`src/presence.rs:292-309`); R.16's problem statement describes the bug it
+  fixed, not current behaviour.
+- The five splits are mechanical: no test function added, removed or weakened
+  (only `pub`, import and rustfmt differences), `PENDING_SPLITS` is empty and
+  the layout guard is green, largest file is `src/socket.rs` at 987 lines.
+- Vault write path that 3.4d will use: `lock_for_update` compares the container
+  byte for byte after taking the lock, so a stale writer gets `VaultChanged`
+  instead of overwriting, and `save_with_key` reuses the source header so the
+  daemon's key survives a grant write.
+- Gate on `4662526`: `cargo fmt --check` and `cargo clippy --all-targets -- -D
+  warnings` clean, `cargo test` green (227 lib tests plus every integration
+  suite, 0 failures, doctests included). `cargo audit` is not installed here
+  (DECISIONS.md:532); skipped as the gate allows.
+- TODO R.15b is still correctly blocked on 3.4/4.9: 3.4c delivered only the
+  daemon half, and the write path's obligation is unchanged. The only stale
+  item is the wire shape in TODO.md item 3.4c (R.24).
+
 ## 2026-11-03 — Add the `grant_create` request and daemon handler (TODO 3.4c)
 
 - New wire request/response: `Request::GrantCreate(GrantCreateRequest)` and

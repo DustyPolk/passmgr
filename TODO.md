@@ -245,6 +245,119 @@ Rules that apply to every item:
       `SERIAL` mutex, so the two binaries can run concurrently; both still run
       their own tests one at a time.
 
+- [ ] **R.21 A grant's command allowlist accepts terminal control, bidi and
+      zero-width characters, so an agent-chosen path can forge the line a
+      human reads when approving it.**
+      `validate_commands` (`src/grant/validate.rs:105-118`) rejects only a
+      relative path, an empty string, an embedded NUL and an over-long path.
+      The label validator two functions above
+      (`src/grant/validate.rs:33`, table at `src/grant/validate.rs:67`)
+      rejects every C0/C1 control, bidi override, zero-width/format character,
+      line separator and variation selector, precisely because a label "may
+      come from an approved agent request" (TODO R.18). A command path now has
+      the same provenance and no filter: `grant_create` carries attacker-chosen
+      paths over the socket (`src/daemon.rs:643-673` re-normalizes them through
+      `Scope`/`GrantRequest`, which sorts and dedups but filters no
+      character class), `canonicalize` preserves whatever bytes
+      the file name holds, TODO 3.5 makes `pm grant list|show` print the
+      allowlist, and TODO 4.9 shows an agent's request to the human before they
+      approve it.
+      Failure: an agent asks for a grant whose command is
+      `/usr/bin/gh\x1b[2K\r/usr/bin/true`; `pm grant show` (or the approval
+      prompt) renders only `/usr/bin/gh` because the escape erases the rest of
+      the line, so the human approves a binary they were never shown and every
+      later render lies the same way. `\n` in a path splits one allowlist
+      entry across two visual lines, and U+202E or U+200B hides the real tail
+      of a path behind the displayed one.
+      Fix: apply the same character-class rejection in `validate_commands`
+      (share the predicate with `validate_label`; it is private today), so no
+      path carrying a hidden or reordering character can be stored, approved,
+      sent over the wire, or printed. Stored grants need no migration: the
+      check belongs on the create path.
+      Test: `GrantRequest::new`/`GrantSpec` with `/usr/bin/gh\x1b[2K\r`,
+      `/usr/bin/gh\ntrue`, `/tmp/\u{202e}bin` and `/tmp/a\u{200b}b` is refused
+      with an error that names the offending command, while `/usr/bin/gh` and a
+      non-ASCII but visible path such as `/usr/bin/grüße` are still accepted;
+      extend `grant_create_rejects_payloads_the_vault_writer_would_refuse` so a
+      frame carrying the escaped path is `bad_request` and leaves no approval
+      spent.
+
+- [ ] **R.22 "Never spent on a request no write could accept" is false for
+      vault-level limits, so a full vault silently burns the approval.**
+      `GrantRequest::check_approvable` (`src/grant/request.rs:146-152`) checks
+      only the expiry, and both its doc comment (`src/grant/request.rs:150`)
+      and the daemon comment at `src/daemon.rs:655-657` claim that no write
+      could then refuse the request. But the write also fails on vault limits:
+      `store::encode` refuses more than `MAX_GRANTS` (1024) grants
+      (`src/store/payload.rs:118`) or more than `MAX_PLAINTEXT_BYTES`
+      (`src/store/payload.rs:125`), and `Vault::save_with_key`
+      (`src/vault.rs:194-208`) only discovers that after the approval is gone.
+      Failure: a vault that already holds 1024 grants; the human proves the
+      digest, the daemon answers `grant_approved` and spends both the nonce and
+      the approval, then 3.4d's `save_with_key` fails with "too many grants".
+      The master-password prompt produced neither a grant nor a retryable
+      approval, the token the human believed was approved was never written,
+      and the human has no way to tell this from a crash.
+      Fix: the daemon must not learn vault state (it never opens the vault), so
+      narrow the claim to the validator rules it actually enforces, and make
+      3.4d's `pm grant create` open the vault with the derived key and refuse a
+      full vault *before* it asks for a proof. Do not add `MAX_GRANTS` to
+      `check_approvable`.
+      Test: seed a vault at `MAX_GRANTS`, run `pm grant create` on a PTY, and
+      assert it fails with the "too many grants" error without ever sending
+      `challenge`/`prove` (record the frames at a stub socket) and that
+      `Approvals::pending()` is still 0; plus a `tests/docs.rs` contract pinning
+      the reworded sentence so the absolute claim cannot come back.
+
+- [ ] **R.23 Nothing tests the 30-day branch of the pre-spend check, so the
+      30-day refusal could be dropped without a failure.**
+      MCP.md:224-226 and DECISIONS.md promise that `grant_create` refuses a
+      request whose expiry is past **or more than 30 days out** without
+      spending the approval. `GrantRequest::new` does not check the clock (it
+      only caps `expires_at` at `MAX_TIMESTAMP_UNIX`,
+      `src/grant/request.rs:90-92`), so the 30-day rule reaches the daemon only
+      through `check_approvable` -> `grant::validate_expiry`
+      (`src/grant.rs:535-551`). The single daemon test,
+      `grant_create_refuses_an_expired_request_without_spending_the_approval`
+      (`src/daemon/tests.rs:261`), only sends `now - 1`; the past-expiry and
+      over-`MAX_TIMESTAMP` cases are covered elsewhere (the latter already
+      fails in `GrantRequest::new`).
+      Failure: a refactor replaces `check_approvable` with `expires_at <= now`
+      (or deletes the 30-day rule as "duplicated in `Grant::create`") because
+      the suite stays green; a human's approval is then spent on a 90-day
+      request that the writer rejects, which is exactly the failure 3.4c says
+      it prevents.
+      Test: send `grant_request(now + 30 * 86_400 + 1)` after a successful
+      `prove`, assert `bad_request`, assert `Approvals::pending() == 1`, then
+      assert an `Approvals::take` for that exact digest still succeeds; keep
+      the existing `now - 1` case and add `now + 30 * 86_400` (accepted) as the
+      boundary.
+
+- [ ] **R.24 TODO 3.4c still documents the `grant_create` request nested under
+      a `request` key, so the only concrete wire shape in the docs is wrong.**
+      Its protocol line (`TODO.md`, item 3.4c, the "Protocol request"
+      paragraph under `### Phase 3`) shows
+      `{type:"grant_create", request:{label, refs, tags, fields?, commands,
+      capabilities, expires_at, max_uses?, token_hash}}`; the implementation and
+      the same item's Done note ("fields are flat on the request object like
+      `run`, not nested under a `request` key") put those fields flat, and
+      `src/protocol/tests.rs` pins the flat shape. MCP.md:219-226 describes the
+      fields in prose but never names the keys, so a reader who needs the shape
+      has only the wrong spec line. 3.4d (the next iteration) builds the client
+      from this file.
+      Failure: the 3.4d client is written from the spec line, the daemon decodes
+      the nested form as `label: null` and answers `bad_request`, and the
+      resulting debugging session "fixes" the encoder instead of the doc.
+      Fix: correct that spec paragraph (TODO.md, item 3.4c) to the flat shape
+      and add the exact key
+      list (one fenced JSON example) to MCP.md's "The daemon never writes a
+      grant" paragraph so the wire shape has one authoritative home.
+      Test: pin that MCP.md example in `src/protocol/tests.rs` as a literal,
+      assert `decode` yields the expected `GrantCreateRequest` and that
+      re-encoding reproduces the literal byte for byte (a nested example fails
+      this), and have `tests/docs.rs` assert the key set in the example equals
+      the encoder's key set.
+
 ## Phase 3 — grants and audit log
 
 The design for grants, approval and audit lives in `MCP.md` ("Grants and the
