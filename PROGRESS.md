@@ -1,3 +1,53 @@
+## 2026-11-02 — Peer credential check (TODO 2.3)
+
+- `src/socket.rs` now verifies the connecting user before any request byte is
+  read. New `PeerCredentials { uid, gid, pid: Option<i32> }` plus
+  `peer_credentials(&UnixStream)` and `PeerCredentials::verify(expected_uid)`.
+  Linux/Android read `getsockopt(SO_PEERCRED)` into `libc::ucred`; macOS/iOS
+  call `libc::getpeereid` (no pid available, so `pid()` is `None` there). Both
+  syscalls are validated: non-zero return is an error and Linux also requires
+  the kernel to report exactly `size_of::<ucred>()` bytes. Any other Unix
+  target returns `SocketError::PeerCheckUnsupported` and the daemon fails
+  closed — no unchecked accept path exists on an unsupported platform.
+- `DaemonSocket::accept_peer()` is the intended accept path. It calls
+  `listener.accept()`, reads the peer credentials, compares the uid with
+  `geteuid()`, and only then returns `(UnixStream, PeerCredentials)`. On
+  mismatch the stream is dropped immediately (no reply, nothing read) and
+  `SocketError::PeerRejected { expected, actual }` is returned. Documented in
+  the module header that 2.4 must use `accept_peer()`, not `listener()`; the
+  latter is kept public only for tests/explicitly validated callers.
+- The check is **not** an authorization boundary on its own: any process
+  running as the same user passes it. It separates users; the session token
+  (2.5) and grants (3.1) separate agents from their owner. That limit is
+  written in the module docs so it is not mistaken for more. PID is reported
+  but never used for authorization (pids are reused).
+- Error variants added: `PeerRejected`, `PeerCheckFailed(io::Error)`,
+  `PeerCheckUnsupported`; all have `Display` text with uids only, and
+  `source()` exposes the syscall error. `SocketError` remains module-local and
+  is not wired into the CLI exit-code contract (2.4 decides the mapping).
+- Tests: 3 new lib tests. `peer_credentials_report_the_current_user` (uid/gid
+  match, Linux pid is our pid, macOS pid is `None`, free function and accept
+  helper agree, a second connection still accepts);
+  `accept_peer_rejects_a_foreign_uid_and_closes_the_connection` (client writes
+  a request-shaped message, accept is forced to expect `uid+1`, gets
+  `PeerRejected` with both uids, and the client reads EOF/reset with no
+  reply); `verify_rejects_a_different_uid_with_a_clear_message` (unit-level
+  forced-failure check plus message contents). No second user account needed.
+- No new dependency (`libc` already present). No store, protocol, CLI or
+  crypto change. The socket/lock/dir behavior from 2.2 is untouched.
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
+  clean, `cargo test` 134 passed (88 lib + 19 bin + 27 e2e, ~150 s; e2e is
+  Argon2id-bound and serialized). `cargo audit` still not installed
+  (`error: no such command: audit`).
+- **Next iteration must know:** next is **2.4** (`pm unlock` / `pm lock`, idle
+  timeout, SIGTERM/SIGINT wipe, `mlock`, `prctl(PR_SET_DUMPABLE, 0)`). Wire the
+  accept loop to `DaemonSocket::accept_peer()` and keep the `DaemonSocket` (and
+  therefore the `flock`) alive for the daemon's whole lifetime. There is still
+  no request type that returns plaintext. Until 2.5 lands, authorize only the
+  local session written at unlock; do not add a bypass. On Linux, remember
+  that a rejected peer's socket is dropped without a response — do not turn
+  `PeerRejected` into a wire error message.
+
 ## 2026-11-02 — Socket setup module (TODO 2.2)
 
 - New `src/socket.rs` (registered in `src/lib.rs` as `#[cfg(unix)] pub mod

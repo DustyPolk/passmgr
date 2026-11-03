@@ -37,13 +37,31 @@
 //! with the process umask. The 0700 directory already keeps other users out,
 //! so that brief window is not reachable from outside the account; the chmod
 //! is belt and braces (and covers a directory that is later widened).
+//!
+//! # Peer credentials
+//!
+//! File permissions and the 0700 directory are the first line of defence, but
+//! the daemon does not rely on them alone. Every accepted connection has its
+//! peer's uid read from the kernel *before* a single request byte is read:
+//! `SO_PEERCRED` on Linux and `getpeereid` on macOS. A peer whose uid is not
+//! the daemon's own uid is disconnected with [`SocketError::PeerRejected`].
+//! Use [`DaemonSocket::accept_peer`] rather than [`DaemonSocket::listener`],
+//! so the check cannot be forgotten.
+//!
+//! The credentials are the ones the kernel recorded when the peer called
+//! `connect(2)`; they cannot be chosen or forged by the connecting process.
+//! Note what this check does **not** do: every process running as the same
+//! user passes it. It separates users, not agents from their owner. Requests
+//! from the owner are authorized separately by the session token (TODO 2.5)
+//! and grants (TODO 3.1). On Linux the reported pid is informational only and
+//! is never used for authorization (pids are reused).
 
 use std::env;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -87,6 +105,14 @@ pub enum SocketError {
     NotASocket(PathBuf),
     /// No daemon is listening (socket missing, or connection refused).
     NotRunning,
+    /// The kernel says the connection comes from a different user than the
+    /// one that owns the daemon. The connection is dropped unread.
+    PeerRejected { expected: u32, actual: u32 },
+    /// Asking the kernel for the peer's credentials failed.
+    PeerCheckFailed(io::Error),
+    /// This platform has no peer-credential implementation compiled in. The
+    /// daemon fails closed rather than accepting an unchecked peer.
+    PeerCheckUnsupported,
 }
 
 impl SocketError {
@@ -117,14 +143,137 @@ impl fmt::Display for SocketError {
                 path.display()
             ),
             Self::NotRunning => f.write_str("no passmgr daemon is running (try 'passmgr unlock')"),
+            Self::PeerRejected { expected, actual } => write!(
+                f,
+                "refusing connection from uid {actual}; the daemon is owned by uid {expected}"
+            ),
+            Self::PeerCheckUnsupported => {
+                f.write_str("this platform does not support peer credential checks")
+            }
+            Self::PeerCheckFailed(source) => {
+                write!(f, "could not read the peer's credentials: {source}")
+            }
         }
     }
+}
+
+/// The kernel-reported identity of the process at the other end of a Unix
+/// socket, captured when it connected.
+///
+/// `pid` is `Some` on Linux and `None` on macOS. It is informational: never
+/// authorize on it, because process ids are reused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerCredentials {
+    uid: u32,
+    gid: u32,
+    pid: Option<i32>,
+}
+
+impl PeerCredentials {
+    /// The peer's user id.
+    pub fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// The peer's group id.
+    pub fn gid(&self) -> u32 {
+        self.gid
+    }
+
+    /// The peer's process id, where the platform reports one.
+    pub fn pid(&self) -> Option<i32> {
+        self.pid
+    }
+
+    /// Accept only `expected_uid`; every other user is rejected.
+    pub fn verify(&self, expected_uid: u32) -> Result<(), SocketError> {
+        if self.uid == expected_uid {
+            Ok(())
+        } else {
+            Err(SocketError::PeerRejected {
+                expected: expected_uid,
+                actual: self.uid,
+            })
+        }
+    }
+}
+
+/// Read the peer credentials of an accepted connection.
+///
+/// This issues one `getsockopt(SO_PEERCRED)` / `getpeereid` call and reads no
+/// bytes from the stream.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn credentials_from_fd(fd: RawFd) -> io::Result<PeerCredentials> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `fd` is borrowed from a live `UnixStream`, the buffer points at
+    // a live `ucred`, and `len` describes its size exactly.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast::<libc::c_void>(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "kernel returned an unexpected SO_PEERCRED size",
+        ));
+    }
+    Ok(PeerCredentials {
+        uid: cred.uid,
+        gid: cred.gid,
+        pid: Some(cred.pid),
+    })
+}
+
+/// Read the peer credentials of an accepted connection (macOS `getpeereid`).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn credentials_from_fd(fd: RawFd) -> io::Result<PeerCredentials> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: `fd` is borrowed from a live `UnixStream` and both out-pointers
+    // refer to live locals. `getpeereid` writes both on success.
+    let rc = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(PeerCredentials {
+        uid,
+        gid,
+        pid: None,
+    })
+}
+
+/// Platforms without a compiled-in credential check fail closed.
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+)))]
+fn credentials_from_fd(_fd: RawFd) -> io::Result<PeerCredentials> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "peer credential checks are not implemented on this platform",
+    ))
 }
 
 impl std::error::Error for SocketError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::PeerCheckFailed(source) => Some(source),
             _ => None,
         }
     }
@@ -279,8 +428,47 @@ impl DaemonSocket {
     }
 
     /// The listening socket; the daemon accepts connections from here.
+    ///
+    /// Prefer [`Self::accept_peer`], which performs the peer-uid check. This
+    /// accessor exists for tests and for code that has already validated its
+    /// peer another way.
     pub fn listener(&self) -> &UnixListener {
         &self.listener
+    }
+
+    /// Accept one connection and verify the peer's uid.
+    ///
+    /// The uid is read from the kernel and compared with this process's
+    /// effective uid before any request bytes are read. A mismatch yields
+    /// [`SocketError::PeerRejected`] and the connection is dropped. The
+    /// returned stream is the only handle the daemon should read from.
+    pub fn accept_peer(&self) -> Result<(UnixStream, PeerCredentials), SocketError> {
+        self.accept_peer_expecting(current_uid())
+    }
+
+    /// `accept_peer` with an explicit owner uid. Split out so tests can force
+    /// the check to fail without needing a second user account.
+    fn accept_peer_expecting(
+        &self,
+        expected_uid: u32,
+    ) -> Result<(UnixStream, PeerCredentials), SocketError> {
+        let (stream, _addr) = self
+            .listener
+            .accept()
+            .map_err(|err| SocketError::io(&self.paths.socket(), err))?;
+
+        let peer = match peer_credentials(&stream) {
+            Ok(peer) => peer,
+            Err(err) => {
+                drop(stream);
+                return Err(err);
+            }
+        };
+        if let Err(err) = peer.verify(expected_uid) {
+            drop(stream);
+            return Err(err);
+        }
+        Ok((stream, peer))
     }
 
     /// The paths this socket was bound at.
@@ -304,6 +492,17 @@ impl Drop for DaemonSocket {
 /// Connect to the daemon at the environment-derived path.
 pub fn connect() -> Result<UnixStream, SocketError> {
     connect_at(&RuntimePaths::resolve())
+}
+
+/// Read the peer credentials of `stream` (an accepted connection).
+pub fn peer_credentials(stream: &UnixStream) -> Result<PeerCredentials, SocketError> {
+    credentials_from_fd(stream.as_raw_fd()).map_err(|err| {
+        if err.kind() == io::ErrorKind::Unsupported {
+            SocketError::PeerCheckUnsupported
+        } else {
+            SocketError::PeerCheckFailed(err)
+        }
+    })
 }
 
 /// Connect to the daemon at an explicit runtime directory.
@@ -642,5 +841,94 @@ mod tests {
         ));
         drop(held);
         assert!(acquire_lock(&lock_path).is_ok());
+    }
+
+    fn current_gid() -> u32 {
+        // SAFETY: getegid has no preconditions and cannot fail.
+        unsafe { libc::getegid() }
+    }
+
+    #[test]
+    fn peer_credentials_report_the_current_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(&temp);
+        let daemon = DaemonSocket::bind_at(paths.clone()).unwrap();
+
+        let _client = connect_at(&paths).unwrap();
+        let (stream, peer) = daemon.accept_peer().unwrap();
+        assert_eq!(peer.uid(), current_uid());
+        assert_eq!(peer.gid(), current_gid());
+        peer.verify(current_uid()).unwrap();
+
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        assert_eq!(peer.pid(), Some(std::process::id() as i32));
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        assert_eq!(peer.pid(), None, "getpeereid does not report a pid");
+
+        // The free function and the accept helper agree.
+        assert_eq!(peer_credentials(&stream).unwrap(), peer);
+
+        // A check of our own uid passed, so normal traffic still works.
+        drop(stream);
+        let _client2 = connect_at(&paths).unwrap();
+        let _ = daemon.accept_peer().unwrap();
+    }
+
+    #[test]
+    fn accept_peer_rejects_a_foreign_uid_and_closes_the_connection() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = paths_in(&temp);
+        let daemon = DaemonSocket::bind_at(paths.clone()).unwrap();
+
+        // The client connects and writes a request-shaped message. The daemon
+        // must reject before reading any of it.
+        let mut client = connect_at(&paths).unwrap();
+        client.write_all(b"{\"version\":1}").unwrap();
+
+        let foreign_uid = current_uid().wrapping_add(1);
+        match daemon.accept_peer_expecting(foreign_uid) {
+            Err(SocketError::PeerRejected { expected, actual }) => {
+                assert_eq!(expected, foreign_uid);
+                assert_eq!(actual, current_uid());
+            }
+            other => panic!("expected PeerRejected, got {other:?}"),
+        }
+
+        // The rejected stream was dropped without a reply: the client sees
+        // end-of-stream (or a reset), never a response.
+        let mut buf = [0u8; 1];
+        match client.read(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => panic!("rejected peer must not receive a reply, got {n} bytes"),
+            Err(err) => assert!(
+                matches!(
+                    err.kind(),
+                    io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+                ),
+                "unexpected error after rejection: {err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_a_different_uid_with_a_clear_message() {
+        let peer = PeerCredentials {
+            uid: 1000,
+            gid: 1000,
+            pid: Some(42),
+        };
+        assert!(peer.verify(1000).is_ok());
+
+        let err = peer.verify(1001).unwrap_err();
+        assert!(matches!(
+            err,
+            SocketError::PeerRejected {
+                expected: 1001,
+                actual: 1000
+            }
+        ));
+        let message = err.to_string();
+        assert!(message.contains("uid 1000"), "message: {message}");
+        assert!(message.contains("uid 1001"), "message: {message}");
     }
 }

@@ -102,9 +102,13 @@ come first.
       and only unlinks a socket after a probe connect gets `ECONNREFUSED`.
       Non-sockets and symlinks at the path are refused untouched. Drop removes
       the socket and releases the lock. 15 unit tests.)
-- [ ] **2.3 Peer credential check.** `SO_PEERCRED` on Linux, `getpeereid` on macOS;
+- [x] **2.3 Peer credential check.** `SO_PEERCRED` on Linux, `getpeereid` on macOS;
       reject mismatched UID before parsing a request. Test with a helper that
       connects and asserts rejection when the check is forced to fail.
+      (`PeerCredentials` + `peer_credentials()`, and
+      `DaemonSocket::accept_peer()` rejects with `SocketError::PeerRejected`
+      before reading; unsupported Unix targets fail closed. Linux pid is
+      informational; macOS reports no pid.)
 - [ ] **2.4 `pm unlock` / `pm lock`, idle timeout, SIGTERM/SIGINT wipe.** Key held
       only in daemon memory; `mlock` best-effort; `prctl(PR_SET_DUMPABLE, 0)` on
       Linux. Tests: idle timeout fires, `lock` wipes (subsequent request fails),
