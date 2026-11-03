@@ -276,6 +276,15 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   interrupted run writes no terminal frame: the client sees EOF and reports a
   `Daemon` error. A finished run refreshes the idle timer, but a run that is
   still going does not keep the key alive past the idle timeout.
+- Each child is spawned into its own process group (`setpgid(0, 0)`), and a
+  cancel kills the group with `SIGTERM` then, after a 100 ms grace, `SIGKILL`.
+  The pipe readers poll the cancel flag before every blocking read, so a
+  grandchild that inherits the output pipes and outlives the child can keep
+  neither the relay nor the shutdown waiting. The `lock` acknowledgement is
+  written only after the workers are joined, the socket and session file are
+  removed and the key is zeroized: when `passmgr lock` prints, it is done.
+  `serve_run` re-checks the flag before decrypting and before spawning, so no
+  child starts once the shutdown has begun.
 - The streaming client (`client::run`) reads frames until the terminal frame,
   with no idle/read timeout: a legitimate child may stay silent for minutes,
   and the daemon closes the socket when it exits. EOF before a terminal frame

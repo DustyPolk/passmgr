@@ -82,13 +82,7 @@ fn run() -> Result<(), passmgr::daemon::DaemonError> {
     let handover = daemon::read_handover(&mut stdin)?;
     drop(stdin);
 
-    daemon::run(
-        &vault,
-        paths.dir(),
-        handover.key(),
-        handover.token(),
-        idle_timeout,
-    )
+    daemon::run(&vault, paths.dir(), handover, idle_timeout)
 }
 
 #[cfg(unix)]

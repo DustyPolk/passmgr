@@ -642,7 +642,12 @@ mod tests {
             };
             for frame in frames {
                 let encoded = protocol::encode_run_frame(&frame).expect("encode frame");
-                stream.write_all(&encoded).expect("write frame");
+                // A client that stops at a terminal frame closes the stream;
+                // that is what some of these tests prove, so a failed write
+                // just ends the exchange instead of panicking here.
+                if stream.write_all(&encoded).is_err() {
+                    break;
+                }
             }
             request
         })

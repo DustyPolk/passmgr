@@ -27,8 +27,12 @@
 //! request wipe the key, remove the socket and the session file, and exit.
 //! Each `run` is served on its own worker thread so the accept loop stays
 //! responsive: `lock`, `ping` and a signal are observed even while a child is
-//! still running. Every in-flight child is killed and reaped before the
-//! daemon returns, so no copy of the injected secret outlives the key.
+//! still running. Every in-flight child is killed and reaped -- together with
+//! its process group, so pipe-holding grandchildren die too -- before the
+//! daemon returns, so no copy of the injected secret outlives the key. A
+//! `lock` is only acknowledged after that join, the socket unlink, the
+//! session removal and the key wipe: the message `passmgr lock` prints is
+//! true by the time the client sees it.
 //!
 //! # Authorization
 //!
@@ -351,8 +355,9 @@ pub fn shutdown_requested() -> bool {
 /// Run the daemon until `lock`, `SIGTERM`/`SIGINT`, or an idle timeout.
 ///
 /// The key is verified against the vault *before* the socket is bound, so a
-/// caller with the wrong key can never make `pmd` look alive. `key` stays
-/// borrowed: the caller drops (and therefore zeroizes) it after this returns.
+/// caller with the wrong key can never make `pmd` look alive. The daemon owns
+/// `handover` for its whole lifetime: the key and the session token are
+/// zeroized here, explicitly before a `lock` acknowledgement is written.
 ///
 /// `idle_timeout` is measured from the last authorized, successfully decoded
 /// request, not from the last byte received: a malformed, half-sent or
@@ -363,10 +368,11 @@ pub fn shutdown_requested() -> bool {
 pub fn run(
     vault_path: &Path,
     runtime_dir: &Path,
-    key: &LockedKey,
-    token: &SessionToken,
+    handover: Handover,
     idle_timeout: Duration,
 ) -> Result<(), DaemonError> {
+    let key = &handover.key;
+    let token = &handover.token;
     let paths = RuntimePaths::at(runtime_dir);
     harden_process()?;
     install_signal_handlers()?;
@@ -379,6 +385,8 @@ pub fn run(
     socket.listener().set_nonblocking(true)?;
 
     let mut last_activity = Instant::now();
+    // A `lock` connection whose answer is deferred until the key is gone.
+    let mut lock_ack: Option<UnixStream> = None;
     // Scoped threads let a `run` worker borrow the key and paths without
     // copying them; the scope cannot end until every worker has been joined.
     // `cancel` lives outside the scope so a worker closure may borrow it.
@@ -409,8 +417,12 @@ pub fn run(
                     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
                     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
                     match handle_connection(stream, token) {
-                        // `lock`: response is written, now wipe on the way out.
-                        Handled::Locked => break,
+                        // `lock`: stop accepting, but answer only after the
+                        // workers are joined and the key is zeroized below.
+                        Handled::Locked(stream) => {
+                            lock_ack = Some(stream);
+                            break;
+                        }
                         // Only a request that was decoded and answered counts
                         // as activity; garbage must not keep the key alive.
                         Handled::Served => last_activity = Instant::now(),
@@ -441,7 +453,8 @@ pub fn run(
         }
 
         // Cancel and reap every in-flight child before the key is dropped.
-        // `abort` in the runner kills and waits, so no child survives this.
+        // The runner kills the child's whole process group, so a grandchild
+        // that holds the output pipes cannot make this join hang.
         cancel.store(true, Ordering::SeqCst);
         for handle in runs {
             let _ = handle.join();
@@ -449,8 +462,16 @@ pub fn run(
         fatal
     });
 
-    // Dropping `socket` unlinks the socket and releases the instance lock.
+    // Dropping `socket` unlinks it and releases the instance lock. Only then
+    // is a `lock` answered: by that point the children are gone, the files
+    // are removed and the key below is zeroized.
+    drop(socket);
     session::remove_if_matches(&paths, token);
+    drop(handover);
+    if let Some(mut stream) = lock_ack {
+        let _ = write_response(&mut stream, &Response::Locked);
+    }
+
     match fatal {
         Some(err) => Err(err.into()),
         None => Ok(()),
@@ -461,12 +482,13 @@ pub fn run(
 #[derive(Debug)]
 enum Handled {
     /// A well-formed request was decoded and answered. Refreshes the idle
-    /// timer (the `lock` case is reported separately).
+    /// timer.
     Served,
     /// Nothing usable arrived; the client got `bad_request`.
     Rejected,
-    /// A `lock` request was answered: wipe and stop.
-    Locked,
+    /// A `lock` request passed authentication. The connection is answered by
+    /// [`run`] once the key is wiped, not here.
+    Locked(UnixStream),
     /// A `run` request that passed authorization and parsing. The socket is
     /// handed to a worker thread; the accept loop must not block on it.
     Run(UnixStream, protocol::RunRequest),
@@ -492,10 +514,7 @@ fn handle_connection(mut stream: UnixStream, token: &SessionToken) -> Handled {
             let _ = write_response(&mut stream, &Response::Pong);
             Handled::Served
         }
-        Request::Lock => {
-            let _ = write_response(&mut stream, &Response::Locked);
-            Handled::Locked
-        }
+        Request::Lock => Handled::Locked(stream),
         Request::Run(request) => Handled::Run(stream, request),
     }
 }
@@ -534,6 +553,12 @@ fn serve_run(
     key: &LockedKey,
     cancel: &AtomicBool,
 ) {
+    // The daemon may have started shutting down between accepting this
+    // request and spawning the worker. Decrypting and spawning after a
+    // `lock` was acknowledged would put the secret back in memory.
+    if cancel.load(Ordering::SeqCst) {
+        return;
+    }
     // The protocol guarantees these, but the daemon must not rely on a
     // client-side check for a security decision.
     let Ok(id) = EntryId::parse_ref(&request.reference) else {
@@ -563,6 +588,11 @@ fn serve_run(
     drop(vault);
 
     let inherited = runner::inherited_env(std::env::vars_os());
+    // Re-check after decrypting: a shutdown may have started while the vault
+    // was open, and no child may be spawned once the key is being wiped.
+    if cancel.load(Ordering::SeqCst) {
+        return;
+    }
     let result = runner::execute(
         &request.command,
         &request.env,

@@ -16,7 +16,7 @@ Findings from the security review of `3500f6d..533b68d` (details in
 guarantee `lock`, SIGTERM and the idle timeout are supposed to provide. These
 come before Phase 3.
 
-- [ ] **R.6 Shutdown hangs forever when a grandchild holds the child's
+- [x] **R.6 Shutdown hangs forever when a grandchild holds the child's
       stdout/stderr; `lock` reports a wipe that never happens.**
       `src/runner.rs:296` (`abort`) kills and waits for the direct child, drops
       the receiver and calls `join_all(readers)` (`src/runner.rs:305`), which
@@ -44,6 +44,10 @@ come before Phase 3.
       session file are gone, grandchild is reaped; repeat for SIGTERM and a
       2 s idle timeout. The existing `tests/daemon.rs` cancellation tests
       `exec >&- 2>&-` first, which is why they miss this.
+      Done differently: the readers poll a cancel flag (100 ms slices) before
+      each blocking read instead of closing fds, the child gets its own process
+      group via `setpgid`, and `lock`'s answer is written by `run` after the
+      join, the unlink and the key drop (see PROGRESS.md 2026-11-02 R.6).
 - [ ] **R.7 An in-flight `run` is not activity, so it is killed at the idle
       deadline.**
       `src/daemon.rs:421` pushes a worker for `Handled::Run` without touching

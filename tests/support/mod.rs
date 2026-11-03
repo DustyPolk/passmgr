@@ -1,0 +1,256 @@
+//! End-to-end tests for the unlock daemon (`pmd`).
+//!
+//! Each test runs a real `pmd` against a disposable runtime directory and a
+//! vault created with deliberately cheap Argon2 parameters (this file is not
+//! testing the KDF). The vault secret is generated here and must never appear
+//! in daemon output, arguments, environment or socket traffic.
+
+#![allow(dead_code)] // each integration-test binary uses a different subset
+
+use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use passmgr::crypto::{self, KEY_LEN, KdfParams};
+use passmgr::protocol::{self, Request, Response, RunFrame, RunRequest};
+use passmgr::socket::RuntimePaths;
+use passmgr::store::{self, Credential};
+use passmgr::token::SessionToken;
+use tempfile::TempDir;
+use zeroize::Zeroizing;
+
+pub const MASTER: &str = "daemon test master password";
+pub const SECRET: &str = "s3cret-injected-value-must-never-leak";
+pub const WAIT: Duration = Duration::from_secs(10);
+
+pub struct Fixture {
+    pub _directory: TempDir,
+    pub vault: PathBuf,
+    pub runtime: PathBuf,
+    pub key: Zeroizing<Vec<u8>>,
+    pub token: SessionToken,
+    /// The vault entry's `pm://…` reference, so tests can run it.
+    pub reference: String,
+}
+
+impl Fixture {
+    pub fn new() -> Self {
+        Self::with_secret(SECRET)
+    }
+
+    pub fn with_secret(secret: &str) -> Self {
+        let directory = tempfile::tempdir().expect("tempdir");
+        // tempfile creates the directory 0700, which is exactly what the
+        // runtime directory check requires.
+        let vault = directory.path().join("vault.dat");
+        let runtime = directory.path().join("run");
+
+        let credential = Credential::new(
+            "example.test".into(),
+            "alice".into(),
+            Zeroizing::new(secret.into()),
+        )
+        .expect("credential");
+        let reference = credential.reference();
+        let plaintext = store::encode(&[credential]).expect("encode store");
+        let container = crypto::encrypt(&plaintext, MASTER, KdfParams::new(8 * 1024, 1, 1))
+            .expect("encrypt vault");
+        fs::write(&vault, &container).expect("write vault");
+        fs::set_permissions(&vault, fs::Permissions::from_mode(0o600)).expect("chmod vault");
+
+        let mut key = Zeroizing::new(vec![0u8; KEY_LEN]);
+        crypto::derive_vault_key(&container, MASTER, key.as_mut_slice()).expect("derive key");
+
+        Self {
+            _directory: directory,
+            vault,
+            runtime,
+            key,
+            token: SessionToken::generate().expect("session token"),
+            reference,
+        }
+    }
+
+    /// A path inside this fixture's private temp directory. Used to prove a
+    /// command did (or did not) run.
+    pub fn temp_path(&self, name: &str) -> PathBuf {
+        self._directory.path().join(name)
+    }
+
+    pub fn socket(&self) -> PathBuf {
+        RuntimePaths::at(&self.runtime).socket()
+    }
+
+    pub fn spawn(&self) -> Child {
+        self.spawn_with(&[])
+    }
+
+    pub fn spawn_with(&self, extra: &[&str]) -> Child {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pmd"));
+        command
+            .arg("--vault")
+            .arg(&self.vault)
+            .arg("--runtime-dir")
+            .arg(&self.runtime)
+            .args(extra)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn pmd");
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        stdin.write_all(self.key.as_slice()).expect("send key");
+        stdin.write_all(self.token.as_bytes()).expect("send token");
+        drop(stdin);
+        child
+    }
+
+    /// Start `pmd` and wait until it answers a ping.
+    ///
+    /// The returned child is owned by the caller, which always reaps it. If
+    /// readiness fails, the child is killed and reaped before panicking.
+    #[allow(clippy::zombie_processes)] // the `return child` path transfers ownership
+    pub fn start(&self) -> Child {
+        self.start_with(&[])
+    }
+
+    /// `start`, with extra `pmd` arguments (for example `--idle-timeout`).
+    #[allow(clippy::zombie_processes)] // the `return child` path transfers ownership
+    pub fn start_with(&self, extra: &[&str]) -> Child {
+        let mut child = self.spawn_with(extra);
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if let Ok(Response::Pong) = try_request(&self.socket(), &self.token, &Request::Ping) {
+                return child;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("pmd did not become ready");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+pub fn try_read_response(stream: &mut UnixStream) -> std::io::Result<Response> {
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes)?;
+    protocol::decode_response(&bytes)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid response frame"))
+}
+
+pub fn read_response(stream: &mut UnixStream) -> Response {
+    try_read_response(stream).expect("read response")
+}
+
+pub fn try_request(
+    socket: &Path,
+    token: &SessionToken,
+    request: &Request,
+) -> std::io::Result<Response> {
+    let mut stream = UnixStream::connect(socket)?;
+    stream.set_read_timeout(Some(WAIT)).expect("read timeout");
+    // The daemon can expire between `connect` and this write; report that as
+    // an I/O error so callers that probe can stop instead of panicking.
+    stream.write_all(&protocol::encode(token, request).expect("encode request"))?;
+    try_read_response(&mut stream)
+}
+
+pub fn request(socket: &Path, token: &SessionToken, request: &Request) -> Response {
+    try_request(socket, token, request).expect("daemon request")
+}
+
+/// Send arbitrary bytes, half-close, and decode the daemon's answer.
+pub fn raw_request(socket: &Path, bytes: &[u8]) -> Response {
+    use std::net::Shutdown;
+    let mut stream = UnixStream::connect(socket).expect("connect");
+    stream.set_read_timeout(Some(WAIT)).expect("read timeout");
+    stream.write_all(bytes).expect("write bytes");
+    stream.shutdown(Shutdown::Write).expect("shutdown write");
+    read_response(&mut stream)
+}
+
+pub fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            return status;
+        }
+        assert!(Instant::now() < deadline, "pmd did not exit in time");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Send one `run` request and collect every frame plus the raw socket bytes.
+///
+/// Reads until the daemon closes the connection (a terminal frame is always
+/// followed by close), so a missing terminal frame fails the test timeout.
+pub fn read_run(
+    socket: &Path,
+    token: &SessionToken,
+    request: &Request,
+) -> (Vec<RunFrame>, Vec<u8>) {
+    let mut stream = UnixStream::connect(socket).expect("connect");
+    stream.set_read_timeout(Some(WAIT)).expect("read timeout");
+    stream
+        .write_all(&protocol::encode(token, request).expect("encode request"))
+        .expect("write request");
+
+    let mut decoder = protocol::FrameDecoder::new();
+    let mut frames = Vec::new();
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = stream.read(&mut buffer).expect("read run stream");
+        if read == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buffer[..read]);
+        decoder
+            .push(&buffer[..read])
+            .expect("run frames are validly framed");
+        while let Some(body) = decoder.next_frame().expect("decode frame") {
+            let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+            frame.extend_from_slice(&body);
+            frames.push(protocol::decode_run_frame(&frame).expect("decode run frame"));
+        }
+    }
+    (frames, raw)
+}
+
+pub fn stdout_bytes(frames: &[RunFrame]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for frame in frames {
+        if let RunFrame::Stdout(data) = frame {
+            bytes.extend_from_slice(data);
+        }
+    }
+    bytes
+}
+
+pub fn stderr_bytes(frames: &[RunFrame]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for frame in frames {
+        if let RunFrame::Stderr(data) = frame {
+            bytes.extend_from_slice(data);
+        }
+    }
+    bytes
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+pub fn run_request(reference: &str, env: &str, command: &[&str]) -> Request {
+    Request::Run(RunRequest {
+        env: env.into(),
+        reference: reference.into(),
+        command: command.iter().map(|arg| (*arg).to_string()).collect(),
+        cwd: "/".into(),
+    })
+}

@@ -19,14 +19,24 @@
 //! The child receives the value in its environment, so a deliberately hostile
 //! child can still exfiltrate it by writing a file, opening a socket, or
 //! letting another same-user process read `/proc/<pid>/environ`. Redaction
-//! protects the *relayed output* only. Per-call timeouts and process-group
-//! termination belong to TODO 4.5.
+//! protects the *relayed output* only. Per-call timeouts belong to TODO 4.5.
+//!
+//! # Stopping a run
+//!
+//! The child is started in its own process group and every stop path signals
+//! the whole group (SIGTERM, then SIGKILL). That reaches grandchildren that
+//! inherited the output pipes: without it, a child that leaves a background
+//! process behind makes the pipe never reach EOF and shutdown waits forever.
+//! The readers also poll a stop flag while waiting for input, so a process
+//! that somehow escaped the group still cannot make the join unbounded.
 
 use std::ffi::OsString;
 use std::io::{self, Read};
-use std::os::unix::process::ExitStatusExt;
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
@@ -46,8 +56,11 @@ pub const INHERITED_ENV: &[&str] = &[
 /// Prefixes of additional variables inherited from the daemon (locales).
 const INHERITED_PREFIXES: &[&str] = &["LC_"];
 
-/// How often the output loop checks for a daemon shutdown.
+/// How often the output loop and the pipe readers check for a shutdown.
 const CANCEL_POLL: Duration = Duration::from_millis(100);
+
+/// How long a killed process group gets to act on SIGTERM before SIGKILL.
+const TERM_GRACE: Duration = Duration::from_millis(100);
 
 /// Read size per pipe read. Deliberately smaller than
 /// [`MAX_CHUNK_BYTES`]: redaction can expand output (one marker per match),
@@ -176,6 +189,19 @@ where
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Give the child its own process group so a later stop can signal every
+    // process it started, not just the child. `setpgid` is async-signal-safe,
+    // which is the only thing allowed between `fork` and `exec`.
+    // SAFETY: `pre_exec` runs after `fork` in the child; the closure only
+    // calls `setpgid` and reads `errno` through `last_os_error`.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 
     let mut child = command.spawn().map_err(RunError::Spawn)?;
     drop(command);
@@ -184,17 +210,19 @@ where
     let stderr = child.stderr.take().expect("stderr was piped");
 
     let (sender, receiver) = mpsc::sync_channel::<Message>(8);
+    let stop = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::with_capacity(2);
     for (reader, is_stderr) in [
-        (Box::new(stdout) as Box<dyn Read + Send>, false),
-        (Box::new(stderr) as Box<dyn Read + Send>, true),
+        (Box::new(stdout) as Box<dyn OutputPipe + Send>, false),
+        (Box::new(stderr) as Box<dyn OutputPipe + Send>, true),
     ] {
         let redactor = Redactor::new(secret.as_bytes());
-        match spawn_reader(reader, redactor, sender.clone(), is_stderr) {
+        let reader_stop = Arc::clone(&stop);
+        match spawn_reader(reader, redactor, sender.clone(), is_stderr, reader_stop) {
             Ok(handle) => readers.push(handle),
             Err(err) => {
                 drop(sender);
-                abort(&mut child, receiver, readers);
+                abort(&mut child, receiver, readers, &stop);
                 return Err(RunError::Output(err));
             }
         }
@@ -217,24 +245,24 @@ where
                     }
                     Ok(None) => {
                         if cancel.load(Ordering::SeqCst) {
-                            abort(&mut child, receiver, readers);
+                            abort(&mut child, receiver, readers, &stop);
                             return Err(RunError::Cancelled);
                         }
                         std::thread::sleep(CANCEL_POLL);
                     }
                     Err(err) => {
-                        abort(&mut child, receiver, readers);
+                        abort(&mut child, receiver, readers, &stop);
                         return Err(RunError::Output(err));
                     }
                 }
             }
         }
         Relay::OutputError(err) => {
-            abort(&mut child, receiver, readers);
+            abort(&mut child, receiver, readers, &stop);
             Err(RunError::Output(err))
         }
         Relay::Cancelled => {
-            abort(&mut child, receiver, readers);
+            abort(&mut child, receiver, readers, &stop);
             Err(RunError::Cancelled)
         }
     }
@@ -292,14 +320,49 @@ where
     }
 }
 
-/// Kill the child, stop the readers and reap everything.
-fn abort(child: &mut Child, receiver: Receiver<Message>, readers: Vec<JoinHandle<()>>) {
-    let _ = child.kill();
-    let _ = child.wait();
-    // Dropping the receiver unblocks readers waiting to send; killing the
-    // child closes its pipe ends for readers waiting to read.
+/// Kill the child and every process it started, then stop the readers.
+fn abort(
+    child: &mut Child,
+    receiver: Receiver<Message>,
+    readers: Vec<JoinHandle<()>>,
+    stop: &AtomicBool,
+) {
+    // Tell the readers first: a process that escaped the group could still
+    // hold a pipe open, and the reader must not wait for an EOF that never
+    // comes. They observe the flag within one `CANCEL_POLL` slice.
+    stop.store(true, Ordering::SeqCst);
+    terminate(child);
+    // Dropping the receiver unblocks readers waiting to send.
     drop(receiver);
     join_all(readers);
+}
+
+/// Kill the child's whole process group, then reap the child.
+///
+/// The group is the one `execute` created with `setpgid`; a negative pid
+/// reaches every descendant that inherited the output pipes. SIGKILL follows
+/// SIGTERM unconditionally after a short grace period.
+///
+/// The leader is deliberately not reaped between the two signals: while it is
+/// a zombie its pid -- and therefore the process-group id -- cannot be reused,
+/// so the group signal can never hit an unrelated group.
+fn terminate(child: &mut Child) {
+    let pgid = child.id() as libc::pid_t;
+    signal_group(pgid, libc::SIGTERM);
+    std::thread::sleep(TERM_GRACE);
+    signal_group(pgid, libc::SIGKILL);
+    // `setpgid` runs in the child, so a stop that races the spawn would miss
+    // the group; kill the leader directly too so `wait` cannot block.
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn signal_group(pgid: libc::pid_t, signal: libc::c_int) {
+    // SAFETY: a negative pid signals the process group with that id; no
+    // pointers are involved. Failure (ESRCH: already gone) is ignored.
+    unsafe {
+        libc::kill(-pgid, signal);
+    }
 }
 
 fn join_all(readers: Vec<JoinHandle<()>>) {
@@ -308,13 +371,22 @@ fn join_all(readers: Vec<JoinHandle<()>>) {
     }
 }
 
+/// A relayed output pipe: readable, and pollable before a blocking read.
+///
+/// A trait alias would say this in one bound, but stable Rust has none.
+trait OutputPipe: Read + AsRawFd {}
+
+impl<T: Read + AsRawFd> OutputPipe for T {}
+
 /// Start one pipe reader.
 fn spawn_reader(
-    mut reader: Box<dyn Read + Send>,
+    mut reader: Box<dyn OutputPipe + Send>,
     mut redactor: Redactor,
     sender: SyncSender<Message>,
     is_stderr: bool,
+    stop: Arc<AtomicBool>,
 ) -> io::Result<JoinHandle<()>> {
+    let fd = reader.as_raw_fd();
     std::thread::Builder::new()
         .name(if is_stderr {
             "pmd-run-stderr".into()
@@ -324,6 +396,11 @@ fn spawn_reader(
         .spawn(move || {
             let mut buffer = [0u8; READ_CHUNK];
             loop {
+                if !wait_readable(fd, &stop) {
+                    // The run is being aborted: the client is gone or the
+                    // daemon is stopping. There is no one to hand a tail to.
+                    return;
+                }
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(read) => {
@@ -340,6 +417,39 @@ fn spawn_reader(
             let _ = emit_chunks(&sender, tail, is_stderr);
             let _ = sender.send(Message::Done);
         })
+}
+
+/// Wait until the pipe has data, returning false when the run is aborted.
+///
+/// A plain blocking `read` cannot be interrupted, and a grandchild that
+/// inherited the pipe keeps EOF away after the child exits. Polling in
+/// `CANCEL_POLL` slices bounds how long an abort can wait for that reader.
+fn wait_readable(fd: RawFd, stop: &AtomicBool) -> bool {
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        let mut poll_fd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: exactly one initialized `pollfd` is passed, and the count
+        // matches. `timeout` is a small positive number of milliseconds.
+        let ready = unsafe { libc::poll(&mut poll_fd, 1, CANCEL_POLL.as_millis() as libc::c_int) };
+        if ready > 0 {
+            // Readable, hung up or errored: `read` returns data, 0 or an
+            // error without blocking, which is all the caller needs.
+            return true;
+        }
+        if ready == 0 {
+            continue;
+        }
+        if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return false;
+    }
 }
 
 /// Split redacted bytes into protocol-sized frames. Returns false when the
@@ -648,5 +758,84 @@ mod tests {
         )
         .expect_err("cancelled");
         assert!(matches!(err, RunError::Cancelled));
+    }
+
+    fn wait_for_pid_file(path: &Path) -> libc::pid_t {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                if let Ok(pid) = text.trim().parse::<libc::pid_t>() {
+                    return pid;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child did not report the grandchild's pid"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A zombie has been killed but waits for init to reap it; that counts as
+    /// gone. Only Linux exposes `/proc`, and only Linux runs this suite.
+    fn process_is_gone(pid: libc::pid_t) -> bool {
+        // SAFETY: signal 0 only checks for the process's existence.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // The state is the first field after the parenthesised name.
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .map(|(_, rest)| rest.trim_start().starts_with('Z'))
+                .unwrap_or(false),
+            Err(_) => false,
+        }
+    }
+
+    #[test]
+    fn cancellation_kills_a_grandchild_that_holds_the_pipes() {
+        // The shell exits immediately but leaves `sleep` behind with both
+        // output pipes open, so EOF never arrives. Cancelling must still stop
+        // the run: the readers poll a stop flag, and the group kill reaps the
+        // process holding the pipes.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("grandchild.pid");
+        let script = format!("sleep 30 & echo $! > {}", pid_file.display());
+        let argv = ["/bin/sh".to_string(), "-c".to_string(), script];
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let runner_cancel = Arc::clone(&cancel);
+        let runner = std::thread::spawn(move || {
+            execute(
+                &argv,
+                "PM_TEST",
+                "secret-1234",
+                Path::new("/"),
+                &inherited(),
+                &runner_cancel,
+                |_| Ok(()),
+            )
+        });
+
+        let grandchild = wait_for_pid_file(&pid_file);
+        let started = std::time::Instant::now();
+        cancel.store(true, Ordering::SeqCst);
+        let result = runner.join().expect("runner thread");
+        assert!(matches!(result, Err(RunError::Cancelled)));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancelling waited on a grandchild: {:?}",
+            started.elapsed()
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !process_is_gone(grandchild) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the grandchild holding the pipes survived the cancel"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

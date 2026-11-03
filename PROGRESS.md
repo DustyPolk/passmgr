@@ -1,3 +1,50 @@
+## 2026-11-02 — Kill the whole process group on cancel; answer `lock` after the wipe (TODO R.6)
+
+- `src/runner.rs`: the child now gets its own process group (`pre_exec` +
+  `libc::setpgid(0, 0)`). `terminate` signals the group with `SIGTERM`, waits
+  `TERM_GRACE` (100 ms) *without reaping* (the zombie leader pins the pgid),
+  then `SIGKILL`, then kills/waits the leader directly (covers a cancel racing
+  the spawn). The pipe readers take an `Arc<AtomicBool> stop` and `wait_readable`
+  polls it in `CANCEL_POLL` (100 ms) slices before each blocking `read`, so a
+  grandchild holding the pipes can no longer block `abort`/`join_all`. A small
+  `OutputPipe` trait (`Read + AsRawFd`, blanket impl) keeps the reader type a
+  single trait object; `dyn Read + AsRawFd + Send` is not a legal trait object.
+- `src/daemon.rs`: `run` owns the `Handover` instead of borrowing key+token, so
+  it can zeroize the key *before* answering `lock`. `Handled::Locked` now
+  carries the stream; the loop breaks, cancels and joins the workers, drops the
+  socket (unlink + instance lock), removes the session file, drops the
+  handover, and only then writes `Response::Locked`. `serve_run` returns early
+  if the cancel flag is set before decrypting and again before spawning, so no
+  child can start after the wipe began.
+- Tests: `src/runner.rs::cancellation_kills_a_grandchild_that_holds_the_pipes`
+  (unit; zombie-aware `/proc/<pid>/stat` check) and three integration tests in
+  the new `tests/daemon_shutdown.rs` mirroring the R.6 script
+  `sh -c 'sleep 30 & echo $! > pidfile'` for `lock`, `SIGTERM` and a 2 s idle
+  timeout. The `lock` test also asserts the socket and session file are already
+  gone when the client receives `Locked`; the others assert both are gone and
+  the grandchild is reaped. Verified all three fail at HEAD (stashed `src/`)
+  with "pmd did not exit in time".
+- `tests/daemon.rs` hit 1,109 lines, so its fixture/helpers moved to
+  `tests/support/mod.rs` (256 lines, `#![allow(dead_code)]` per-binary subsets)
+  and the six cancellation tests to `tests/daemon_shutdown.rs` (274); the main
+  file is back to 625. Also de-flaked `client::tests::serve_frames`: it now
+  stops on a failed frame write instead of panicking, since a client that stops
+  at a terminal frame closing early is the behavior under test (seen once under
+  parallel load).
+- Docs: DECISIONS.md (group kill, polled readers, ack ordering, `serve_run`
+  re-check), README.md (`run` cancellation paragraph), TODO R.6 note.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` green (173/34/28/22/8/13/8,
+  re-run 3× for the lib suite; the CLI suite takes ~143 s). `cargo audit` not
+  installed.
+- **Next iteration must know:** R.7 (idle timeout vs in-flight runs) will
+  change the semantics my new `idle_timeout_cancels_a_run_whose_grandchild_…`
+  test relies on — when fixing R.7, keep an idle-cancel test that uses
+  `--idle-timeout 2` with *no* in-flight run plus reconnect, and make the
+  grandchild test drive cancellation through `lock`/`SIGTERM` only. A child
+  that calls `setsid`/`setpgid` itself escapes the group kill (readers still
+  stop; the orphan keeps the injected env) — that is the caller's own command
+  and is already covered by the documented exfiltration limit.
+
 ## 2026-11-02 — Review of 3500f6d..533b68d
 
 - Findings: 5 — containment/shutdown 1 (R.6), run policy 1 (R.7), resource
