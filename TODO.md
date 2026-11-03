@@ -1212,6 +1212,81 @@ Rules that apply to every item:
       nothing, and `push(b"abcdef")` returns only the marker. A prefix-only
       holdback fails the first two.
 
+- [ ] **R.57 The grant-create race test can pass without the race happening, so
+      R.39's CLI half is untested.** `tests/grant_cli.rs:717`
+      (`grant_create_keeps_a_concurrent_vault_write_and_still_succeeds`) orders
+      its concurrent save with `std::thread::sleep(Duration::from_millis(300))`
+      (`tests/grant_cli.rs:777`) and never observes that the CLI is at the
+      lock; the comment above the sleep (`tests/grant_cli.rs:774-776`) admits
+      "If it is still earlier, it reads the new state and the race simply did
+      not happen".
+      Verified by experiment: with `src/cli/grant.rs:256` reverted to
+      `Vault::open_with_key` + `lock_for_update()` (the pre-R.39 read-then-lock
+      shape, i.e. exactly the bug the test is named for) the test passed 3/3 on
+      a scratch copy. The CLI's reads simply landed after the 300 ms save, so
+      `lock_for_update`'s byte compare saw no change. The daemon-side tests do
+      fail on that revert (`src/daemon/tests.rs:558` `Internal` vs `Ok(1)`,
+      `tests/daemon_concurrency.rs:293` `RunFrame::Error(Internal)`), so only
+      the CLI half is unproven.
+      Failure: a later refactor that reintroduces read-then-lock in
+      `command_grant_create` (or reverts R.39 for `grant create`) keeps the
+      suite green while a human's approval is spent and then refused with
+      `VaultChanged`; no test fails, and the token file is already gone.
+      Fix: order the save from the daemon side instead of by sleeping. Use the
+      stub-socket pattern already in this file
+      (`grant_create_refuses_an_unknown_reference_before_any_socket_contact`,
+      `tests/grant_cli.rs:217`, stub bound at `tests/grant_cli.rs:223`): accept,
+      read `challenge`, answer a challenge,
+      read `prove`, then run `grant_mut(seeded).mark_used(now)` +
+      `save_with_key` and `drop(writer)` in the test, and only then answer
+      `grant_approved`. The CLI's pre-approval read is provably before
+      `challenge`, and the save is provably before the CLI's post-approval
+      read, so read-then-lock fails deterministically.
+      Test: that rewritten test must fail on the reverted `src/cli/grant.rs` and
+      pass on HEAD, keeping the current assertions (exit ok, two grants, seeded
+      `uses() == 1`, token file written).
+- [ ] **R.58 R.39 is marked done with "retry loop gone", but the retry loop is
+      still there.** `TODO.md:881` says `record_use` changed with "(retry loop
+      gone)"; `src/daemon/run.rs:36` still declares
+      `const USE_RECORD_ATTEMPTS: usize = 3;` and `src/daemon/run.rs:193` still
+      runs `for _ in 0..USE_RECORD_ATTEMPTS`. The comment on the constant
+      (`src/daemon/run.rs:29-35`) still argues "only a retry that re-reads the
+      vault could help", which stopped being true once every attempt began
+      reading under the lock: three attempts now mean three identical failures,
+      not three chances.
+      Failure: a later change that makes the save fail *after* the rename has
+      landed (for example a fallible directory fsync or a post-write
+      verification added to `src/vault/lock.rs:100` `write_container`, where
+      `temp.persist(path)` is currently the last fallible step) makes one run
+      burn two uses: the retry re-reads the vault that already holds the
+      increment and increments again. A `max_uses` grant then denies earlier
+      than the human approved, and the audit chain shows two uses from one run.
+      Fix: either delete the loop (one attempt, `Internal` on failure, matching
+      the comment and R.39's claim) or keep it and correct `TODO.md:881`, the
+      comment and DECISIONS to say three attempts exist and why.
+      Test: a `#[cfg(test)]` attempt counter (or a seam over `save_with_key` in
+      `record_use`) proving exactly one save attempt when the save fails once;
+      keep `revocation_does_not_lose_to_a_concurrent_vault_write`.
+- [ ] **R.59 DECISIONS says no plaintext is held while the human reads the
+      summary, but the vault key is.** `DECISIONS.md:625-626`: "the vault is
+      dropped before the y/N so plaintext is not held while the human reads".
+      True of the decrypted credentials, false of the key that decrypts them:
+      `key` (`src/cli/grant.rs:179`) is live across `print_approval_prompt`
+      (`src/cli/grant.rs:202`) and `prompt_yes_no` (`src/cli/grant.rs:203`)
+      because `Proof::compute` (`src/cli/grant.rs:218`) and
+      `open_with_key_for_update` (`src/cli/grant.rs:256`) need it; only the
+      master password (`:180`) and the container (`:181`) are dropped.
+      Failure: a reader (or the next `SECURITY.md` edit) takes the sentence to
+      mean a memory disclosure while the prompt is on screen is harmless, when
+      a core dump at `:203` yields the 32-byte key that decrypts the whole
+      vault offline — the property `PROMPT.md`'s zeroize rule is about.
+      Fix: state what is actually held — "the decrypted vault is dropped before
+      the y/N; the derived key stays live until the grant is written and is
+      zeroized on drop".
+      Test: a `tests/docs.rs`-style assertion (that file already pins DECISIONS
+      sentences) that the grant-create bullet names the held key and does not
+      claim the window holds no plaintext-capable material.
+
 ## Phase 3 — grants and audit log
 
 The design for grants, approval and audit lives in `MCP.md` ("Grants and the

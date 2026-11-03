@@ -1,3 +1,66 @@
+## 2026-11-03 — Review of a14dc54..f4c7796
+
+- Findings by category: tests that don't prove what they claim 1 (R.57), drift
+  2 (R.58, R.59), secret exposure 0, authorization 0, unsafe input 0, crypto
+  misuse 0, maintainability 0. Nothing here is a broken build: at HEAD
+  `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and the full
+  `cargo test` are green.
+- R.57 was decided by experiment, not by reading. On a scratch copy of the
+  tree with `src/cli/grant.rs:256` reverted to `Vault::open_with_key` +
+  `lock_for_update()` (the pre-R.39 shape the test exists to catch),
+  `cargo test --test grant_cli keeps_a_concurrent_vault_write` passed 3/3: the
+  300 ms sleep puts the concurrent save *before* the CLI's read, so the
+  compare-and-lock never sees a change. The two daemon-side R.39 tests do fail
+  on the same revert (`src/daemon/tests.rs:558`, `tests/daemon_concurrency.rs:293`),
+  which is why only the CLI half is filed.
+- Looked at and judged fine — do not redo:
+  - `src/redact.rs` R.36a: `marker_is_safe` rejects all four leak shapes
+    (marker containing the secret, secret containing the marker, marker
+    starting with a proper suffix of the secret, secret starting with a proper
+    suffix of the marker); the absent-byte marker is safe because the secret
+    holds none of its bytes, and the all-256-bytes fallback
+    `vec![byte; secret.len() + 1]` with `byte != secret[0] && byte != secret[last]`
+    is safe by construction. The test re-derives four real old leaks over the
+    whole buffer and byte-at-a-time.
+  - `src/runner.rs` R.37/R.38: `Stop`/`client_gone` short-circuits before the
+    spawn; `leader_exited` (`waitid(P_PID, .., WEXITED|WNOHANG|WNOWAIT)`) plus
+    "SIGKILL the group while the zombie still pins the pgid, then reap" is
+    ordered correctly; `terminate`/`signal_group`/`abort` do not touch the
+    secret; the `setsid` escape is documented in SECURITY.md and pinned by
+    `tests/docs.rs`.
+  - `src/daemon.rs` `revoke_grants` and `src/daemon/run.rs` `record_use` now
+    lock before they read; both are covered by tests that genuinely fail when
+    reverted (checked).
+  - `src/crypto.rs` `encrypt_with_template`: re-decodes and authenticates the
+    template before reusing its salt/params, keeps a fresh nonce; properties
+    pinned by `src/vault/tests.rs` and `src/crypto.rs` tests (header bytes
+    8..20 and salt 20..36 kept, nonce 36..48 fresh, daemon key still opens the
+    rewrite, wrong password writes nothing).
+  - `src/cli/grant.rs` `command_grant_create` (R.41): no TTY bypass, no
+    client-side-only check, nothing written before the y/N, `--out` refused
+    before the password via `check_available` with `O_EXCL`/`O_NOFOLLOW`/0600
+    as the authority, unknown `--ref` refused before any socket contact, names
+    escaped with `escape_hidden`, no credential value read.
+  - Escaping classes: `validate_tag` (`src/store.rs:405-430`) allows only
+    `[a-z0-9._-]` after a lowercase/digit first byte, so the unescaped tags in
+    `describe_scope` (`src/cli/grant.rs:463-478`) are safe; `validate_field_name`
+    (`src/grant/validate.rs:270-284`) allows only `[a-z0-9_-]{1,32}`, so
+    `write_scope`'s unescaped `fields:` line (`src/cli/grant_summary.rs:129-132`)
+    is safe too. `validate_service`/`validate_username` still only refuse
+    `char::is_control` — that is already R.48.
+  - Known and accepted: `escape_hidden` keeps literal backslashes, so a legacy
+    stored name containing the text `\u{202e}` renders like a real RLO;
+    validation rejects the real class for new values, and R.48 owns the legacy
+    display. Left alone deliberately.
+  - Layout/refactors: `src/runner/tests.rs` holds all 14 tests removed from
+    `src/runner.rs` plus 4 new, `src/cli/grant/tests.rs` all 12 removed plus
+    new ones — comparing assertion sets found no test lost in either split;
+    `PROGRESS-archive.md` received exactly the oldest 292 lines of
+    PROGRESS.md verbatim. No file in the range grew past the 1,000-line guard
+    (`src/cli/grant.rs` 976, `src/runner.rs` 919, `src/daemon.rs` under it).
+- New TODO items are R.57-R.59, appended at the end of the Phase R section;
+  highest previous number was R.56.
+
 ## 2026-11-03 — Name the credential behind each grant ref (TODO R.41)
 
 - `src/cli/grant.rs`: `preview_scope` resolves every ref and tag against the
