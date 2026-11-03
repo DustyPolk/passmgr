@@ -192,7 +192,7 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       exactly the requested fields; `Debug` redacts the token hash. Done:
       `src/grant/request.rs`; 7 unit tests plus a public-API test in
       `tests/grant.rs`; `GrantRequest` is re-exported from `passmgr::grant`.
-- [ ] **3.4b Re-encrypt with the unlocked key (no re-salt).**
+- [x] **3.4b Re-encrypt with the unlocked key (no re-salt).**
       `Vault::save(master_password)` takes a fresh salt, which would make the
       running daemon's derived key stale after any grant write. Add
       `crypto::encrypt_with_key(plaintext, key, template_container)`: it first
@@ -205,6 +205,13 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       a wrong key returns `AuthenticationFailed` and writes nothing;
       `save_with_key` refuses a read-only vault; a grant survives a reopen;
       the daemon's key still decrypts the saved container.
+      Done: `crypto::encrypt_with_key` authenticates the template with the key
+      before reusing its header, then seals with a fresh nonce and the same
+      salt/params (container assembly is a shared private `seal`, so `encrypt`
+      and `encrypt_with_key` cannot drift). `Vault::save_with_key` refuses a
+      read-only vault and, with `Error::Crypto`, a vault that has no source
+      container to copy the header from. Docs updated in `FORMAT.md` and
+      `README.md`.
 - [ ] **3.4c `grant_create` request and daemon handler (TODO R.15b).**
       Protocol request `{type:"grant_create", request:{label, refs, tags,
       fields?, commands, capabilities, expires_at, max_uses?, token_hash}}

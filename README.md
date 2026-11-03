@@ -11,7 +11,8 @@ encrypted vault file; there is no server, account, or network access.
 ## Features
 
 - Authenticated encryption with AES-256-GCM.
-- Argon2id key derivation with a random salt for every save.
+- Argon2id key derivation with a random salt for every save made with the
+  master password.
 - Atomic vault replacement, owner-only file permissions, and warnings for
   insecure permissions.
 - Password generation with rejection sampling for unbiased output.
@@ -319,8 +320,11 @@ passmgr --version
   and 1 lane by default. The parameters are stored in the vault header so they
   can be raised later without breaking existing vaults. Bounds on accepted
   parameters prevent a malicious header from requesting unbounded memory.
-- **Encryption:** AES-256-GCM with a fresh 12-byte nonce and 16-byte salt on
-  every save. The complete 56-byte header is authenticated as associated data.
+- **Encryption:** AES-256-GCM with a fresh 12-byte nonce on every save. A save
+  made with the master password also takes a fresh 16-byte salt; a grant write
+  made with the already-derived vault key keeps the salt and KDF parameters so
+  the running daemon's key stays valid, and still uses a fresh nonce. The
+  complete 56-byte header is authenticated as associated data.
 - **Atomic saves:** the new container is written to a temporary file in the
   vault's directory, fsynced, and renamed over the old file. The temporary file
   is created with mode `0600`.

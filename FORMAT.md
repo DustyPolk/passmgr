@@ -46,7 +46,7 @@ changes that are rejected earlier as malformed or unsupported.
 | `m_cost` | 8192 through 1,048,576 KiB |
 | `t_cost` | 1 through 16 |
 | `p_cost` | 1 through 8, and `m_cost >= 8 * p_cost` |
-| Salt | 16 random bytes |
+| Salt | 16 random bytes; reused only by a key-preserving re-encryption |
 | Nonce | 12 random bytes, fresh for every save |
 
 The defaults written by this implementation are:
@@ -212,7 +212,12 @@ version and returns `LegacyVault`; it never writes to a legacy file.
 - AES-GCM authentication failure is reported as a wrong master password or a
   corrupted vault; the two cases are indistinguishable by design.
 - Saves use a fresh salt and nonce, so identical credentials produce different
-  ciphertext each time.
+  ciphertext each time. The one exception is deliberate: a writer that holds
+  the vault key but not the master password (the CLI writing a grant while
+  `pmd` is unlocked) re-encrypts with `crypto::encrypt_with_key`, which first
+  authenticates the current container and then reuses its salt and KDF
+  parameters with a fresh nonce. Re-salting would invalidate the daemon's key;
+  the nonce still changes, so the ciphertext does too.
 - The format does not compress, deduplicate, or encrypt field lengths. Length
   metadata is visible only after decryption; the outer container leaks only its
   total size and the KDF parameters needed to unlock it.

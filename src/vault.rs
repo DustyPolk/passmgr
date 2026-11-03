@@ -194,6 +194,36 @@ impl Vault {
         write_container(&self.path, &container)
     }
 
+    /// Encrypt and atomically replace the vault file with an already-derived
+    /// key, keeping the container's salt and KDF parameters.
+    ///
+    /// This is for a writer that holds the vault key but not the master
+    /// password — the CLI writing a grant while `pmd` is unlocked. A fresh
+    /// salt (as [`Vault::save`] takes) would invalidate the daemon's key on
+    /// its next request, so the source container's header is reused and only
+    /// the nonce and ciphertext change. The key must open the container this
+    /// vault was read from; [`crypto::encrypt_with_key`] authenticates it
+    /// before writing, so a wrong key changes nothing.
+    ///
+    /// Like [`Vault::save`], this requires the write lock. A vault with no
+    /// source container (a brand-new file) has no salt or KDF parameters to
+    /// reuse and is refused.
+    pub fn save_with_key(&self, key: &[u8]) -> Result<()> {
+        if self.write_lock.is_none() {
+            return Err(Error::ReadOnlyVault(self.path.clone()));
+        }
+        let template = self.source.as_deref().ok_or_else(|| {
+            Error::Crypto(
+                "cannot save with a key: this vault has no container to take its KDF \
+                 parameters from"
+                    .into(),
+            )
+        })?;
+        let plaintext = store::encode(&self.credentials, &self.grants)?;
+        let container = crypto::encrypt_with_key(&plaintext, key, template)?;
+        write_container(&self.path, &container)
+    }
+
     pub fn add(&mut self, credential: Credential) -> Result<()> {
         if self.get(credential.service()).is_some() {
             return Err(Error::DuplicateService(credential.service().to_owned()));
@@ -528,6 +558,102 @@ mod tests {
             Vault::open_with_key(&path, &[0u8; crypto::KEY_LEN]),
             Err(Error::AuthenticationFailed)
         ));
+    }
+
+    #[test]
+    fn saving_with_the_key_keeps_the_key_and_the_password_working() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "test master password";
+
+        let credential = credential("example.com", "user", "secret");
+        let entry = credential.id();
+        {
+            let mut vault = Vault::open_for_add(&path, master).unwrap();
+            vault.add(credential).unwrap();
+            vault.save(master).unwrap();
+        }
+
+        let before = fs::read(&path).unwrap();
+        let key = crypto::unlock_key(&before, master).unwrap();
+
+        // A writer that holds the key (never the password) rewrites the vault.
+        let mut vault = Vault::open_with_key(&path, key.as_slice()).unwrap();
+        vault.lock_for_update().unwrap();
+        let grant = test_grant(entry, "deploy", 1_700_000_000);
+        let grant_id = grant.id();
+        vault.add_grant(grant).unwrap();
+        vault.save_with_key(key.as_slice()).unwrap();
+        drop(vault);
+
+        let after = fs::read(&path).unwrap();
+        assert_eq!(&after[8..20], &before[8..20], "KDF params are reused");
+        assert_eq!(&after[20..36], &before[20..36], "the salt is reused");
+        assert_ne!(&after[36..48], &before[36..48], "a fresh nonce is used");
+
+        // The daemon's key still opens the rewritten vault.
+        let daemon_view = Vault::open_with_key(&path, key.as_slice()).unwrap();
+        assert_eq!(daemon_view.get("example.com").unwrap().password(), "secret");
+        assert!(daemon_view.grant(grant_id).is_some());
+
+        // And so does the master password.
+        let human_view = Vault::open(&path, master).unwrap();
+        assert_eq!(human_view.get("example.com").unwrap().password(), "secret");
+        assert!(human_view.grant(grant_id).is_some());
+    }
+
+    #[test]
+    fn saving_with_the_key_refuses_a_read_only_or_containerless_vault() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "master";
+        {
+            let mut vault = Vault::open_for_add(&path, master).unwrap();
+            vault.add(credential("one", "u", "p")).unwrap();
+            vault.save(master).unwrap();
+        }
+        let container = fs::read(&path).unwrap();
+        let key = crypto::unlock_key(&container, master).unwrap();
+
+        let read_only = Vault::open(&path, master).unwrap();
+        assert!(matches!(
+            read_only.save_with_key(key.as_slice()),
+            Err(Error::ReadOnlyVault(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), container, "nothing was written");
+
+        // A brand-new file has no header to reuse, even with the write lock.
+        let fresh_path = directory.path().join("fresh.dat");
+        let fresh = Vault::open_for_add(&fresh_path, master).unwrap();
+        assert!(matches!(
+            fresh.save_with_key(key.as_slice()),
+            Err(Error::Crypto(_))
+        ));
+        assert!(!fresh_path.exists(), "nothing was written");
+    }
+
+    #[test]
+    fn saving_with_the_wrong_key_writes_nothing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "master";
+        {
+            let mut vault = Vault::open_for_add(&path, master).unwrap();
+            vault.add(credential("one", "u", "p")).unwrap();
+            vault.save(master).unwrap();
+        }
+
+        let before = fs::read(&path).unwrap();
+        let mut vault = Vault::open_for_update(&path, master).unwrap();
+        vault.add(credential("two", "u", "p")).unwrap();
+        assert!(matches!(
+            vault.save_with_key(&[0u8; crypto::KEY_LEN]),
+            Err(Error::AuthenticationFailed)
+        ));
+        drop(vault);
+
+        assert_eq!(fs::read(&path).unwrap(), before, "nothing was written");
+        assert!(Vault::open(&path, master).unwrap().get("two").is_none());
     }
 
     #[test]

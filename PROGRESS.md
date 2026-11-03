@@ -1,3 +1,35 @@
+## 2026-11-03 — Re-encrypt with the unlocked key (TODO 3.4b)
+
+- `src/crypto.rs`: new `encrypt_with_key(plaintext, key, template)`. It checks
+  the key length and plaintext cap, decodes the template header, **authenticates
+  the template with `key` before reusing its header** (the decrypted plaintext
+  is dropped at once), then seals with a fresh random nonce and the template's
+  salt, KDF params and format fields. Container assembly moved into a private
+  `seal`, which `encrypt` now shares, so the two writers cannot drift.
+- `src/vault.rs`: new `Vault::save_with_key(&self, key)`. It refuses a
+  read-only vault (`ReadOnlyVault`) and, with `Error::Crypto`, a vault with no
+  source container (`open_for_add` on a new file) because there is no header to
+  reuse. Same lock requirement and atomic `write_container` as `save`.
+- Why: `save(password)` takes a fresh salt, which would make a running `pmd`'s
+  key stale after the first grant write. Keeping the salt is safe because the
+  nonce is fresh; the decision text is in `DECISIONS.md`.
+- Docs: `FORMAT.md` salt row and security bullet, `README.md` features and
+  encryption bullets now say the salt is reused only by a key-preserving
+  re-encryption.
+- Tests: crypto — salt/params kept, nonce fresh, both password and key decrypt
+  the result, wrong key -> `AuthenticationFailed`, non-container ->
+  `NotAVault`, key length enforced. Vault —
+  `saving_with_the_key_keeps_the_key_and_the_password_working` (also proves a
+  grant survives and both openers see it), the read-only/containerless refusal
+  writes nothing, and a wrong key leaves the file byte-identical.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` green (lib 221). `cargo
+  audit` not installed; skipped.
+- **Next iteration must know:** 3.4c is next (`grant_create` daemon request
+  that spends the digest approval). `save_with_key` needs a locked vault whose
+  `source` is the on-disk container, so 3.4d must do `open_with_key` ->
+  `lock_for_update` -> `save_with_key` in that order. A containerless vault can
+  never use `save_with_key`; `pm init`/`add` still use `save(password)`.
+
 ## 2026-11-03 — Canonical grant-create request and digest (TODO 3.4a)
 
 - `TODO.md`: split 3.4 into 3.4a–3.4d (canonical request, key-preserving

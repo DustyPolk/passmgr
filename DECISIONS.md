@@ -477,6 +477,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   saving, so a concurrent human write becomes `VaultChanged`, not a lost
   update. Interpreters are refused at approval time (`--allow-interpreter`),
   not by the digest: the CLI enforces it before proving the request.
+  Implemented in TODO 3.4b as `crypto::encrypt_with_key` plus
+  `Vault::save_with_key`; the latter also refuses, with `Error::Crypto`, a
+  vault that has no source container (a brand-new file has no salt or KDF
+  parameters to reuse).
 - The daemon canonicalizes `command[0]` itself (symlinks resolved), requires
   the result to stay absolute, and checks that canonical path against the
   grant's command allowlist immediately before spawning; a path it cannot

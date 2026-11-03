@@ -220,47 +220,39 @@ fn derive_key(
     Ok(())
 }
 
-/// Encrypt `plaintext` into a complete vault container.
-pub fn encrypt(plaintext: &[u8], master_password: &str, params: KdfParams) -> Result<Vec<u8>> {
-    params.validate()?;
+fn check_plaintext_len(plaintext: &[u8]) -> Result<()> {
     if plaintext.len() > MAX_PLAINTEXT_BYTES {
         return Err(Error::InvalidInput(format!(
             "vault contents are too large ({} bytes; maximum is {MAX_PLAINTEXT_BYTES})",
             plaintext.len()
         )));
     }
+    Ok(())
+}
 
-    let mut salt = [0u8; SALT_LEN];
-    fill(&mut salt)
-        .map_err(|err| Error::Crypto(format!("secure random generator failed: {err}")))?;
+fn random_nonce() -> Result<[u8; NONCE_LEN]> {
     let mut nonce = [0u8; NONCE_LEN];
     fill(&mut nonce)
         .map_err(|err| Error::Crypto(format!("secure random generator failed: {err}")))?;
+    Ok(nonce)
+}
 
-    let mut key = Zeroizing::new([0u8; KEY_LEN]);
-    derive_key(master_password, &salt, params, &mut key)?;
-    let cipher = Aes256Gcm::new_from_slice(key.as_slice())
+/// Encrypt `plaintext` under an already-built header and assemble the
+/// complete container. The header is the AEAD associated data.
+fn seal(plaintext: &[u8], key: &[u8], header: &Header) -> Result<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| Error::Crypto("failed to initialize AES-256-GCM".into()))?;
-    drop(key);
-
-    let ciphertext_len = (plaintext.len() + TAG_LEN) as u64;
-    let header = Header {
-        params,
-        salt,
-        nonce,
-        ciphertext_len,
-    };
     let header_bytes = header.encode();
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce),
+            Nonce::from_slice(&header.nonce),
             Payload {
                 msg: plaintext,
                 aad: &header_bytes,
             },
         )
         .map_err(|_| Error::Crypto("encryption failed".into()))?;
-    if ciphertext.len() as u64 != ciphertext_len {
+    if ciphertext.len() as u64 != header.ciphertext_len {
         return Err(Error::Crypto(
             "encryption produced an unexpected ciphertext length".into(),
         ));
@@ -270,6 +262,64 @@ pub fn encrypt(plaintext: &[u8], master_password: &str, params: KdfParams) -> Re
     container.extend_from_slice(&header_bytes);
     container.extend_from_slice(&ciphertext);
     Ok(container)
+}
+
+/// Encrypt `plaintext` into a complete vault container.
+pub fn encrypt(plaintext: &[u8], master_password: &str, params: KdfParams) -> Result<Vec<u8>> {
+    params.validate()?;
+    check_plaintext_len(plaintext)?;
+
+    let mut salt = [0u8; SALT_LEN];
+    fill(&mut salt)
+        .map_err(|err| Error::Crypto(format!("secure random generator failed: {err}")))?;
+    let nonce = random_nonce()?;
+
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    derive_key(master_password, &salt, params, &mut key)?;
+    let header = Header {
+        params,
+        salt,
+        nonce,
+        ciphertext_len: (plaintext.len() + TAG_LEN) as u64,
+    };
+    let container = seal(plaintext, key.as_slice(), &header);
+    drop(key);
+    container
+}
+
+/// Re-encrypt `plaintext` with an already-derived `key`, keeping the KDF
+/// parameters and salt of `template`.
+///
+/// This is for a writer that holds the vault key but not the master password:
+/// taking a fresh salt (as [`encrypt`] does) would make every other holder of
+/// the old key — notably a running `pmd` — unable to open the next save. The
+/// template is authenticated with `key` **before** its header is reused, so a
+/// wrong key can never replace a readable vault with an unopenable one. Only
+/// the nonce and ciphertext change; the file still opens with the master
+/// password and with the same key.
+///
+/// The caller must already hold the write lock and must have verified that
+/// `template` is the container currently on disk (see
+/// [`crate::Vault::lock_for_update`]).
+pub fn encrypt_with_key(plaintext: &[u8], key: &[u8], template: &[u8]) -> Result<Vec<u8>> {
+    if key.len() != KEY_LEN {
+        return Err(Error::Crypto(format!(
+            "vault key must be exactly {KEY_LEN} bytes"
+        )));
+    }
+    check_plaintext_len(plaintext)?;
+    let template_header = Header::decode(template)?;
+    // Authenticate the template first: reusing the header of a container this
+    // key does not open would produce a vault nobody can read.
+    drop(decrypt_with_key(template, key)?);
+
+    let header = Header {
+        params: template_header.params,
+        salt: template_header.salt,
+        nonce: random_nonce()?,
+        ciphertext_len: (plaintext.len() + TAG_LEN) as u64,
+    };
+    seal(plaintext, key, &header)
 }
 
 /// Decrypt a complete vault container. The returned plaintext is wiped when
@@ -405,6 +455,50 @@ mod tests {
         assert!(matches!(
             decrypt_with_key(&container, &wrong).unwrap_err(),
             Error::AuthenticationFailed
+        ));
+    }
+
+    #[test]
+    fn reencrypting_with_the_key_keeps_salt_and_params_but_not_the_nonce() {
+        let original = encrypt(b"first", "password", fast_params()).unwrap();
+        let key = unlock_key(&original, "password").unwrap();
+
+        let rewritten = encrypt_with_key(b"second", key.as_slice(), &original).unwrap();
+
+        assert_eq!(&rewritten[0..8], &original[0..8], "format fields are kept");
+        assert_eq!(&rewritten[8..20], &original[8..20], "KDF params are kept");
+        assert_eq!(&rewritten[20..36], &original[20..36], "the salt is kept");
+        assert_ne!(&rewritten[36..48], &original[36..48], "the nonce is fresh");
+
+        // Both the password and the same key open the rewritten container.
+        assert_eq!(&*decrypt(&rewritten, "password").unwrap(), b"second");
+        assert_eq!(
+            &*decrypt_with_key(&rewritten, key.as_slice()).unwrap(),
+            b"second"
+        );
+        // The original container is untouched.
+        assert_eq!(&*decrypt(&original, "password").unwrap(), b"first");
+    }
+
+    #[test]
+    fn encrypt_with_key_authenticates_the_template_first() {
+        let original = encrypt(b"first", "password", fast_params()).unwrap();
+        let other = encrypt(b"other", "password", fast_params()).unwrap();
+        let wrong_key = unlock_key(&other, "password").unwrap();
+        assert!(matches!(
+            encrypt_with_key(b"second", wrong_key.as_slice(), &original).unwrap_err(),
+            Error::AuthenticationFailed
+        ));
+
+        // A template that is not a container is refused before encryption.
+        assert!(matches!(
+            encrypt_with_key(b"second", &[0u8; KEY_LEN], b"not a vault").unwrap_err(),
+            Error::NotAVault
+        ));
+        // The key length is enforced, as in decrypt_with_key.
+        assert!(matches!(
+            encrypt_with_key(b"second", &[0u8; KEY_LEN - 1], &original).unwrap_err(),
+            Error::Crypto(_)
         ));
     }
 
