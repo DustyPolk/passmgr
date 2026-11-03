@@ -13,11 +13,11 @@
 use serde_json::{Map, Value, json};
 
 use super::{
-    AuthenticatedRequest, GrantCreateRequest, LENGTH_PREFIX_BYTES, MAX_BUFFERED_BYTES,
-    MAX_MESSAGE_BYTES, MAX_TYPE_CHARS, PROTOCOL_VERSION, ProtocolError, ProveRequest, Request,
-    RunRequest, validate_request,
+    AuthenticatedRequest, GrantCreateRequest, GrantRevokeRequest, LENGTH_PREFIX_BYTES,
+    MAX_BUFFERED_BYTES, MAX_MESSAGE_BYTES, MAX_TYPE_CHARS, PROTOCOL_VERSION, ProtocolError,
+    ProveRequest, Request, RunRequest, validate_request,
 };
-use crate::grant::{Capabilities, TOKEN_HASH_BYTES, TokenHash};
+use crate::grant::{Capabilities, GRANT_ID_BYTES, GrantId, TOKEN_HASH_BYTES, TokenHash};
 use crate::presence::{ChallengeNonce, Proof, RequestDigest};
 use crate::store::EntryId;
 use crate::token::SessionToken;
@@ -207,6 +207,14 @@ fn encode_body(token: &SessionToken, request: &Request) -> Result<Vec<u8>, Proto
             "max_uses": create.max_uses,
             "token_hash": create.token_hash.to_hex(),
         }),
+        Request::GrantRevoke(GrantRevokeRequest::Id(id)) => json!({
+            "type": "grant_revoke",
+            "id": id.to_hex(),
+        }),
+        Request::GrantRevoke(GrantRevokeRequest::All) => json!({
+            "type": "grant_revoke",
+            "all": true,
+        }),
     };
     let token = token.to_hex();
     let envelope = json!({
@@ -273,6 +281,7 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
                 .ok_or_else(|| invalid_presence_field("proof"))?,
         }),
         "grant_create" => Request::GrantCreate(decode_grant_create(request)?),
+        "grant_revoke" => Request::GrantRevoke(decode_grant_revoke(request)?),
         other => {
             return Err(ProtocolError::UnknownRequest(
                 other.chars().take(MAX_TYPE_CHARS).collect(),
@@ -281,6 +290,49 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
     };
     validate_request(&decoded)?;
     Ok(AuthenticatedRequest::new(token, decoded))
+}
+
+/// Decode a `grant_revoke` body. Exactly one of `id` (a grant id in hex) or
+/// `all: true` must be present; anything else is a malformed request, never a
+/// guess at intent.
+fn decode_grant_revoke(request: &Map<String, Value>) -> Result<GrantRevokeRequest, ProtocolError> {
+    let id = match request.get("id") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(required_string(request, "id")?),
+    };
+    let all = match request.get("all") {
+        None | Some(Value::Null) => false,
+        Some(value) => match value.as_bool() {
+            Some(true) => true,
+            Some(false) => {
+                return Err(ProtocolError::InvalidRequest(
+                    "grant_revoke.all must be true when present".into(),
+                ));
+            }
+            None => {
+                return Err(ProtocolError::MalformedJson(
+                    "'grant_revoke.all' must be a boolean".into(),
+                ));
+            }
+        },
+    };
+    match (id, all) {
+        (Some(id), false) => GrantId::from_hex(&id)
+            .map(GrantRevokeRequest::Id)
+            .map_err(|_| {
+                ProtocolError::InvalidRequest(format!(
+                    "grant_revoke.id must be {} hex characters",
+                    GRANT_ID_BYTES * 2
+                ))
+            }),
+        (None, true) => Ok(GrantRevokeRequest::All),
+        (Some(_), true) => Err(ProtocolError::InvalidRequest(
+            "grant_revoke must name one id or 'all', not both".into(),
+        )),
+        (None, false) => Err(ProtocolError::InvalidRequest(
+            "grant_revoke must name an id or 'all'".into(),
+        )),
+    }
 }
 
 fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, ProtocolError> {

@@ -1,3 +1,31 @@
+## 2026-11-03 — Add `pm grant list|show|revoke` (TODO 3.5)
+
+- `pm grant list [--json]` / `grant show <id> [--json]`: local vault reads
+  (master password, `--db` allowed) printing metadata only — id, label, scope,
+  commands, capabilities, timestamps, uses, `status` = active|expired|
+  exhausted|revoked. JSON is `{"grants":[...]}` or one grant object; no
+  `token`, `token_hash` or secret key ever appears.
+- `pm grant revoke <id>|--all [--json]`: daemon round-trip over the session
+  token, no password, no TTY, allowed under `--agent`. New `grant_revoke`
+  request (`id` xor `all: true`) and `grant_revoked {revoked:N}` response; the
+  daemon's `revoke_grants` is its only vault write and reuses the hot key via
+  `save_with_key`. Already-revoked id is a successful no-op, unknown id exit 3,
+  `--all` counts only active grants. Refuses `--db`/`PASSMGR_DB` like `run`.
+- `src/cli/args.rs` grew past 1,000 lines, so it became `src/cli/args/mod.rs`
+  with the `grant` parsing in `src/cli/args/grant.rs` (mechanical move).
+- Decided: revocation needs no proof (it only removes access) and is safe for
+  agents to perform; see DECISIONS.md.
+- Tests: protocol round-trip + strict rejections for `grant_revoke`/
+  `grant_revoked`; args parsing (one target only, `--db` refusal); metadata
+  has no token/hash; e2e list/show/revoke, agent revoke, `--all`, unknown id,
+  no daemon, TTY-less revoke with a canary that must not leak.
+- Gate green: fmt, clippy `-D warnings`, full `cargo test` (237 lib, 48 bin,
+  145 integration, 2 doctests). `cargo audit` skipped as allowed.
+- **Next iteration must know:** `run` does not yet consult grants (3.6), so
+  "takes effect on the next request" is proven only by the persisted
+  `revoked_at` and by `grant list`/`show`. PTY runs echo the typed password
+  into stdout, so parse JSON from `run_with_env` piped runs instead.
+
 ## 2026-11-03 — Add `pm grant create` CLI (TODO 3.4d, closes R.22b)
 
 - `src/cli/grant.rs` + `Command::Grant(GrantCommand::Create(..))`: resolve

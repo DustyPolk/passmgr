@@ -115,7 +115,14 @@ fn exchange_frame(
 ) -> Response {
     let (server, mut client) = UnixStream::pair().expect("socket pair");
     client.write_all(frame).expect("send request");
-    let handled = handle_connection(server, token, key, challenges, approvals);
+    let handled = handle_connection(
+        server,
+        token,
+        key,
+        Path::new("/nonexistent/passmgr-test-vault"),
+        challenges,
+        approvals,
+    );
     assert!(
         !matches!(handled, Handled::Locked(_) | Handled::Run(..)),
         "a one-shot request must not hand off the socket"

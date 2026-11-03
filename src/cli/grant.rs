@@ -1,11 +1,19 @@
-//! `grant create`: the human-authorized path from a fresh token to a stored
-//! grant.
+//! `grant`: create, inspect and revoke agent grants.
 //!
-//! The command is deliberately a *client* of `pmd`: it derives the vault key
+//! `create` is deliberately a *client* of `pmd`: it derives the vault key
 //! once, proves that key's presence for the exact request, lets the daemon
 //! accept the grant, and only then writes it to the vault with the same key.
 //! The daemon never sees the vault or the raw token, and the raw token is
 //! written once to a new 0600 file rather than to stdout.
+//!
+//! `list` and `show` read the vault locally after the master password, like
+//! the other read commands, and print metadata only: ids, labels, scope,
+//! allowlisted commands, use counts and timestamps. A grant's token hash and
+//! its raw token have no accessor on this path, so neither can be printed by
+//! accident. `revoke` is the opposite: it needs no password and no terminal,
+//! because taking access away is always allowed, and it asks the daemon (the
+//! only process that can write without a prompt) to set `revoked_at` and
+//! re-encrypt the vault with the key it already holds.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -16,15 +24,21 @@ use passmgr::Error;
 use passmgr::agent;
 use passmgr::crypto;
 use passmgr::grant::{
-    Capabilities, GrantRequest, GrantSpec, GrantToken, MAX_GRANT_LIFETIME_SECS, Scope,
+    Capabilities, Grant, GrantRequest, GrantSpec, GrantToken, MAX_GRANT_LIFETIME_SECS, Scope,
     is_interpreter,
 };
-use passmgr::protocol::{GrantCreateRequest, ProveRequest, Request, Response};
+use passmgr::protocol::{
+    GrantCreateRequest, GrantRevokeRequest, ProveRequest, Request, Response, ResponseError,
+};
+use passmgr::timestamp;
 use passmgr::token::SessionToken;
 use passmgr::{client, session, socket, vault};
 
-use super::args::{GrantCommand, GrantCreateOptions};
-use super::commands::{prompt_master, warn_insecure};
+use super::args::{
+    GrantCommand, GrantCreateOptions, GrantListOptions, GrantRevokeOptions, GrantShowOptions,
+};
+use super::commands::{prompt_master, unlock, warn_insecure, write_json};
+use super::stdout_write;
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -76,6 +90,9 @@ pub(crate) fn command_grant(
 ) -> Result<(), Error> {
     match command {
         GrantCommand::Create(options) => command_grant_create(options, agent_mode, path),
+        GrantCommand::List(options) => command_grant_list(options, path),
+        GrantCommand::Show(options) => command_grant_show(options, path),
+        GrantCommand::Revoke(options) => command_grant_revoke(options, agent_mode, path),
     }
 }
 
@@ -87,6 +104,17 @@ pub(crate) fn command_grant_create(
 ) -> Result<(), Error> {
     Err(Error::Daemon(
         "grant create requires the unlock daemon, which is supported on Unix systems only".into(),
+    ))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn command_grant_revoke(
+    _options: GrantRevokeOptions,
+    _agent_mode: bool,
+    _path: &Path,
+) -> Result<(), Error> {
+    Err(Error::Daemon(
+        "grant revoke requires the unlock daemon, which is supported on Unix systems only".into(),
     ))
 }
 
@@ -200,6 +228,261 @@ pub(crate) fn command_grant_create(
         options.out.display()
     );
     Ok(())
+}
+
+/// `passmgr grant list [--json]`: metadata for every stored grant.
+pub(crate) fn command_grant_list(
+    options: GrantListOptions,
+    vault_path: &Path,
+) -> Result<(), Error> {
+    let (vault, _master) = unlock(vault_path)?;
+    let now = unix_now()?;
+    let grants: Vec<&Grant> = vault.grants().iter().collect();
+
+    if options.json {
+        let grants: Vec<_> = grants
+            .iter()
+            .map(|grant| grant_metadata(grant, now))
+            .collect();
+        return write_json(&serde_json::json!({ "grants": grants }));
+    }
+    if grants.is_empty() {
+        eprintln!("No grants stored.");
+        return Ok(());
+    }
+
+    use std::fmt::Write as _;
+
+    let mut output = String::from("Stored Grants:\n");
+    for grant in grants {
+        writeln!(
+            output,
+            "- {} ({}) [{}]",
+            grant.id(),
+            grant.label(),
+            grant_status(grant, now)
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(
+            output,
+            "  scope: {}; commands: {}; {}",
+            describe_scope(grant.scope()),
+            grant.commands().len(),
+            describe_uses(grant)
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(output, "  {}", describe_expiry(grant, now))
+            .expect("writing to a String cannot fail");
+    }
+    stdout_write(format_args!("{output}"))
+}
+
+/// `passmgr grant show <id> [--json]`: metadata for one grant.
+pub(crate) fn command_grant_show(
+    options: GrantShowOptions,
+    vault_path: &Path,
+) -> Result<(), Error> {
+    let (vault, _master) = unlock(vault_path)?;
+    let now = unix_now()?;
+    let grant = vault
+        .grant(options.id)
+        .ok_or(Error::GrantNotFound(options.id))?;
+
+    if options.json {
+        return write_json(&grant_metadata(grant, now));
+    }
+
+    use std::fmt::Write as _;
+
+    let mut output = format!("Grant {} ({})\n", grant.id(), grant.label());
+    writeln!(output, "  status: {}", grant_status(grant, now))
+        .expect("writing to a String cannot fail");
+    writeln!(output, "  scope: {}", describe_scope(grant.scope()))
+        .expect("writing to a String cannot fail");
+    writeln!(
+        output,
+        "  commands: {}",
+        grant
+            .commands()
+            .iter()
+            .map(|command| command.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .expect("writing to a String cannot fail");
+    writeln!(
+        output,
+        "  capabilities: {}",
+        grant.capabilities().names().join(", ")
+    )
+    .expect("writing to a String cannot fail");
+    writeln!(
+        output,
+        "  created: {}",
+        timestamp::format_utc(grant.created_unix())
+    )
+    .expect("writing to a String cannot fail");
+    writeln!(output, "  {}", describe_expiry(grant, now)).expect("writing to a String cannot fail");
+    writeln!(output, "  {}", describe_uses(grant)).expect("writing to a String cannot fail");
+    if let Some(last_used) = grant.last_used_unix() {
+        writeln!(output, "  last used: {}", timestamp::format_utc(last_used))
+            .expect("writing to a String cannot fail");
+    }
+    if let Some(revoked_at) = grant.revoked_at_unix() {
+        writeln!(output, "  revoked: {}", timestamp::format_utc(revoked_at))
+            .expect("writing to a String cannot fail");
+    }
+    stdout_write(format_args!("{output}"))
+}
+
+/// `passmgr grant revoke <id>|--all [--json]`.
+///
+/// No password, no TTY requirement and no `check_human`: revocation only
+/// removes access, so an agent may perform it for the human who granted it.
+/// It goes through the daemon because the daemon already holds the key and can
+/// write the vault without a prompt; the CLI never sends a secret either way.
+#[cfg(unix)]
+pub(crate) fn command_grant_revoke(
+    options: GrantRevokeOptions,
+    _agent_mode: bool,
+    _vault_path: &Path,
+) -> Result<(), Error> {
+    let paths = socket::RuntimePaths::resolve();
+    let session_token = load_session(&paths)?;
+
+    let request = match (options.id, options.all) {
+        (Some(id), false) => GrantRevokeRequest::Id(id),
+        (None, true) => GrantRevokeRequest::All,
+        // `parse_grant_revoke` rejects both and neither; keep the command a
+        // total function without guessing at intent.
+        _ => {
+            return Err(Error::InvalidInput(
+                "grant revoke needs exactly one grant id or --all".to_owned(),
+            ));
+        }
+    };
+    let response = client::request(&paths, &session_token, &Request::GrantRevoke(request))?;
+    let revoked = match response {
+        Response::GrantRevoked { revoked } => revoked,
+        Response::Error(ResponseError::NotFound) => {
+            return Err(Error::GrantNotFound(
+                options.id.expect("not_found implies an id"),
+            ));
+        }
+        Response::Error(error) => {
+            return Err(Error::Daemon(format!(
+                "the unlock daemon refused the revocation ({})",
+                error.code()
+            )));
+        }
+        _ => {
+            return Err(Error::Daemon(
+                "the unlock daemon returned an unexpected response to grant_revoke".to_owned(),
+            ));
+        }
+    };
+
+    if options.json {
+        return write_json(&serde_json::json!({ "revoked": revoked }));
+    }
+    match (options.id, revoked) {
+        (Some(id), 0) => eprintln!("Grant '{id}' is already revoked; nothing changed."),
+        (Some(id), _) => eprintln!("Revoked grant '{id}'."),
+        (None, 0) => eprintln!("No active grants to revoke."),
+        (None, count) => eprintln!("Revoked {count} grant(s)."),
+    }
+    Ok(())
+}
+
+/// The human-readable status: revoked wins over expiry, which wins over
+/// exhaustion, so a revoked grant never shows as merely expired.
+fn grant_status(grant: &Grant, now: u64) -> &'static str {
+    if grant.is_revoked() {
+        "revoked"
+    } else if now >= grant.expires_at_unix() {
+        "expired"
+    } else if grant.uses_left() == Some(0) {
+        "exhausted"
+    } else {
+        "active"
+    }
+}
+
+fn describe_scope(scope: &Scope) -> String {
+    let mut parts = Vec::new();
+    if !scope.refs().is_empty() {
+        let refs: Vec<String> = scope.refs().iter().map(|id| id.to_ref()).collect();
+        parts.push(format!("refs: {}", refs.join(", ")));
+    }
+    if !scope.tags().is_empty() {
+        parts.push(format!("tags: {}", scope.tags().join(", ")));
+    }
+    if let Some(fields) = scope.fields() {
+        parts.push(format!("fields: {}", fields.join(", ")));
+    }
+    parts.join("; ")
+}
+
+fn describe_uses(grant: &Grant) -> String {
+    match (grant.uses(), grant.max_uses(), grant.uses_left()) {
+        (uses, Some(max), Some(left)) => format!("uses: {uses} of {max} ({left} left)"),
+        (uses, Some(max), None) => format!("uses: {uses} of {max}"),
+        (uses, None, _) => format!("uses: {uses} (unlimited)"),
+    }
+}
+
+fn describe_expiry(grant: &Grant, now: u64) -> String {
+    let expires_at = grant.expires_at_unix();
+    if expires_at <= now {
+        format!("expired: {}", timestamp::format_utc(expires_at))
+    } else {
+        format!(
+            "expires: {} (in {})",
+            timestamp::format_utc(expires_at),
+            humanize_seconds(expires_at - now)
+        )
+    }
+}
+
+/// A coarse, never-negative duration such as `7d 3h`, `59m` or `12s`.
+fn humanize_seconds(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// The JSON form of a grant: references and metadata only.
+///
+/// There is no `token`, `token_hash` or label-derived secret here. The id is
+/// public (it names the grant in `grant list`), and the allowlisted command
+/// paths are the ones the human approved.
+fn grant_metadata(grant: &Grant, now: u64) -> serde_json::Value {
+    serde_json::json!({
+        "id": grant.id().to_hex(),
+        "label": grant.label(),
+        "refs": grant.scope().refs().iter().map(|id| id.to_ref()).collect::<Vec<_>>(),
+        "tags": grant.scope().tags(),
+        "fields": grant.scope().fields(),
+        "commands": grant.commands().iter().map(|command| command.display().to_string()).collect::<Vec<_>>(),
+        "capabilities": grant.capabilities().names(),
+        "created": timestamp::to_json(grant.created_unix()),
+        "expires_at": timestamp::to_json(grant.expires_at_unix()),
+        "max_uses": grant.max_uses(),
+        "uses": grant.uses(),
+        "uses_left": grant.uses_left(),
+        "revoked_at": grant.revoked_at_unix().map(timestamp::to_json),
+        "last_used": grant.last_used_unix().map(timestamp::to_json),
+        "status": grant_status(grant, now),
+    })
 }
 
 /// Resolve every `--command` through the caller's PATH and canonicalize it.
@@ -367,6 +650,103 @@ mod tests {
         std::fs::write(&path, b"keep me").unwrap();
         assert!(TokenFile::create(&path).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
+    }
+
+    fn sample_grant(now: u64) -> Grant {
+        Grant::create(
+            GrantSpec {
+                label: "deploy prod".into(),
+                scope: Scope::new(
+                    vec![
+                        passmgr::store::EntryId::from_hex("00112233445566778899aabbccddeeff")
+                            .expect("entry id"),
+                    ],
+                    vec!["prod".into()],
+                    Some(vec!["password".into()]),
+                )
+                .expect("scope"),
+                commands: vec![PathBuf::from("/usr/bin/gh")],
+                capabilities: Capabilities::RUN,
+                expires_at: now + 3_600,
+                max_uses: Some(2),
+            },
+            passmgr::grant::TokenHash::of(b"metadata-canary-token"),
+            now,
+        )
+        .expect("grant")
+    }
+
+    /// The JSON form of a grant is the whole agent-facing surface of `grant
+    /// list`/`show`; it must carry no token and no hash, not even an encoded
+    /// form of one.
+    #[test]
+    fn grant_metadata_never_carries_a_token_or_its_hash() {
+        let now = 1_700_000_000;
+        let grant = sample_grant(now);
+        let value = grant_metadata(&grant, now);
+        let text = value.to_string();
+        let hash_hex = grant.token_hash().to_hex();
+
+        assert!(!text.contains(&hash_hex), "{text}");
+        assert!(!text.contains("metadata-canary-token"), "{text}");
+        assert!(!text.contains("token"), "no field may name a token: {text}");
+        assert_eq!(value["id"], serde_json::json!(grant.id().to_hex()));
+        assert_eq!(value["label"], serde_json::json!("deploy prod"));
+        assert_eq!(
+            value["refs"],
+            serde_json::json!(["pm://00112233445566778899aabbccddeeff"])
+        );
+        assert_eq!(value["tags"], serde_json::json!(["prod"]));
+        assert_eq!(value["fields"], serde_json::json!(["password"]));
+        assert_eq!(value["commands"], serde_json::json!(["/usr/bin/gh"]));
+        assert_eq!(value["capabilities"], serde_json::json!(["run"]));
+        assert_eq!(value["max_uses"], serde_json::json!(2));
+        assert_eq!(value["uses"], serde_json::json!(0));
+        assert_eq!(value["uses_left"], serde_json::json!(2));
+        assert_eq!(value["revoked_at"], serde_json::Value::Null);
+        assert_eq!(value["status"], serde_json::json!("active"));
+    }
+
+    #[test]
+    fn grant_status_puts_revoked_before_expired_and_exhausted() {
+        let now = 1_700_000_000;
+        let active = sample_grant(now);
+        assert_eq!(grant_status(&active, now), "active");
+
+        let mut expired = sample_grant(now);
+        assert_eq!(grant_status(&expired, now + 3_600), "expired");
+
+        let mut exhausted = sample_grant(now);
+        exhausted.mark_used(now).expect("first use");
+        exhausted.mark_used(now).expect("second use");
+        assert_eq!(grant_status(&exhausted, now), "exhausted");
+
+        // Revoking an expired grant still reads as revoked, not expired.
+        expired.revoke(now + 10).expect("revoke");
+        assert_eq!(grant_status(&expired, now + 3_600), "revoked");
+    }
+
+    #[test]
+    fn humanized_durations_are_coarse_and_never_negative() {
+        assert_eq!(humanize_seconds(7 * 86_400 + 3 * 3_600), "7d 3h");
+        assert_eq!(humanize_seconds(3_600 + 120), "1h 2m");
+        assert_eq!(humanize_seconds(59 * 60), "59m");
+        assert_eq!(humanize_seconds(12), "12s");
+        assert_eq!(humanize_seconds(0), "0s");
+    }
+
+    #[test]
+    fn uses_and_scope_descriptions_name_metadata_only() {
+        let now = 1_700_000_000;
+        let grant = sample_grant(now);
+        assert_eq!(describe_uses(&grant), "uses: 0 of 2 (2 left)");
+        assert_eq!(
+            describe_scope(grant.scope()),
+            "refs: pm://00112233445566778899aabbccddeeff; tags: prod; fields: password"
+        );
+        assert!(describe_expiry(&grant, now).contains("expires: "));
+        assert!(describe_expiry(&grant, now).contains("(in 1h 0m)"));
+        assert!(describe_expiry(&grant, now + 3_600).starts_with("expired: "));
     }
 
     #[cfg(unix)]

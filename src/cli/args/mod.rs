@@ -1,12 +1,18 @@
 //! Command-line argument parsing.
 
+mod grant;
+
+pub(crate) use grant::{
+    GrantCommand, GrantCreateOptions, GrantListOptions, GrantRevokeOptions, GrantShowOptions,
+    parse_grant,
+};
+
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use passmgr::password::{MAX_LEN, MIN_LEN, Preset};
 use passmgr::store;
-use passmgr::store::EntryId;
 
 pub(crate) const DEFAULT_DB: &str = "passwords.dat";
 
@@ -45,24 +51,6 @@ pub(crate) enum Command {
     Grant(GrantCommand),
     Help,
     Version,
-}
-
-#[derive(Debug)]
-pub(crate) enum GrantCommand {
-    Create(GrantCreateOptions),
-}
-
-#[derive(Debug)]
-pub(crate) struct GrantCreateOptions {
-    pub(crate) label: String,
-    pub(crate) references: Vec<EntryId>,
-    pub(crate) tags: Vec<String>,
-    /// Paths exactly as given; `grant create` resolves them before use.
-    pub(crate) commands: Vec<String>,
-    pub(crate) expires: std::time::Duration,
-    pub(crate) max_uses: Option<u32>,
-    pub(crate) allow_interpreter: bool,
-    pub(crate) out: PathBuf,
 }
 
 #[derive(Debug)]
@@ -154,7 +142,7 @@ pub(crate) fn parse_args(args: Vec<OsString>) -> Result<Parsed, String> {
     };
 
     let command = parse_command(command, rest)?;
-    refuse_run_vault_selection(&command, db_override.as_deref(), env_db.as_deref())?;
+    refuse_daemon_vault_selection(&command, db_override.as_deref(), env_db.as_deref())?;
     Ok(finish_parsing(db_override, env_db, agent, command))
 }
 
@@ -174,25 +162,29 @@ pub(crate) fn finish_parsing(
     }
 }
 
-/// `run` talks to whichever daemon owns the runtime socket, and that daemon
-/// holds the key for the vault it was unlocked with. Honouring `--db` here
-/// would be a lie (the path is never sent) and ignoring it could inject a
-/// value from a vault the human did not choose, so the combination is a usage
-/// error before any connection is made. `PASSMGR_DB` counts too: an exported
-/// variable would otherwise be silently ignored for this one command.
-fn refuse_run_vault_selection(
+/// `run` and `grant revoke` talk to whichever daemon owns the runtime socket,
+/// and that daemon holds the key for the vault it was unlocked with.
+/// Honouring `--db` here would be a lie (the path is never sent) and ignoring
+/// it could inject a value from, or revoke a grant in, a vault the human did
+/// not choose, so the combination is a usage error before any connection is
+/// made. `PASSMGR_DB` counts too: an exported variable would otherwise be
+/// silently ignored for these commands. `grant list` and `grant show` read the
+/// vault locally, so they do accept `--db`.
+fn refuse_daemon_vault_selection(
     command: &Command,
     flag_db: Option<&Path>,
     env_db: Option<&Path>,
 ) -> Result<(), String> {
-    if !matches!(command, Command::Run(_)) {
-        return Ok(());
-    }
+    let name = match command {
+        Command::Run(_) => "run",
+        Command::Grant(GrantCommand::Revoke(_)) => "grant revoke",
+        _ => return Ok(()),
+    };
     let Some(source) = flag_db.map(|_| "--db").or(env_db.map(|_| "PASSMGR_DB")) else {
         return Ok(());
     };
     Err(format!(
-        "'run' always uses the vault of the running unlock daemon and does not accept \
+        "'{name}' always uses the vault of the running unlock daemon and does not accept \
          {source}; unset {source} (or unlock the daemon with the vault you want)"
     ))
 }
@@ -760,172 +752,6 @@ pub(crate) fn parse_generate(args: Vec<OsString>) -> Result<Command, String> {
     }))
 }
 
-/// `grant create` and, later, the other `grant` subcommands.
-pub(crate) fn parse_grant(args: Vec<OsString>) -> Result<Command, String> {
-    const USAGE: &str = "'grant' usage: passmgr grant create --label <text> \
-                         (--ref <pm://...> | --tag <tag>) --command <path> \
-                         --expires <1h|30m|7d> --out <file>";
-
-    if args.len() == 1 {
-        if let Some(flag) = args[0].to_str() {
-            if flag == "-h" || flag == "--help" {
-                return Ok(Command::Help);
-            }
-        }
-    }
-
-    let mut args = args.into_iter();
-    let subcommand = args
-        .next()
-        .ok_or_else(|| format!("'grant' requires a subcommand; {USAGE}"))?
-        .into_string()
-        .map_err(|_| "the 'grant' subcommand must be valid UTF-8".to_owned())?;
-    let rest: Vec<OsString> = args.collect();
-    match subcommand.as_str() {
-        "create" => parse_grant_create(rest),
-        other => Err(format!(
-            "unknown 'grant' subcommand '{other}' (try 'passmgr help')"
-        )),
-    }
-}
-
-/// `grant create --label <text> (--ref <pm://...> | --tag <tag>)...
-/// --command <path>... --expires <duration> --out <file>`.
-///
-/// Everything here is syntax: refs are parsed as ids, tags are left to be
-/// normalized by `Scope::new`, and commands are resolved against the real
-/// filesystem by the command itself. Nothing touches the vault or a secret.
-pub(crate) fn parse_grant_create(args: Vec<OsString>) -> Result<Command, String> {
-    const USAGE: &str = "'grant create' usage: passmgr grant create --label <text> \
-                         (--ref <pm://...> | --tag <tag>) --command <path> \
-                         --expires <1h|30m|7d> --out <file> \
-                         [--max-uses N] [--allow-interpreter]";
-
-    let mut label = None;
-    let mut references = Vec::new();
-    let mut tags = Vec::new();
-    let mut commands = Vec::new();
-    let mut expires = None;
-    let mut max_uses = None;
-    let mut allow_interpreter = false;
-    let mut out = None;
-
-    let mut index = 0;
-    while index < args.len() {
-        let text = args[index]
-            .to_str()
-            .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
-        match text {
-            "-h" | "--help" => return Ok(Command::Help),
-            "--label" => {
-                label = Some(flag_value(&args, index, "--label")?);
-                index += 2;
-                continue;
-            }
-            other if other.starts_with("--label=") => {
-                label = Some(other["--label=".len()..].to_owned());
-            }
-            "--ref" => {
-                let value = flag_value(&args, index, "--ref")?;
-                references.push(EntryId::parse_ref(&value).map_err(|error| error.to_string())?);
-                index += 2;
-                continue;
-            }
-            other if other.starts_with("--ref=") => {
-                references.push(
-                    EntryId::parse_ref(&other["--ref=".len()..])
-                        .map_err(|error| error.to_string())?,
-                );
-            }
-            "--tag" => {
-                tags.push(flag_value(&args, index, "--tag")?);
-                index += 2;
-                continue;
-            }
-            other if other.starts_with("--tag=") => {
-                tags.push(other["--tag=".len()..].to_owned());
-            }
-            "--command" => {
-                commands.push(flag_value(&args, index, "--command")?);
-                index += 2;
-                continue;
-            }
-            other if other.starts_with("--command=") => {
-                commands.push(other["--command=".len()..].to_owned());
-            }
-            "--expires" => {
-                let value = flag_value(&args, index, "--expires")?;
-                expires = Some(super::grant::parse_expiry(&value)?);
-                index += 2;
-                continue;
-            }
-            other if other.starts_with("--expires=") => {
-                expires = Some(super::grant::parse_expiry(&other["--expires=".len()..])?);
-            }
-            "--max-uses" => {
-                let value = flag_value(&args, index, "--max-uses")?;
-                max_uses = Some(parse_max_uses(&value)?);
-                index += 2;
-                continue;
-            }
-            other if other.starts_with("--max-uses=") => {
-                max_uses = Some(parse_max_uses(&other["--max-uses=".len()..])?);
-            }
-            "--allow-interpreter" => allow_interpreter = true,
-            "--out" => {
-                out = Some(PathBuf::from(flag_value(&args, index, "--out")?));
-                index += 2;
-                continue;
-            }
-            other if other.starts_with("--out=") => {
-                out = Some(PathBuf::from(&other["--out=".len()..]));
-            }
-            other => {
-                return Err(format!(
-                    "unexpected argument '{other}' for 'grant create' (see '{USAGE}')"
-                ));
-            }
-        }
-        index += 1;
-    }
-
-    let label = label.ok_or("'grant create' requires --label <text>")?;
-    let expires = expires.ok_or_else(|| {
-        "'grant create' requires --expires <duration> (for example 1h)".to_owned()
-    })?;
-    let out = out.ok_or("'grant create' requires --out <file>")?;
-    if out.as_os_str().is_empty() {
-        return Err("'grant create' --out must not be empty".to_owned());
-    }
-    if references.is_empty() && tags.is_empty() {
-        return Err("'grant create' needs at least one --ref or --tag".to_owned());
-    }
-    if commands.is_empty() {
-        return Err("'grant create' needs at least one --command <path>".to_owned());
-    }
-
-    Ok(Command::Grant(GrantCommand::Create(GrantCreateOptions {
-        label,
-        references,
-        tags,
-        commands,
-        expires,
-        max_uses,
-        allow_interpreter,
-        out,
-    })))
-}
-
-fn parse_max_uses(value: &str) -> Result<u32, String> {
-    let uses = value
-        .parse::<u32>()
-        .map_err(|_| format!("invalid --max-uses '{value}' (expected a positive integer)"))?;
-    if uses == 0 {
-        return Err("--max-uses must be at least 1".to_owned());
-    }
-    Ok(uses)
-}
-
 pub(crate) fn parse_length(value: &str) -> Result<usize, String> {
     let length = value
         .parse::<usize>()
@@ -953,7 +779,7 @@ mod tests {
     #[test]
     fn run_refuses_an_explicit_db_flag() {
         let error =
-            refuse_run_vault_selection(&run_command(), Some(Path::new("/tmp/other.dat")), None)
+            refuse_daemon_vault_selection(&run_command(), Some(Path::new("/tmp/other.dat")), None)
                 .expect_err("--db must be refused for run");
         assert!(error.contains("--db"), "{error}");
         assert!(error.contains("does not accept"), "{error}");
@@ -965,7 +791,7 @@ mod tests {
         // the test does not mutate the process environment (which would race
         // with every other test in the binary).
         let error =
-            refuse_run_vault_selection(&run_command(), None, Some(Path::new("/tmp/other.dat")))
+            refuse_daemon_vault_selection(&run_command(), None, Some(Path::new("/tmp/other.dat")))
                 .expect_err("PASSMGR_DB must be refused for run");
         assert!(error.contains("PASSMGR_DB"), "{error}");
     }
@@ -981,7 +807,7 @@ mod tests {
             Command::Help,
         ] {
             assert!(
-                refuse_run_vault_selection(
+                refuse_daemon_vault_selection(
                     &command,
                     Some(Path::new("/tmp/other.dat")),
                     Some(Path::new("/tmp/other.dat"))

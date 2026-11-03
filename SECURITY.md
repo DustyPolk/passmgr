@@ -66,7 +66,10 @@ inherits every limit below.
 - **Planned, per `MCP.md`:** scoped, expiring, use-limited, revocable grants
   that a human approves with the master password at a TTY, and a hash-chained
   audit log that records every allowed and denied credential use without
-  values or tokens.
+  values or tokens. Grants can already be listed and revoked; revocation
+  needs no password or TTY because it only removes access, and the daemon
+  persists it in the vault with the key it already holds. `run` does not yet
+  require a grant (TODO 3.6).
 
 ## Known limits
 

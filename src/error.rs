@@ -39,6 +39,9 @@ pub enum Error {
     ServiceNotFound(String),
     /// No credential matches the given `pm://` reference. Maps to exit code 3.
     EntryNotFound(String),
+    /// No grant has the given id. Maps to exit code 3. The id is already public
+    /// metadata (it appears in `pm grant list`), so it is safe to echo.
+    GrantNotFound(crate::grant::GrantId),
     /// The vault was opened read-only and cannot be saved. Library misuse;
     /// mutating commands open it with [`crate::Vault::open_for_update`].
     ReadOnlyVault(PathBuf),
@@ -60,9 +63,10 @@ impl Error {
     /// The stable exit code for this error. See the `EXIT_*` constants.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Self::VaultNotFound(_) | Self::ServiceNotFound(_) | Self::EntryNotFound(_) => {
-                EXIT_NOT_FOUND
-            }
+            Self::VaultNotFound(_)
+            | Self::ServiceNotFound(_)
+            | Self::EntryNotFound(_)
+            | Self::GrantNotFound(_) => EXIT_NOT_FOUND,
             Self::AuthenticationFailed => EXIT_AUTH_FAILED,
             Self::Refused(_) => EXIT_REFUSED,
             Self::NotAVault
@@ -118,6 +122,7 @@ impl fmt::Display for Error {
             Self::EntryNotFound(reference) => {
                 write!(f, "no credential found for reference '{reference}'")
             }
+            Self::GrantNotFound(id) => write!(f, "no grant found with id '{id}'"),
             Self::ReadOnlyVault(path) => write!(
                 f,
                 "vault '{}' was opened read-only; reopen it for update to save",

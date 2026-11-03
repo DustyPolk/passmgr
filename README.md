@@ -237,6 +237,30 @@ and never to stdout; an existing file is refused, and a failed command removes
 the file it created. A vault that cannot hold another grant is refused before
 the approval is spent. The vault stores only the token's SHA-256 hash.
 
+### Inspect and revoke grants
+
+```bash
+passmgr grant list
+passmgr grant list --json
+passmgr grant show 0123456789abcdef0123456789abcdef
+passmgr grant revoke 0123456789abcdef0123456789abcdef
+passmgr grant revoke --all
+```
+
+`grant list` and `grant show` prompt for the master password and print
+metadata only: id, label, scope, allowlisted command paths, capabilities,
+creation time, expiry, uses left, last use and status (`active`, `expired`,
+`exhausted` or `revoked`). The grant's token and its hash are never printed,
+in text or in `--json`.
+
+`grant revoke` needs no password, no terminal and no `--agent` exemption: it
+only removes access, so an agent may revoke for the human who granted it. It
+asks the running daemon to set `revoked_at` and re-encrypt the vault with the
+key the daemon already holds, so a revoked grant is refused on the next
+request. Revoking an already-revoked id succeeds and changes nothing, and an
+unknown id is exit code 3. Like `run`, it refuses `--db` and `PASSMGR_DB`
+because it always acts on the daemon's vault.
+
 ### List services
 
 ```bash

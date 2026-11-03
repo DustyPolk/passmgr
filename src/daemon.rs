@@ -16,9 +16,10 @@
 //!
 //! Every request is untrusted and any same-user process can connect. The
 //! daemon therefore has no request type that returns a secret; see
-//! [`crate::protocol`]. It answers `ping`, `lock`, `challenge`, `prove` and
-//! `grant_create`, and `run` streams the child's already-redacted output plus
-//! an exit status (TODO 2.6c). There is no request that returns a value.
+//! [`crate::protocol`]. It answers `ping`, `lock`, `challenge`, `prove`,
+//! `grant_create` and `grant_revoke`, and `run` streams the child's
+//! already-redacted output plus an exit status (TODO 2.6c). There is no
+//! request that returns a value.
 //!
 //! `challenge`/`prove` implement the human-presence proof (TODO 3.3, see
 //! [`crate::presence`]): the daemon issues a single-use 60-second nonce and
@@ -30,6 +31,14 @@
 //! caller. `grant_create` goes one step further without ever writing: it
 //! re-normalizes the request, requires the same digest, and spends the
 //! approval. The CLI that owns the raw token writes the grant.
+//!
+//! `grant_revoke` is the one exception to "the daemon never writes": it opens
+//! the vault with the key it already holds, sets `revoked_at` on the named
+//! grant (or on every active grant) and saves it, reusing the container's salt
+//! and KDF parameters so the hot key stays valid. It needs no proof because it
+//! only removes access; revoking is always available to the human and to an
+//! agent acting on their behalf. Nothing else about a grant can be changed
+//! this way.
 //!
 //! # Lifetime
 //!
@@ -73,9 +82,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 use crate::crypto::KEY_LEN;
+use crate::grant::GrantId;
 use crate::presence;
 use crate::protocol::{
-    self, FrameDecoder, ProtocolError, Request, Response, ResponseError, RunFrame,
+    self, FrameDecoder, GrantRevokeRequest, ProtocolError, Request, Response, ResponseError,
+    RunFrame,
 };
 use crate::runner;
 use crate::session;
@@ -461,7 +472,14 @@ pub fn run(
                 Ok((stream, _peer)) => {
                     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
                     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
-                    match handle_connection(stream, token, key, &mut challenges, &mut approvals) {
+                    match handle_connection(
+                        stream,
+                        token,
+                        key,
+                        vault_path,
+                        &mut challenges,
+                        &mut approvals,
+                    ) {
                         // `lock`: stop accepting, but answer only after the
                         // workers are joined and the key is zeroized below.
                         Handled::Locked(stream) => {
@@ -582,6 +600,7 @@ fn handle_connection(
     mut stream: UnixStream,
     token: &SessionToken,
     key: &LockedKey,
+    vault_path: &Path,
     challenges: &mut presence::Challenges,
     approvals: &mut presence::Approvals,
 ) -> Handled {
@@ -676,7 +695,81 @@ fn handle_connection(
                 Handled::Rejected
             }
         }
+        Request::GrantRevoke(revoke) => {
+            // The only vault write the daemon performs, and the only request
+            // that needs no proof: it can only take access away. An unknown
+            // id is `not_found`; an already-revoked one is a no-op success.
+            let Some(now) = unix_now() else {
+                return reject(&mut stream, ResponseError::Internal);
+            };
+            let response = match revoke_grants(vault_path, key, revoke, now) {
+                Ok(revoked) => Response::GrantRevoked { revoked },
+                Err(error) => Response::Error(error),
+            };
+            let answered = !matches!(response, Response::Error(_));
+            let _ = write_response(&mut stream, &response);
+            if answered {
+                Handled::Served
+            } else {
+                Handled::Rejected
+            }
+        }
     }
+}
+
+/// Revoke one grant or every active grant, returning how many were newly
+/// revoked.
+///
+/// The vault is opened with the daemon's hot key, changed under the write
+/// lock, and saved with [`Vault::save_with_key`] so the salt and KDF
+/// parameters (and therefore the key itself) stay valid. A concurrent writer
+/// makes `lock_for_update` fail without changing anything; the caller may
+/// retry. When no grant needs changing, nothing is written at all.
+fn revoke_grants(
+    path: &Path,
+    key: &LockedKey,
+    request: GrantRevokeRequest,
+    now: u64,
+) -> Result<u32, ResponseError> {
+    let mut vault =
+        Vault::open_with_key(path, key.as_slice()).map_err(|_| ResponseError::Internal)?;
+    let targets: Vec<GrantId> = match request {
+        GrantRevokeRequest::Id(id) => {
+            if vault.grant(id).is_none() {
+                return Err(ResponseError::NotFound);
+            }
+            vec![id]
+        }
+        GrantRevokeRequest::All => vault
+            .grants()
+            .iter()
+            .filter(|grant| !grant.is_revoked())
+            .map(|grant| grant.id())
+            .collect(),
+    };
+    if targets.is_empty() {
+        return Ok(0);
+    }
+
+    vault
+        .lock_for_update()
+        .map_err(|_| ResponseError::Internal)?;
+    let mut revoked = 0u32;
+    for id in targets {
+        let grant = vault.grant_mut(id).ok_or(ResponseError::Internal)?;
+        if grant.is_revoked() {
+            continue;
+        }
+        grant.revoke(now).map_err(|_| ResponseError::Internal)?;
+        revoked = revoked.saturating_add(1);
+    }
+    if revoked == 0 {
+        return Ok(0);
+    }
+    vault
+        .save_with_key(key.as_slice())
+        .map_err(|_| ResponseError::Internal)?;
+    Ok(revoked)
 }
 
 /// The wall clock in Unix seconds, or `None` if it is unusable.

@@ -403,6 +403,16 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Creating or approving a grant requires the master password at a TTY, proved
   with `HMAC-SHA256(vault_key, "passmgr-approve-v1" || nonce || digest)` using
   a single-use 60 s nonce, compared in constant time. Revoking needs no proof.
+- `pm grant list`/`show` are local vault reads with the master password and
+  deliberately accept `--db`. `pm grant revoke` goes through the daemon over
+  the session token, because the daemon holds the key and can write without a
+  prompt; it refuses `--db`/`PASSMGR_DB` like `run`, since it can only act on
+  the daemon's own vault (TODO 3.5). The daemon's only vault write is setting
+  `revoked_at` with `Vault::save_with_key`, which reuses the container's salt
+  and KDF parameters so the hot key stays valid. Revoking an already-revoked
+  id is a successful no-op (`revoked: 0`), an unknown id is `not_found`, and
+  `--all` targets only active grants, so the count never includes grants that
+  were already revoked.
 - The presence proof is implemented in `src/presence.rs` (TODO 3.3). The MAC
   message is `DOMAIN || nonce || digest`, all fixed length, so the fields
   cannot be shifted into one another. The daemon issues nonces through the

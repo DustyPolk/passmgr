@@ -109,6 +109,21 @@ Commands:
                                --out FILE         New token file (O_EXCL).
                              At least one --ref or --tag and one --command
                              are required. Refuses to overwrite --out.
+  grant list [--json]        List stored grants: id, label, scope,
+                             allowlisted commands, uses, expiry and status.
+                             Metadata only; a token or its hash is never
+                             printed. Prompts for the master password.
+  grant show <id> [--json]   Show one grant's metadata. --json prints the
+                             grant object directly. Metadata only, and no
+                             substring matching: an id names one grant.
+  grant revoke <id>|--all [--json]
+                             Mark one grant, or every active grant, revoked.
+                             Revocation only removes access, so it needs no
+                             password and no terminal (an agent may revoke)
+                             and takes effect on the next request. Revoking
+                             an already-revoked id succeeds and changes
+                             nothing. Like 'run', it refuses --db and
+                             PASSMGR_DB: it uses the running daemon's vault.
   help                       Show this help.
   version                    Show version information.
 
@@ -147,6 +162,10 @@ Examples:
       -- gh auth status
   passmgr grant create --label 'deploy prod' --tag prod \
       --command /usr/bin/gh --expires 1h --out /run/user/1000/gh.token
+  passmgr grant list
+  passmgr grant show 0123456789abcdef0123456789abcdef
+  passmgr grant revoke 0123456789abcdef0123456789abcdef
+  passmgr grant revoke --all
   passmgr --db ~/.secrets/work.dat list
 
 Notes:
@@ -160,6 +179,10 @@ Notes:
     by 'list' and 'get'. A reference identifies an entry for agents and tools
     without revealing any secret, and survives renames. 'show' accepts only a
     full reference, never a service name.
+  - 'grant list' and 'grant show' print grant metadata only (id, label,
+    scope, commands, uses, timestamps); a grant token or its hash is never
+    printed. 'grant revoke' needs no password: taking access away is always
+    allowed, and the daemon writes it.
   - 'list --json' and 'show --json' emit references and metadata only; there
     is no JSON field that carries a password. "created" and "last_rotated"
     are RFC 3339 UTC strings, or null when the timestamp is unknown.

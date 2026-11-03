@@ -36,6 +36,10 @@ pub enum Response {
     /// the raw token assigns the id and writes the vault, so this answer is
     /// useless to anyone who did not already possess the token.
     GrantApproved,
+    /// A `grant_revoke` marked grants revoked. `revoked` counts only grants
+    /// that were active until now, so revoking an already-revoked id answers
+    /// zero and changes nothing. Carries no id, label or hash.
+    GrantRevoked { revoked: u32 },
     /// The request was rejected. The error is a fixed code, never echo of the
     /// request or of vault data.
     Error(ResponseError),
@@ -50,9 +54,9 @@ pub enum ResponseError {
     Unsupported,
     /// The envelope did not carry this daemon's session token.
     Unauthorized,
-    /// The requested credential does not exist *or* is outside the caller's
-    /// grant scope. The two cases are deliberately indistinguishable so the
-    /// response is not an existence oracle.
+    /// The requested credential or grant does not exist *or* the credential
+    /// is outside the caller's grant scope. The cases are deliberately
+    /// indistinguishable so the response is not an existence oracle.
     NotFound,
     /// The child process could not be started (missing program, permission).
     SpawnFailed,
@@ -194,6 +198,9 @@ pub fn encode_response(response: &Response) -> Result<Vec<u8>, ProtocolError> {
         Response::Challenge(nonce) => json!({ "type": "challenge", "nonce": nonce.to_hex() }),
         Response::Proven => json!({ "type": "proven" }),
         Response::GrantApproved => json!({ "type": "grant_approved" }),
+        Response::GrantRevoked { revoked } => {
+            json!({ "type": "grant_revoked", "revoked": revoked })
+        }
         Response::Error(error) => json!({ "type": "error", "code": error.code() }),
     };
     encode_value(&json!({ "version": PROTOCOL_VERSION, "response": response }))
@@ -216,9 +223,25 @@ pub fn decode_response(frame: &[u8]) -> Result<Response, ProtocolError> {
         "challenge" => decode_challenge(response).map(Response::Challenge),
         "proven" => Ok(Response::Proven),
         "grant_approved" => Ok(Response::GrantApproved),
+        "grant_revoked" => {
+            decode_grant_revoked(response).map(|revoked| Response::GrantRevoked { revoked })
+        }
         "error" => decode_error_code(response).map(Response::Error),
         other => Err(ProtocolError::UnknownResponse(truncate_type(other))),
     }
+}
+
+/// Decode the count carried by a `grant_revoked` response.
+fn decode_grant_revoked(response: &Map<String, Value>) -> Result<u32, ProtocolError> {
+    let revoked = response
+        .get("revoked")
+        .ok_or_else(|| ProtocolError::MalformedJson("missing 'response.revoked'".into()))?
+        .as_u64()
+        .ok_or_else(|| {
+            ProtocolError::MalformedJson("'response.revoked' must be a non-negative integer".into())
+        })?;
+    u32::try_from(revoked)
+        .map_err(|_| ProtocolError::InvalidResponse("'response.revoked' is too large".into()))
 }
 
 /// Decode the public nonce carried by a `challenge` response.
@@ -478,6 +501,8 @@ mod tests {
             Response::Challenge(nonce),
             Response::Proven,
             Response::GrantApproved,
+            Response::GrantRevoked { revoked: 0 },
+            Response::GrantRevoked { revoked: 3 },
             Response::Error(ResponseError::BadRequest),
             Response::Error(ResponseError::Unsupported),
             Response::Error(ResponseError::Unauthorized),
@@ -524,6 +549,36 @@ mod tests {
         assert_eq!(
             &approved[4..],
             br#"{"response":{"type":"grant_approved"},"version":3}"#
+        );
+
+        // The revocation answer carries a count and nothing else: no id,
+        // label or hash of what was revoked.
+        let revoked = encode_response(&Response::GrantRevoked { revoked: 2 }).expect("encode");
+        assert_eq!(
+            &revoked[4..],
+            br#"{"response":{"revoked":2,"type":"grant_revoked"},"version":3}"#
+        );
+    }
+
+    #[test]
+    fn grant_revoked_rejects_a_missing_or_invalid_count() {
+        for body in [
+            r#"{"version":3,"response":{"type":"grant_revoked"}}"#,
+            r#"{"version":3,"response":{"type":"grant_revoked","revoked":-1}}"#,
+            r#"{"version":3,"response":{"type":"grant_revoked","revoked":"1"}}"#,
+            r#"{"version":3,"response":{"type":"grant_revoked","revoked":4294967296}}"#,
+        ] {
+            assert!(
+                decode_response(&frame(body)).is_err(),
+                "{body} must be rejected"
+            );
+        }
+        assert_eq!(
+            decode_response(&frame(
+                r#"{"version":3,"response":{"type":"grant_revoked","revoked":1}}"#
+            ))
+            .expect("decode"),
+            Response::GrantRevoked { revoked: 1 }
         );
     }
 

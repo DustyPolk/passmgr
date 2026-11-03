@@ -77,6 +77,10 @@ fn grant_create() -> Request {
     Request::GrantCreate(GrantCreateRequest::from_grant_request(&grant_request()))
 }
 
+fn grant_id() -> crate::grant::GrantId {
+    crate::grant::GrantId::from_hex("00112233445566778899aabbccddeeff").expect("grant id")
+}
+
 /// Build a frame by hand, without going through `encode`.
 fn frame(body: &str) -> Vec<u8> {
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
@@ -93,10 +97,67 @@ fn round_trips_every_request() {
         prove_request(),
         run_request(),
         grant_create(),
+        Request::GrantRevoke(GrantRevokeRequest::Id(grant_id())),
+        Request::GrantRevoke(GrantRevokeRequest::All),
     ] {
         let encoded = encode(&request).expect("encode");
         assert_eq!(decode(&encoded).expect("decode"), request);
     }
+}
+
+#[test]
+fn grant_revoke_frames_name_exactly_one_target() {
+    let by_id = encode(&Request::GrantRevoke(GrantRevokeRequest::Id(grant_id()))).expect("encode");
+    let value: Value = serde_json::from_slice(&by_id[4..]).expect("json");
+    assert_eq!(
+        value["request"],
+        serde_json::json!({
+            "type": "grant_revoke",
+            "id": "00112233445566778899aabbccddeeff",
+        })
+    );
+
+    let all = encode(&Request::GrantRevoke(GrantRevokeRequest::All)).expect("encode");
+    let value: Value = serde_json::from_slice(&all[4..]).expect("json");
+    assert_eq!(
+        value["request"],
+        serde_json::json!({ "type": "grant_revoke", "all": true })
+    );
+}
+
+/// Wrap a request body in the full envelope `decode` expects, without going
+/// through `encode`, so a rejection is about the body and nothing else.
+fn request_frame(request: &str) -> Vec<u8> {
+    frame(&format!(
+        r#"{{"version":3,"token":"{TOKEN_HEX}","request":{request}}}"#
+    ))
+}
+
+#[test]
+fn grant_revoke_rejects_ambiguous_or_malformed_targets() {
+    for body in [
+        r#"{"type":"grant_revoke"}"#,
+        r#"{"type":"grant_revoke","all":false}"#,
+        r#"{"type":"grant_revoke","all":"true"}"#,
+        r#"{"type":"grant_revoke","id":"00112233445566778899aabbccddeeff","all":true}"#,
+        r#"{"type":"grant_revoke","id":"0011"}"#,
+        r#"{"type":"grant_revoke","id":"zzzz2233445566778899aabbccddeeff"}"#,
+        r#"{"type":"grant_revoke","id":null}"#,
+    ] {
+        assert!(
+            matches!(
+                decode(&request_frame(body)),
+                Err(ProtocolError::InvalidRequest(_) | ProtocolError::MalformedJson(_))
+            ),
+            "{body} must be rejected as a bad request, not accepted or ignored"
+        );
+    }
+
+    let accepted = r#"{"type":"grant_revoke","id":"00112233445566778899aabbccddeeff","all":null}"#;
+    assert_eq!(
+        decode(&request_frame(accepted)).expect("null all is absent"),
+        Request::GrantRevoke(GrantRevokeRequest::Id(grant_id()))
+    );
 }
 
 #[test]

@@ -101,7 +101,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::grant::{Capabilities, GrantRequest, GrantSpec, Scope, TokenHash};
+use crate::grant::{Capabilities, GrantId, GrantRequest, GrantSpec, Scope, TokenHash};
 use crate::presence::{ChallengeNonce, Proof, RequestDigest};
 use crate::store::EntryId;
 use crate::token::SessionToken;
@@ -191,6 +191,28 @@ pub enum Request {
     /// The daemon never opens the vault here and the answer carries no token,
     /// hash or grant id; the CLI that holds the raw token writes the grant.
     GrantCreate(GrantCreateRequest),
+    /// Mark one grant, or every grant, revoked.
+    ///
+    /// This is the only request that makes the daemon write the vault, and
+    /// the only write it performs is setting `revoked_at` on grants that
+    /// already exist. It needs no human-presence proof because it only
+    /// removes access: an agent may revoke for itself. Answer:
+    /// [`Response::GrantRevoked`](crate::protocol::Response::GrantRevoked)
+    /// with the number of grants newly revoked, or `not_found` for an
+    /// unknown id. An already-revoked id is a successful no-op.
+    GrantRevoke(GrantRevokeRequest),
+}
+
+/// The target of a `grant_revoke` request: exactly one id or every grant.
+///
+/// An enum rather than two optional fields, so "one" and "all" cannot be
+/// sent together or both omitted, and so an id is parsed at the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantRevokeRequest {
+    /// Revoke the grant with this id. Unknown ids answer `not_found`.
+    Id(GrantId),
+    /// Revoke every grant that is not already revoked.
+    All,
 }
 
 /// The `prove` payload: a MAC over a nonce and the digest of the request the

@@ -243,6 +243,25 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   and `tags` are never both empty. The body carries no credential value:
   `token` is the unlock session token and `token_hash` is the SHA-256 of the
   grant token, never the token itself.
+- The one write the daemon *does* perform is `grant_revoke`. It names exactly
+  one target, either `{"type":"grant_revoke","id":"<32 hex>"}` or
+  `{"type":"grant_revoke","all":true}`; both keys at once, `"all": false`, a
+  non-boolean `all` or a bad id is `bad_request`, never a guess. The daemon
+  opens the vault with the key it already holds, sets `revoked_at` (the first
+  timestamp wins, so revoking twice changes nothing), saves it with the same
+  salt and KDF parameters, and answers `{"type":"grant_revoked","revoked":N}`
+  with the number of grants it newly revoked. An unknown id is `not_found`;
+  `--all` with nothing active answers `revoked: 0`. No proof is required:
+  revocation only removes access, so an agent may revoke for itself, and the
+  next request that checks the grant sees it revoked (the daemon re-reads the
+  vault for every request). The answer carries no id, label or hash.
+- `pm grant list` and `pm grant show` are local reads, like `pm list`: they
+  prompt for the master password, accept `--db`, and print metadata only
+  (id, label, scope, allowlisted command paths, capabilities, timestamps,
+  uses, status). `--json` emits `{"grants":[...]}` or one grant object with
+  the same keys and no `token`, `token_hash` or secret field. `pm grant
+  revoke` needs no password and no terminal, and like `pm run` it refuses
+  `--db`/`PASSMGR_DB`: it always acts on the running daemon's vault.
 - Interpreters and shells (`sh`, `bash`, `zsh`, `fish`, `dash`, `env`, `xargs`,
   `python*`, `node`, `perl`, `ruby`, `busybox`, …) in a command allowlist let
   the agent exfiltrate secrets in ways redaction cannot catch. Approval shows a

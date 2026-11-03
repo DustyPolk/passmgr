@@ -527,9 +527,13 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       the TTY/agent gate happen before the password prompt; a newly created
       `--out` is unlinked when a later step fails; `check_grant_writable` runs
       after key derivation (needed to open the vault) but before `challenge`.
-- [ ] **3.5 `pm grant list|show|revoke` (+ `--json`).** list/show print
+- [x] **3.5 `pm grant list|show|revoke` (+ `--json`).** list/show print
       metadata only, never tokens or hashes. revoke needs no password and takes
       effect on the next request. `revoke --all` exists. Tests for each.
+      Done: revoke goes over the daemon session token (`grant_revoke` /
+      `grant_revoked`) and is the daemon's only vault write; it refuses
+      `--db`/`PASSMGR_DB` like `run`. list/show read the vault locally with the
+      master password. Enforcement of `revoked_at` by `run` is still 3.6.
 - [ ] **3.6 Daemon authorizes by grant.** `run` and every new
       credential-touching request require a grant token. The unlock session
       token (2.5) only authorizes `ping`, `lock`, `status` and `revoke`.
