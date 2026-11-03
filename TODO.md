@@ -544,7 +544,7 @@ Rules that apply to every item:
       line and an ESC/CR file name on the existing-file error, and fails
       against the plain `display()`.
 
-- [ ] **R.30 Argument and validator errors echo agent-supplied argv raw, so a
+- [x] **R.30 Argument and validator errors echo agent-supplied argv raw, so a
       suggested value can drive the human's terminal.**
       R.29 escaped only `--out`; the rest of the argument/validation errors
       still interpolate the raw value: `src/cli/args/mod.rs:141` (unknown
@@ -581,6 +581,12 @@ Rules that apply to every item:
       `\u{1b}`/`\u{7}` form. Add unit cases to `validate_tag`,
       `EntryId::parse_ref` and `validate_field_name`. All must fail against
       the current code.
+      Done 2026-11-03: helpers moved to `src/text.rs` (`escape_hidden`,
+      `escape_quoted`, `escape_path`); validators, `Error::Display`,
+      `warn_insecure` and `grant show` escape at the source, and the CLI
+      printer escapes both the usage message and the runtime error line as a
+      backstop. `tests/cli_args_escape.rs` covers every flag above except
+      `--tag` (validated after the password prompt; unit-tested instead).
 
 - [ ] **R.31 A valid grant token is an existence oracle for out-of-scope
       references, contradicting `DECISIONS.md`.**

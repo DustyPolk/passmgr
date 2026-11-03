@@ -2,6 +2,8 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
+use crate::text::{escape_hidden, escape_path, escape_quoted};
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Stable process exit codes. These are part of the command-line contract:
@@ -92,7 +94,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(err) => write!(f, "I/O error: {err}"),
-            Self::VaultNotFound(path) => write!(f, "no vault found at '{}'", path.display()),
+            Self::VaultNotFound(path) => {
+                write!(f, "no vault found at '{}'", escape_path(path))
+            }
             Self::NotAVault => write!(f, "file is not a passmgr vault"),
             Self::LegacyVault => write!(
                 f,
@@ -104,42 +108,49 @@ impl fmt::Display for Error {
                 "unsupported vault format version {version} (this build expects version 2)"
             ),
             Self::UnsupportedFormat(detail) => {
-                write!(f, "unsupported vault format: {detail}")
+                write!(f, "unsupported vault format: {}", escape_hidden(detail))
             }
-            Self::MalformedVault(detail) => write!(f, "malformed vault: {detail}"),
-            Self::Crypto(detail) => write!(f, "crypto error: {detail}"),
+            Self::MalformedVault(detail) => {
+                write!(f, "malformed vault: {}", escape_hidden(detail))
+            }
+            Self::Crypto(detail) => write!(f, "crypto error: {}", escape_hidden(detail)),
             Self::AuthenticationFailed => {
                 write!(f, "wrong master password or corrupted vault")
             }
-            Self::Refused(detail) => f.write_str(detail),
+            Self::Refused(detail) => f.write_str(&escape_hidden(detail)),
             Self::DuplicateService(service) => write!(
                 f,
-                "a credential for '{service}' already exists; delete it first"
+                "a credential for '{}' already exists; delete it first",
+                escape_quoted(service)
             ),
             Self::ServiceNotFound(service) => {
-                write!(f, "no credential found for '{service}'")
+                write!(f, "no credential found for '{}'", escape_quoted(service))
             }
             Self::EntryNotFound(reference) => {
-                write!(f, "no credential found for reference '{reference}'")
+                write!(
+                    f,
+                    "no credential found for reference '{}'",
+                    escape_quoted(reference)
+                )
             }
             Self::GrantNotFound(id) => write!(f, "no grant found with id '{id}'"),
             Self::ReadOnlyVault(path) => write!(
                 f,
                 "vault '{}' was opened read-only; reopen it for update to save",
-                path.display()
+                escape_path(path)
             ),
             Self::VaultBusy(path) => write!(
                 f,
                 "another passmgr process is updating '{}'; nothing was changed, try again",
-                path.display()
+                escape_path(path)
             ),
             Self::VaultChanged(path) => write!(
                 f,
                 "vault '{}' changed while it was open; nothing was changed, try again",
-                path.display()
+                escape_path(path)
             ),
-            Self::Daemon(detail) => f.write_str(detail),
-            Self::InvalidInput(detail) => f.write_str(detail),
+            Self::Daemon(detail) => f.write_str(&escape_hidden(detail)),
+            Self::InvalidInput(detail) => f.write_str(&escape_hidden(detail)),
         }
     }
 }

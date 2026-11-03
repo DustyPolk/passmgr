@@ -1,3 +1,33 @@
+## 2026-11-03 — Escape untrusted argv in every CLI error (TODO R.30)
+
+- New `src/text.rs` owns the hidden-character table and three renderers:
+  `escape_hidden` (display text, keeps quotes), `escape_quoted` (inside
+  `'...'`, also escapes quote/backslash) and `escape_path` (a `Path`, quoted).
+  Moved table and helpers out of `src/grant/validate.rs`; `grant` re-exports
+  `escape_hidden` so call sites did not move.
+- Escaped at the source: `EntryId::parse_ref`, `validate_tag` (both echo
+  branches), `validate_field_name`; every path-bearing `Error` variant
+  (`VaultNotFound`, `ReadOnlyVault`, `VaultBusy`, `VaultChanged`) and every
+  user-text variant (`DuplicateService`, `ServiceNotFound`, `EntryNotFound`,
+  `InvalidInput`, `Refused`, `Daemon`, format/crypto details) now go through
+  `src/text.rs`. `warn_insecure` and `grant show`'s command list use
+  `escape_path`.
+- Backstop: `src/cli/mod.rs` escapes the usage message and the rendered
+  runtime error line. Escaping escaped text is a no-op, so a future message
+  cannot forget without failing `tests/cli_args_escape.rs`.
+- Tests: new `tests/cli_args_escape.rs` drives the real binary with an OSC 52
+  payload in `--env` name and reference, `--ref`, `--expires`, `--length`, an
+  unknown flag and `--db` (both the permissions warning and the open error),
+  asserting no raw ESC/BEL in stdout or stderr and that both are named.
+  Verified all three tests fail at HEAD f4bea69. Unit tests in
+  `src/store/tests.rs` and `src/grant/validate.rs` cover the validators.
+- Gate: `cargo fmt --check`, clippy `-D warnings`, full `cargo test` pass.
+- **Next iteration must know:** `--tag` on `add`/`grant create` is validated
+  after the password prompt, so no integration case was added for it; the
+  validator unit test covers it. `escape_hidden` is the display default;
+  quoted contexts must use `escape_quoted`. Remaining Phase R items R.31–R.33
+  are untouched.
+
 ## 2026-11-03 — Review of 4a16226..2208a50
 
 - 4 findings: 1 authorization (R.31), 1 unsafe input/output or terminal

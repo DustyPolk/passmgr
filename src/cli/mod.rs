@@ -21,6 +21,7 @@ use std::io::{self, Write};
 
 use passmgr::Error;
 use passmgr::error::{EXIT_OK, EXIT_USAGE};
+use passmgr::text::escape_hidden;
 
 // Only the unit tests in this module use these; the command modules import
 // their own copies.
@@ -37,7 +38,7 @@ pub(crate) fn main() -> std::process::ExitCode {
     match run() {
         Ok(code) => code,
         Err(CliError::Usage(message)) => {
-            eprintln!("passmgr: {message}");
+            eprintln!("passmgr: {}", escape_hidden(&message));
             eprintln!();
             eprintln!("{USAGE}");
             std::process::ExitCode::from(EXIT_USAGE)
@@ -94,7 +95,10 @@ pub(crate) fn stdout_write(arguments: std::fmt::Arguments<'_>) -> Result<(), Err
 }
 
 fn report_runtime_error(error: &Error) {
-    eprintln!("passmgr: {error}");
+    // Every field is already escaped at its own boundary; escaping the rendered
+    // line again is a no-op for that text and a backstop for a message added
+    // later that forgets to.
+    eprintln!("passmgr: {}", escape_hidden(&error.to_string()));
     match error {
         Error::VaultNotFound(_) => {
             eprintln!("hint: create a vault with 'passmgr add <service> <username>'.");

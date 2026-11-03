@@ -7,6 +7,7 @@ use passmgr::agent;
 use passmgr::password;
 use passmgr::store::{self, Credential};
 use passmgr::terminal;
+use passmgr::text::escape_path;
 use passmgr::timestamp;
 use passmgr::vault::{self, Vault};
 use zeroize::Zeroizing;
@@ -335,9 +336,9 @@ pub(crate) fn warn_insecure(path: &Path) -> Result<(), Error> {
     if let Some(mode) = vault::insecure_permissions(path) {
         eprintln!(
             "warning: '{}' has permissions {mode:04o}; other users may be able to read it",
-            path.display()
+            escape_path(path)
         );
-        eprintln!("         fix with: chmod 600 '{}'", path.display());
+        eprintln!("         fix with: chmod 600 '{}'", escape_path(path));
     }
     Ok(())
 }

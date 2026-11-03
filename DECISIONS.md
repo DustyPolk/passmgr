@@ -572,6 +572,15 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   Paths taken from argv (`--out`) go through the same escape before they are
   echoed, on success and in the existing-file error, because an agent may
   have suggested the path (TODO R.29).
+- Escaping lives in `src/text.rs`, which owns the hidden-character table and
+  the three renderers (`escape_hidden`, `escape_quoted`, `escape_path`);
+  `store` and `grant` validators escape the value they echo, and the CLI
+  printer in `src/cli/mod.rs` escapes every error line again as a backstop
+  (TODO R.30). The second pass is a no-op on already escaped text, so a
+  message added later that forgets its own escape still cannot drive the
+  terminal. `tests/cli_args_escape.rs` drives the real binary with an OSC 52
+  payload in `--env` name/reference, `--ref`, `--expires`, `--length`, an
+  unknown flag and `--db`, and fails on any raw ESC/BEL in either stream.
 - `pm grant create` mints a `GrantToken` of 32 random bytes, held in
   `Zeroizing`, with a redacting `Debug`. Its lowercase hex is written only to
   `--out` (opened `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, then `fsync`); an

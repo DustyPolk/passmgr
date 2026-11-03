@@ -39,6 +39,7 @@ use getrandom::fill;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
+use crate::text::escape_quoted;
 
 mod payload;
 pub use payload::{Payload, decode, encode};
@@ -140,7 +141,8 @@ impl EntryId {
     pub fn parse_ref(reference: &str) -> Result<Self> {
         let invalid = || {
             Error::InvalidInput(format!(
-                "invalid entry reference '{reference}': expected {ENTRY_REF_PREFIX}<{ENTRY_ID_HEX_CHARS} hex characters>"
+                "invalid entry reference '{}': expected {ENTRY_REF_PREFIX}<{ENTRY_ID_HEX_CHARS} hex characters>",
+                escape_quoted(reference)
             ))
         };
         let hex = reference
@@ -414,14 +416,17 @@ pub fn validate_tag(tag: &str) -> Result<()> {
     let first = chars.next().expect("the tag is not empty");
     if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
         return Err(Error::InvalidInput(format!(
-            "invalid tag '{tag}': must start with a lowercase letter or digit"
+            "invalid tag '{}': must start with a lowercase letter or digit",
+            escape_quoted(tag)
         )));
     }
     if let Some(bad) = chars
         .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.')))
     {
         return Err(Error::InvalidInput(format!(
-            "invalid tag '{tag}': '{bad}' is not allowed (use lowercase letters, digits, '-', '_' or '.')"
+            "invalid tag '{}': '{}' is not allowed (use lowercase letters, digits, '-', '_' or '.')",
+            escape_quoted(tag),
+            escape_quoted(&bad.to_string())
         )));
     }
     Ok(())

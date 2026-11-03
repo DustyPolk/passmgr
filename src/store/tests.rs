@@ -229,6 +229,31 @@ fn version_2_payload_is_migrated_without_data_loss() {
     assert_eq!(reopened[0].id(), migrated[0].id());
 }
 
+/// A tag or reference typed on the command line reaches a human inside an
+/// error message, so a control character in it must be named, not executed.
+#[test]
+fn rejection_messages_escape_control_characters() {
+    let attack = "bad\u{1b}]52;c;ZXZpbA==\u{7}";
+
+    let error = validate_tag(attack).unwrap_err().to_string();
+    assert!(error.contains(r"\u{1b}"), "{error}");
+    assert!(!error.contains('\u{1b}'), "{error}");
+    assert!(!error.contains('\u{7}'), "{error}");
+
+    // The second branch echoes the offending character itself, so a lone
+    // control character there needs the same treatment.
+    let error = validate_tag("ok\u{7}").unwrap_err().to_string();
+    assert!(error.contains(r"\u{7}"), "{error}");
+    assert!(!error.contains('\u{7}'), "{error}");
+
+    let error = EntryId::parse_ref(&format!("pm://{attack}"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(r"\u{1b}"), "{error}");
+    assert!(!error.contains('\u{1b}'), "{error}");
+    assert!(!error.contains('\u{7}'), "{error}");
+}
+
 #[test]
 fn tag_validation_rejects_ambiguous_names() {
     for bad in [

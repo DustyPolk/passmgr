@@ -30,6 +30,7 @@ use passmgr::grant::{
 use passmgr::protocol::{
     GrantCreateRequest, GrantRevokeRequest, ProveRequest, Request, Response, ResponseError,
 };
+use passmgr::text::escape_path;
 use passmgr::timestamp;
 use passmgr::token::SessionToken;
 use passmgr::{client, session, socket, vault};
@@ -415,7 +416,7 @@ pub(crate) fn command_grant_show(
         grant
             .commands()
             .iter()
-            .map(|command| command.display().to_string())
+            .map(|command| escape_path(command))
             .collect::<Vec<_>>()
             .join(", ")
     )

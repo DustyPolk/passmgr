@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use super::{MAX_COMMANDS, MAX_FIELD_NAME_BYTES, MAX_LABEL_BYTES};
 use crate::error::{Error, Result};
 use crate::protocol::MAX_PATH_BYTES;
+use crate::text::{escape_quoted, is_hidden_or_reordering};
 
 /// The classes of character a grant label or command path may not contain,
 /// spelled the same way in the rejection error, `FORMAT.md` and
@@ -38,99 +39,6 @@ pub(super) fn validate_label(label: &str) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-/// Characters that are invisible, reorder neighbouring text, or can hide part
-/// of a string from a human reading it.
-///
-/// Both callers store the text verbatim and later show it to a human -- the
-/// label in `pm grant list`, each command path in the approval prompt -- and
-/// from TODO 4.9 the text may come from an agent request, so this module
-/// rejects the whole class instead of trusting the renderer. Covered: C0/C1
-/// controls;
-/// every Unicode **format** character (`Cf`) this build knows, which includes
-/// the bidi controls (U+061C, U+200E/U+200F, U+202A-U+202E, U+2066-U+2069),
-/// the zero-width set (U+200B-U+200D, U+2060-U+2064), soft hyphen, the tag
-/// characters and U+FEFF; the line and paragraph separators (U+2028/U+2029);
-/// and every variation selector (U+FE00-U+FE0F, U+E0100-U+E01EF), which are
-/// invisible combining marks rather than `Cf`.
-///
-/// VS15/VS16 (U+FE0E/U+FE0F) are refused on purpose even though they select a
-/// visible presentation: the rule is "store exactly what the human saw", and
-/// the sequence "heart + VS16" renders as an emoji while the bare heart
-/// renders as text. Accepting one variant and refusing the other would also
-/// bring back the invisible-mark class this table exists to keep out. A human
-/// can drop the selector ("❤ prod") or pick another emoji. Ordinary visible
-/// combining marks, emoji without a selector or joiner, accents and non-Latin
-/// scripts stay allowed.
-///
-/// Kept as an explicit table rather than a new dependency: a
-/// general-category crate for one check would be a new tree to vet, and a
-/// `Cf` character this list misses is rejected by the next review, not by a
-/// silent pass.
-fn is_hidden_or_reordering(character: char) -> bool {
-    if character.is_control() {
-        return true;
-    }
-    matches!(character,
-        '\u{00AD}'                       // soft hyphen
-        | '\u{0600}'..='\u{0605}'        // Arabic number signs
-        | '\u{061C}'                     // Arabic letter mark
-        | '\u{06DD}'                     // Arabic end of ayah
-        | '\u{070F}'                     // Syriac abbreviation mark
-        | '\u{0890}'..='\u{0891}'        // Arabic pound/piastre marks
-        | '\u{08E2}'                     // Arabic disputed end of ayah
-        | '\u{180E}'                     // Mongolian vowel separator
-        | '\u{200B}'..='\u{200F}'        // zero-width + LRM/RLM
-        | '\u{202A}'..='\u{202E}'        // bidi embeddings/overrides
-        | '\u{2060}'..='\u{2064}'        // word joiner + invisible operators
-        | '\u{2066}'..='\u{206F}'        // bidi isolates + deprecated formats
-        | '\u{2028}'..='\u{2029}'        // line/paragraph separators
-        | '\u{FE00}'..='\u{FE0F}'        // variation selectors
-        | '\u{FEFF}'                     // zero-width no-break space (BOM)
-        | '\u{FFF9}'..='\u{FFFB}'        // interlinear annotation
-        | '\u{110BD}' | '\u{110CD}'      // Kaithi number signs
-        | '\u{13430}'..='\u{1343F}'      // Egyptian hieroglyph controls
-        | '\u{1BCA0}'..='\u{1BCA3}'      // shorthand format controls
-        | '\u{1D173}'..='\u{1D17A}'      // musical symbol format controls
-        | '\u{E0001}'                    // language tag
-        | '\u{E0020}'..='\u{E007F}'      // tag characters
-        | '\u{E0100}'..='\u{E01EF}'      // variation selectors supplement
-    )
-}
-
-/// Render untrusted path text for a quoted error message.
-///
-/// Every character [`is_hidden_or_reordering`] refuses is written as its
-/// `\u{..}` escape, so a command such as `/usr/bin/gh\u{1b}[2K\r` is named in
-/// the error without moving the cursor or erasing the line around it. The
-/// quote and backslash are escaped too, so the quoted form cannot be closed
-/// early. Everything visible (including non-ASCII scripts) is kept as is.
-fn escape_quoted(text: &str) -> String {
-    escape(text, true)
-}
-
-/// Render untrusted text for display, escaping only what a terminal acts on.
-///
-/// Unlike [`escape_quoted`], visible characters — including quotes and
-/// backslashes — are kept exactly as written, so a human approval summary
-/// shows `Bob's token` and not `Bob\'s token`. A validated label or command
-/// cannot contain a hidden character, but escaping here means a caller cannot
-/// print one even if that validation is ever loosened.
-pub fn escape_hidden(text: &str) -> String {
-    escape(text, false)
-}
-
-fn escape(text: &str, quoted: bool) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for character in text.chars() {
-        if is_hidden_or_reordering(character) || (quoted && matches!(character, '\\' | '\'')) {
-            escaped.extend(character.escape_debug());
-        } else {
-            escaped.push(character);
-        }
-    }
-    escaped
 }
 
 /// Programs that can run another program, or code named by their arguments,
@@ -369,7 +277,8 @@ pub fn validate_field_name(name: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::InvalidInput(format!(
-            "invalid field name '{name}': expected 1-{MAX_FIELD_NAME_BYTES} characters of [a-z0-9_-]"
+            "invalid field name '{}': expected 1-{MAX_FIELD_NAME_BYTES} characters of [a-z0-9_-]",
+            escape_quoted(name)
         )))
     }
 }
@@ -377,6 +286,18 @@ pub fn validate_field_name(name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A field name from `--field` is echoed in the rejection, so a control
+    /// character must be escaped there rather than driven to the terminal.
+    #[test]
+    fn field_name_rejection_escapes_control_characters() {
+        let error = validate_field_name("bad\u{1b}]52;c;ZXZpbA==\u{7}")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(r"\u{1b}"), "{error}");
+        assert!(!error.contains('\u{1b}'), "{error}");
+        assert!(!error.contains('\u{7}'), "{error}");
+    }
 
     /// Program runners are recognised by their file name, including versioned
     /// interpreters, while ordinary programs (and lookalike names) are not.
@@ -443,19 +364,5 @@ mod tests {
         ] {
             assert!(!is_program_runner(Path::new(path)), "{path}");
         }
-    }
-
-    /// The display form keeps visible text exactly as written — a human must
-    /// see the label they approved, quotes and backslashes included — while a
-    /// hidden character a terminal would act on is shown as an escape.
-    #[test]
-    fn display_escaping_keeps_visible_text_and_escapes_hidden_text() {
-        assert_eq!(escape_hidden("Bob's token"), "Bob's token");
-        assert_eq!(escape_hidden(r"C:\vault"), r"C:\vault");
-        assert_eq!(
-            escape_hidden("/usr/bin/gh\u{1b}[2K\r"),
-            r"/usr/bin/gh\u{1b}[2K\r"
-        );
-        assert_eq!(escape_hidden("a\u{202e}b"), r"a\u{202e}b");
     }
 }

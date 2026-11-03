@@ -45,6 +45,13 @@ inherits every limit below.
 - **Redaction.** Child stdout and stderr are passed through a streaming
   redactor in `pmd` that replaces exact occurrences of the injected value,
   including values split across read and frame boundaries.
+- **Terminal safety for untrusted text.** Every value passmgr echoes that came
+  from an argument (a reference, tag, field name, `--env` name, duration, flag
+  or `--db` path) is rendered with hidden characters (C0/C1 controls, bidi
+  controls, zero-width and variation selectors) written as visible `\u{..}`
+  escapes. Validators escape the value they reject and the CLI printer escapes
+  every error line again as a backstop, so agent-supplied argv cannot emit an
+  OSC 52 clipboard write or erase the line it is printed on.
 - **Daemon hardening.** `pmd` keeps only the derived 32-byte vault key, not a
   decrypted vault, in `mlock`ed memory. It disables core dumps
   (`RLIMIT_CORE=0`, inherited by its children) and, on Linux, sets

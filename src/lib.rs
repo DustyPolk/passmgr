@@ -23,6 +23,7 @@ pub mod session;
 pub mod socket;
 pub mod store;
 pub mod terminal;
+pub mod text;
 pub mod timestamp;
 pub mod token;
 pub mod vault;
