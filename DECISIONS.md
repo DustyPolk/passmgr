@@ -485,6 +485,14 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   `Vault::save_with_key`; the latter also refuses, with `Error::Crypto`, a
   vault that has no source container (a brand-new file has no salt or KDF
   parameters to reuse).
+  Implemented in TODO 3.4c: `grant_create` decodes into `GrantCreateRequest`,
+  re-runs `GrantRequest::new` so the digest is always over the normalized
+  request, and refuses an expiry outside `(now, now + 30 days]` with
+  `bad_request` **before** `Approvals::take`; a request the vault writer
+  would refuse therefore never spends the human's approval. The wire fields
+  are flat like `run` (no nested `request` object) and `grant_approved`
+  carries nothing but its type. The daemon still never writes; the CLI in
+  3.4d owns the vault write.
 - The daemon canonicalizes `command[0]` itself (symlinks resolved), requires
   the result to stay absolute, and checks that canonical path against the
   grant's command allowlist immediately before spawning; a path it cannot

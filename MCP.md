@@ -217,6 +217,15 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   the same `denied` answer. A same-user process without the password cannot
   mint or approve grants. Revoking needs no proof, because it only removes
   access.
+- The daemon never writes a grant. After the proof, the approving CLI sends a
+  `grant_create` request carrying the already-normalized grant (label, scope,
+  command paths, capabilities, expiry, optional use limit) and the token's
+  SHA-256 — never the token. The daemon re-normalizes it with the same
+  constructor the CLI used, refuses one whose expiry is past or more than 30
+  days out *without* spending the approval, and otherwise spends the digest
+  and answers a bare `grant_approved`, which carries no token, hash, grant id
+  or label. The CLI that holds the raw token assigns the id and writes the
+  vault.
 - Interpreters and shells (`sh`, `bash`, `zsh`, `fish`, `dash`, `env`, `xargs`,
   `python*`, `node`, `perl`, `ruby`, `busybox`, …) in a command allowlist let
   the agent exfiltrate secrets in ways redaction cannot catch. Approval shows a

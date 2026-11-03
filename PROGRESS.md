@@ -1,3 +1,43 @@
+## 2026-11-03 — Add the `grant_create` request and daemon handler (TODO 3.4c)
+
+- New wire request/response: `Request::GrantCreate(GrantCreateRequest)` and
+  `Response::GrantApproved` (bare `{"type":"grant_approved"}`, no token,
+  hash, id or label). Fields are flat on the request object like `run`:
+  `label, refs (pm://), tags, fields?, commands, capabilities (bit number),
+  expires_at, max_uses?, token_hash (64 lowercase hex)`. Decoding rejects a
+  token hash that is not 64 lowercase hex, a bad ref, unknown capability
+  bits, an empty label and `max_uses: 0` at the frame boundary.
+- `src/daemon.rs` re-normalizes the payload through `GrantRequest::new` (so
+  the digest is over the canonical request), refuses an expiry that is past
+  or more than 30 days out with `bad_request` **without** spending the
+  approval, then calls `presence::Approvals::take` for the digest. Only a
+  successful take answers `grant_approved`; the daemon never opens or writes
+  the vault. The new `grant::validate_expiry` is shared with
+  `Grant::create`, so the daemon and the future writer cannot drift.
+- `TokenHash` gained lowercase `to_hex`/`from_hex` (no equality added; the
+  compile-fail doctest still guards `==`). `Response::GrantApproved` added to
+  `client.rs` and to the fixed-shape response test.
+- Tests: daemon unit `grant_create_is_accepted_only_for_the_digest_the_human_proved`
+  and `grant_create_refuses_an_expired_request_without_spending_the_approval`;
+  protocol round-trip plus exact-JSON and rejection tests; end-to-end
+  `tests/grant_create.rs::grant_create_spends_the_approval_once_without_writing_the_vault`
+  (raw socket has no token-hash hex or secret, replay denied, vault bytes
+  identical, daemon output clean). `Debug` for the request is redacted.
+- Split to satisfy the layout guard (no allowlist entry): daemon unit tests
+  moved verbatim to `src/daemon/tests.rs` (src/daemon.rs 824), `Capability`/
+  `Capabilities` moved to `src/grant/capabilities.rs` and re-exported
+  (src/grant.rs 931), and the new e2e test lives in `tests/grant_create.rs`
+  (tests/daemon.rs 957). `PENDING_SPLITS` stays empty.
+- Docs: MCP.md says the daemon only validates and spends the approval; the
+  CLI holding the raw token assigns the id and writes. DECISIONS.md records
+  the check-before-spend rule and the flat wire shape.
+- Gate: `fmt --check`, `clippy --all-targets -D warnings`, full `cargo test`
+  green (incl. doctests). `cargo audit` not installed; skipped.
+- **Next iteration must know:** 3.4d is the CLI side; it must build the
+  `GrantRequest` with a fresh 32-byte token, prove its digest, send
+  `grant_create`, then write with `open_with_key` + `lock_for_update` +
+  `save_with_key` and only then create `--out` with `O_EXCL`/0600.
+
 ## 2026-11-03 — Split the CLI tests and empty the layout allowlist (TODO R.20d)
 
 - `tests/cli.rs` 1,463 -> 975 lines (21 tests). The reveal/agent section moved

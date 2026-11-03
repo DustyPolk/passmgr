@@ -39,7 +39,7 @@ use crate::presence::RequestDigest;
 use crate::store::MAX_TIMESTAMP_UNIX;
 
 use super::validate::{validate_commands, validate_label};
-use super::{Capabilities, Grant, GrantSpec, Scope, TokenHash};
+use super::{Capabilities, Grant, GrantSpec, Scope, TokenHash, validate_expiry};
 
 /// Domain separator and digest version. A change to the encoding must change
 /// this string, so approvals minted by a different build never match.
@@ -110,6 +110,46 @@ impl GrantRequest {
             max_uses: spec.max_uses,
             token_hash,
         })
+    }
+
+    /// The validated label.
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The validated scope: entry refs, tag names and optional field names.
+    pub fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
+    /// Canonical absolute command paths, sorted and deduplicated.
+    pub fn commands(&self) -> &[String] {
+        &self.commands
+    }
+
+    pub fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+
+    pub fn expires_at(&self) -> u64 {
+        self.expires_at
+    }
+
+    pub fn max_uses(&self) -> Option<u32> {
+        self.max_uses
+    }
+
+    pub fn token_hash(&self) -> &TokenHash {
+        &self.token_hash
+    }
+
+    /// Check the expiry against `now` before an approval is spent.
+    ///
+    /// The daemon calls this for `grant_create`: it applies the same expiry
+    /// and 30-day lifetime rules [`Grant::create`] applies at write time, so a
+    /// human's approval is never spent on a request no write could accept.
+    pub fn check_approvable(&self, now: u64) -> Result<()> {
+        validate_expiry(self.expires_at, now)
     }
 
     /// The digest a human's presence proof must cover for this exact request.

@@ -12,8 +12,8 @@
 //! The `token` is the unlock session token (see [`crate::token`]) and is
 //! required on every request; the daemon rejects a missing or mismatched one
 //! with `unauthorized`. The `request` object always has a `"type"` field; the
-//! types this version knows are `ping`, `lock`, `run`, `challenge` and
-//! `prove`:
+//! types this version knows are `ping`, `lock`, `run`, `challenge`, `prove`
+//! and `grant_create`:
 //!
 //! ```json
 //! {"version":3,"token":"...","request":{"type":"ping"}}
@@ -25,7 +25,19 @@
 //! {"version":3,"token":"...","request":{"type":"challenge"}}
 //! {"version":3,"token":"...","request":{"type":"prove","nonce":"<64 hex>",
 //!                         "digest":"<64 hex>","proof":"<64 hex>"}}
+//! {"version":3,"token":"...","request":{"type":"grant_create",
+//!                         "label":"deploy","refs":["pm://..."],"tags":[],
+//!                         "fields":["password"],"commands":["/usr/bin/gh"],
+//!                         "capabilities":2,"expires_at":1700003600,
+//!                         "max_uses":2,"token_hash":"<64 hex>"}}
 //! ```
+//!
+//! `grant_create` asks the daemon to accept a grant a human just approved. It
+//! carries no secret value, only the token's SHA-256, and the daemon answers
+//! `grant_approved` without touching the vault: the CLI that holds the raw
+//! token assigns the id and writes the grant. The daemon re-normalizes the
+//! payload and requires that its digest matches the one-shot approval, so it
+//! can never mint or widen a grant on its own.
 //!
 //! `challenge`/`prove` are the human-presence proof (TODO 3.3): the daemon
 //! issues a single-use nonce and accepts a key-derived MAC over it exactly
@@ -84,7 +96,9 @@
 //! is refused instead of silently being served as if it were authenticated.
 
 use std::fmt;
+use std::path::PathBuf;
 
+use crate::grant::{Capabilities, GrantRequest, GrantSpec, Scope, TokenHash};
 use crate::presence::{ChallengeNonce, Proof, RequestDigest};
 use crate::store::EntryId;
 use crate::token::SessionToken;
@@ -166,6 +180,14 @@ pub enum Request {
     /// authorizes nothing by itself; the write for that request must present
     /// the same digest and consumes the approval exactly once.
     Prove(ProveRequest),
+    /// Accept the grant a human approved with a `prove` over its digest.
+    ///
+    /// The daemon re-normalizes the payload, checks it against the clock and
+    /// spends the one-shot approval. Answer: `grant_approved`, or `denied`
+    /// when the digest was not approved or the approval was already spent.
+    /// The daemon never opens the vault here and the answer carries no token,
+    /// hash or grant id; the CLI that holds the raw token writes the grant.
+    GrantCreate(GrantCreateRequest),
 }
 
 /// The `prove` payload: a MAC over a nonce and the digest of the request the
@@ -201,6 +223,86 @@ pub struct RunRequest {
     /// Absolute working directory the child starts in (the caller's cwd).
     pub cwd: String,
 }
+
+/// The `grant_create` payload: the exact grant a human approved.
+///
+/// A caller can only build one from an already normalized
+/// [`crate::grant::GrantRequest`]; the decoder builds one from untrusted JSON
+/// and [`validate_request`] re-normalizes it before anything else sees it.
+///
+/// The wire form carries no secret value: a label, entry references, tag and
+/// field names, command paths, capability bits, an expiry, an optional use
+/// limit and the SHA-256 of the grant token. The raw token never crosses the
+/// socket; the daemon re-derives the digest the human proved and spends that
+/// one-shot approval.
+#[derive(Clone, Debug)]
+pub struct GrantCreateRequest {
+    label: String,
+    references: Vec<EntryId>,
+    tags: Vec<String>,
+    fields: Option<Vec<String>>,
+    commands: Vec<String>,
+    capabilities: Capabilities,
+    expires_at: u64,
+    max_uses: Option<u32>,
+    token_hash: TokenHash,
+}
+
+impl GrantCreateRequest {
+    /// The wire payload for an already validated request.
+    pub fn from_grant_request(request: &GrantRequest) -> Self {
+        Self {
+            label: request.label().to_owned(),
+            references: request.scope().refs().to_vec(),
+            tags: request.scope().tags().to_vec(),
+            fields: request.scope().fields().map(<[String]>::to_vec),
+            commands: request.commands().to_vec(),
+            capabilities: request.capabilities(),
+            expires_at: request.expires_at(),
+            max_uses: request.max_uses(),
+            token_hash: *request.token_hash(),
+        }
+    }
+
+    /// Re-normalize the decoded payload exactly as the approving CLI did.
+    ///
+    /// Returns the canonical [`GrantRequest`], whose
+    /// [`GrantRequest::digest`] is the digest a `prove` must have covered. A
+    /// payload the vault writer would refuse is an
+    /// [`ProtocolError::InvalidRequest`].
+    pub fn into_grant_request(self) -> Result<GrantRequest, ProtocolError> {
+        let scope = Scope::new(self.references, self.tags, self.fields)
+            .map_err(|err| ProtocolError::InvalidRequest(err.to_string()))?;
+        GrantRequest::new(
+            GrantSpec {
+                label: self.label,
+                scope,
+                commands: self.commands.into_iter().map(PathBuf::from).collect(),
+                capabilities: self.capabilities,
+                expires_at: self.expires_at,
+                max_uses: self.max_uses,
+            },
+            self.token_hash,
+        )
+        .map_err(|err| ProtocolError::InvalidRequest(err.to_string()))
+    }
+}
+
+impl PartialEq for GrantCreateRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.label == other.label
+            && self.references == other.references
+            && self.tags == other.tags
+            && self.fields == other.fields
+            && self.commands == other.commands
+            && self.capabilities == other.capabilities
+            && self.expires_at == other.expires_at
+            && self.max_uses == other.max_uses
+            && self.token_hash.matches(&other.token_hash)
+    }
+}
+
+impl Eq for GrantCreateRequest {}
 
 /// A request together with the session token that authorized it.
 ///
@@ -325,6 +427,13 @@ impl std::error::Error for ProtocolError {}
 /// locally generated requests and peer-supplied ones must meet the same
 /// contract.
 fn validate_request(request: &Request) -> Result<(), ProtocolError> {
+    if let Request::GrantCreate(create) = request {
+        // Normalizing here means a payload the daemon could not turn into the
+        // same digest the human approved is rejected at the boundary, before
+        // it reaches the approval store.
+        create.clone().into_grant_request()?;
+        return Ok(());
+    }
     let Request::Run(run) = request else {
         return Ok(());
     };

@@ -51,6 +51,32 @@ fn prove_request() -> Request {
     })
 }
 
+fn grant_request() -> crate::grant::GrantRequest {
+    use crate::grant::{Capabilities, GrantRequest, GrantSpec, Scope};
+
+    GrantRequest::new(
+        GrantSpec {
+            label: "deploy prod".into(),
+            scope: Scope::new(
+                Vec::new(),
+                vec!["prod".into()],
+                Some(vec!["password".into()]),
+            )
+            .expect("scope"),
+            commands: vec!["/usr/bin/gh".into()],
+            capabilities: Capabilities::RUN,
+            expires_at: 1_700_003_600,
+            max_uses: Some(2),
+        },
+        crate::grant::TokenHash::of(b"grant-token"),
+    )
+    .expect("grant request")
+}
+
+fn grant_create() -> Request {
+    Request::GrantCreate(GrantCreateRequest::from_grant_request(&grant_request()))
+}
+
 /// Build a frame by hand, without going through `encode`.
 fn frame(body: &str) -> Vec<u8> {
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
@@ -66,10 +92,87 @@ fn round_trips_every_request() {
         Request::Challenge,
         prove_request(),
         run_request(),
+        grant_create(),
     ] {
         let encoded = encode(&request).expect("encode");
         assert_eq!(decode(&encoded).expect("decode"), request);
     }
+}
+
+#[test]
+fn grant_create_frames_carry_only_the_approved_fields() {
+    let encoded = encode(&grant_create()).expect("encode");
+    let value: Value = serde_json::from_slice(&encoded[4..]).expect("json");
+    let hash_hex = crate::grant::TokenHash::of(b"grant-token").to_hex();
+    assert_eq!(
+        value["request"],
+        serde_json::json!({
+            "type": "grant_create",
+            "label": "deploy prod",
+            "refs": [],
+            "tags": ["prod"],
+            "fields": ["password"],
+            "commands": ["/usr/bin/gh"],
+            "capabilities": crate::grant::Capabilities::RUN.bits(),
+            "expires_at": 1_700_003_600u64,
+            "max_uses": 2,
+            "token_hash": hash_hex,
+        })
+    );
+    // The token hash is derived from the raw token, so Debug must redact it.
+    let debug = format!("{:?}", grant_create());
+    assert!(!debug.contains(&hash_hex), "{debug}");
+    assert!(debug.contains("<redacted>"), "{debug}");
+}
+
+/// A decoded payload is re-normalized through the same constructor the
+/// approving CLI used, so a corrupted body cannot reach the approval store as
+/// a digest for something the human never saw.
+#[test]
+fn grant_create_rejects_payloads_the_vault_writer_would_refuse() {
+    let refused = |mutate: &dyn Fn(&mut serde_json::Map<String, Value>)| {
+        let encoded = encode(&grant_create()).expect("encode");
+        let mut value: Value = serde_json::from_slice(&encoded[4..]).expect("json");
+        mutate(value["request"].as_object_mut().expect("request"));
+        assert!(
+            matches!(
+                decode(&frame(&value.to_string())),
+                Err(ProtocolError::InvalidRequest(_))
+            ),
+            "payload must be refused"
+        );
+    };
+
+    refused(&|request| {
+        request.insert("token_hash".into(), "AA".repeat(32).into());
+    });
+    refused(&|request| {
+        request.insert("token_hash".into(), "00".repeat(31).into());
+    });
+    refused(&|request| {
+        request.insert("token_hash".into(), "zz".repeat(32).into());
+    });
+    refused(&|request| {
+        request.insert("label".into(), "".into());
+    });
+    refused(&|request| {
+        request.insert("refs".into(), serde_json::json!(["not-a-ref"]));
+    });
+    refused(&|request| {
+        request.insert("capabilities".into(), serde_json::json!(0));
+    });
+    refused(&|request| {
+        request.insert("capabilities".into(), serde_json::json!(8));
+    });
+    refused(&|request| {
+        request.insert("max_uses".into(), serde_json::json!(0));
+    });
+    refused(&|request| {
+        request.insert(
+            "expires_at".into(),
+            serde_json::json!(crate::store::MAX_TIMESTAMP_UNIX + 1),
+        );
+    });
 }
 
 #[test]

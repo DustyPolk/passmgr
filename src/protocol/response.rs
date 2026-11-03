@@ -31,6 +31,11 @@ pub enum Response {
     /// covered is now a one-shot approval: the write for exactly that request
     /// may proceed once, and nothing else can use the answer as consent.
     Proven,
+    /// A `grant_create` matched the one-shot approval the human proved and
+    /// was accepted. Carries no token, hash or grant id: the CLI that holds
+    /// the raw token assigns the id and writes the vault, so this answer is
+    /// useless to anyone who did not already possess the token.
+    GrantApproved,
     /// The request was rejected. The error is a fixed code, never echo of the
     /// request or of vault data.
     Error(ResponseError),
@@ -188,6 +193,7 @@ pub fn encode_response(response: &Response) -> Result<Vec<u8>, ProtocolError> {
         Response::Locked => json!({ "type": "locked" }),
         Response::Challenge(nonce) => json!({ "type": "challenge", "nonce": nonce.to_hex() }),
         Response::Proven => json!({ "type": "proven" }),
+        Response::GrantApproved => json!({ "type": "grant_approved" }),
         Response::Error(error) => json!({ "type": "error", "code": error.code() }),
     };
     encode_value(&json!({ "version": PROTOCOL_VERSION, "response": response }))
@@ -209,6 +215,7 @@ pub fn decode_response(frame: &[u8]) -> Result<Response, ProtocolError> {
         "locked" => Ok(Response::Locked),
         "challenge" => decode_challenge(response).map(Response::Challenge),
         "proven" => Ok(Response::Proven),
+        "grant_approved" => Ok(Response::GrantApproved),
         "error" => decode_error_code(response).map(Response::Error),
         other => Err(ProtocolError::UnknownResponse(truncate_type(other))),
     }
@@ -470,6 +477,7 @@ mod tests {
             Response::Locked,
             Response::Challenge(nonce),
             Response::Proven,
+            Response::GrantApproved,
             Response::Error(ResponseError::BadRequest),
             Response::Error(ResponseError::Unsupported),
             Response::Error(ResponseError::Unauthorized),
@@ -508,6 +516,14 @@ mod tests {
         assert_eq!(
             &error[4..],
             br#"{"response":{"code":"bad_request","type":"error"},"version":3}"#
+        );
+
+        // The approval answer is a bare type: no token, hash, grant id or
+        // label, so nothing about the grant it authorized can leak here.
+        let approved = encode_response(&Response::GrantApproved).expect("encode");
+        assert_eq!(
+            &approved[4..],
+            br#"{"response":{"type":"grant_approved"},"version":3}"#
         );
     }
 

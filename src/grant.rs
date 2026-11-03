@@ -120,6 +120,14 @@ fn hex_digit(byte: u8) -> Option<u8> {
     }
 }
 
+fn lowercase_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
 /// SHA-256 of a grant token's raw bytes.
 ///
 /// The raw token exists only in the MCP server's memory; the vault and every
@@ -178,106 +186,39 @@ impl TokenHash {
         }
         difference == 0
     }
+
+    /// Lowercase hex, the form the daemon protocol carries.
+    ///
+    /// The hash is not the token, but it is derived from one: never log or
+    /// display it. This exists so the wire format can be parsed at the
+    /// boundary, not so callers can print it.
+    pub fn to_hex(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut hex = String::with_capacity(TOKEN_HASH_BYTES * 2);
+        for byte in self.0 {
+            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        hex
+    }
+
+    /// Parse exactly [`TokenHash::to_hex`]'s lowercase form. Uppercase is
+    /// refused so one hash has exactly one encoding on the wire.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        if text.len() != TOKEN_HASH_BYTES * 2 {
+            return None;
+        }
+        let mut bytes = [0u8; TOKEN_HASH_BYTES];
+        for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+            bytes[index] = (lowercase_hex_digit(pair[0])? << 4) | lowercase_hex_digit(pair[1])?;
+        }
+        Some(Self(bytes))
+    }
 }
 
 impl fmt::Debug for TokenHash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("TokenHash(<redacted>)")
-    }
-}
-
-/// A single capability an agent may exercise. New capabilities are new
-/// variants plus a bit, never a reuse of an existing bit.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Capability {
-    /// Read names, usernames, tags and field names inside the scope.
-    List,
-    /// Run a command with secrets injected.
-    Run,
-}
-
-impl Capability {
-    /// The stable name used in JSON, the audit log and error messages.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::List => "list",
-            Self::Run => "run",
-        }
-    }
-
-    /// The single-bit flag this capability needs from a grant.
-    pub fn flag(self) -> Capabilities {
-        match self {
-            Self::List => Capabilities::LIST,
-            Self::Run => Capabilities::RUN,
-        }
-    }
-}
-
-/// A set of capabilities, stored as a bit field so the vault format can grow
-/// by one bit at a time.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Capabilities(u8);
-
-impl Capabilities {
-    pub const NONE: Self = Self(0);
-    pub const LIST: Self = Self(0b0001);
-    pub const RUN: Self = Self(0b0010);
-    /// Every bit this build understands. A stored value with any other bit is
-    /// refused rather than silently ignored.
-    pub const KNOWN: u8 = Self::LIST.0 | Self::RUN.0;
-
-    pub fn union(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    /// True when every capability in `other` is present.
-    pub fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
-    pub fn bits(self) -> u8 {
-        self.0
-    }
-
-    /// Rebuild a set from stored bits. Unknown bits and the empty set are
-    /// refused, so a corrupt or newer record cannot grant a capability this
-    /// build does not implement.
-    pub fn from_bits(bits: u8) -> Result<Self> {
-        if bits == 0 {
-            return Err(Error::InvalidInput(
-                "a grant needs at least one capability".into(),
-            ));
-        }
-        if bits & !Self::KNOWN != 0 {
-            return Err(Error::InvalidInput(format!(
-                "unknown grant capability bits {:#04b}",
-                bits & !Self::KNOWN
-            )));
-        }
-        Ok(Self(bits))
-    }
-
-    /// The capability names in a stable order, for `--json` and `pm grant show`.
-    pub fn names(self) -> Vec<&'static str> {
-        let mut names = Vec::new();
-        if self.contains(Self::LIST) {
-            names.push(Capability::List.name());
-        }
-        if self.contains(Self::RUN) {
-            names.push(Capability::Run.name());
-        }
-        names
-    }
-}
-
-impl fmt::Debug for Capabilities {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_set().entries(self.names()).finish()
     }
 }
 
@@ -586,6 +527,31 @@ pub struct StoredGrant {
     pub last_used: Option<u64>,
 }
 
+/// Check an absolute expiry against `now` and the 30-day cap.
+///
+/// Shared by [`Grant::create`] and [`GrantRequest::check_approvable`], so the
+/// daemon never spends a human's approval on a request no vault write could
+/// accept.
+pub(crate) fn validate_expiry(expires_at: u64, now: u64) -> Result<()> {
+    if expires_at <= now {
+        return Err(Error::InvalidInput(
+            "a grant must expire in the future".into(),
+        ));
+    }
+    if expires_at > MAX_TIMESTAMP_UNIX {
+        return Err(Error::InvalidInput(format!(
+            "grant expiry {expires_at} exceeds the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds"
+        )));
+    }
+    if expires_at - now > MAX_GRANT_LIFETIME_SECS {
+        return Err(Error::InvalidInput(format!(
+            "a grant may last at most {} days",
+            MAX_GRANT_LIFETIME_SECS / 86_400
+        )));
+    }
+    Ok(())
+}
+
 impl Grant {
     /// Create a brand-new grant (no uses yet, not revoked) from validated
     /// input and the hash of its token.
@@ -599,23 +565,7 @@ impl Grant {
                 "created timestamp {now} exceeds the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds"
             )));
         }
-        if spec.expires_at <= now {
-            return Err(Error::InvalidInput(
-                "a grant must expire in the future".into(),
-            ));
-        }
-        if spec.expires_at > MAX_TIMESTAMP_UNIX {
-            return Err(Error::InvalidInput(format!(
-                "grant expiry {} exceeds the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds",
-                spec.expires_at
-            )));
-        }
-        if spec.expires_at - now > MAX_GRANT_LIFETIME_SECS {
-            return Err(Error::InvalidInput(format!(
-                "a grant may last at most {} days",
-                MAX_GRANT_LIFETIME_SECS / 86_400
-            )));
-        }
+        validate_expiry(spec.expires_at, now)?;
         validate_label(&spec.label)?;
         if spec.capabilities.is_empty() {
             return Err(Error::InvalidInput(
@@ -923,9 +873,11 @@ impl fmt::Debug for Grant {
     }
 }
 
+mod capabilities;
 mod request;
 mod validate;
 
+pub use capabilities::{Capabilities, Capability};
 pub use request::GrantRequest;
 pub use validate::{LABEL_FORBIDDEN_CLASSES, validate_field_name};
 

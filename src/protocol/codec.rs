@@ -13,11 +13,13 @@
 use serde_json::{Map, Value, json};
 
 use super::{
-    AuthenticatedRequest, LENGTH_PREFIX_BYTES, MAX_BUFFERED_BYTES, MAX_MESSAGE_BYTES,
-    MAX_TYPE_CHARS, PROTOCOL_VERSION, ProtocolError, ProveRequest, Request, RunRequest,
-    validate_request,
+    AuthenticatedRequest, GrantCreateRequest, LENGTH_PREFIX_BYTES, MAX_BUFFERED_BYTES,
+    MAX_MESSAGE_BYTES, MAX_TYPE_CHARS, PROTOCOL_VERSION, ProtocolError, ProveRequest, Request,
+    RunRequest, validate_request,
 };
+use crate::grant::{Capabilities, TOKEN_HASH_BYTES, TokenHash};
 use crate::presence::{ChallengeNonce, Proof, RequestDigest};
+use crate::store::EntryId;
 use crate::token::SessionToken;
 
 /// Encode one authenticated request as a complete length-prefixed frame.
@@ -193,6 +195,18 @@ fn encode_body(token: &SessionToken, request: &Request) -> Result<Vec<u8>, Proto
             "digest": prove.digest.to_hex(),
             "proof": prove.proof.to_hex().as_str(),
         }),
+        Request::GrantCreate(create) => json!({
+            "type": "grant_create",
+            "label": create.label,
+            "refs": create.references.iter().map(|id| id.to_ref()).collect::<Vec<_>>(),
+            "tags": create.tags,
+            "fields": create.fields,
+            "commands": create.commands,
+            "capabilities": create.capabilities.bits(),
+            "expires_at": create.expires_at,
+            "max_uses": create.max_uses,
+            "token_hash": create.token_hash.to_hex(),
+        }),
     };
     let token = token.to_hex();
     let envelope = json!({
@@ -258,6 +272,7 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
             proof: Proof::from_hex(&required_string(request, "proof")?)
                 .ok_or_else(|| invalid_presence_field("proof"))?,
         }),
+        "grant_create" => Request::GrantCreate(decode_grant_create(request)?),
         other => {
             return Err(ProtocolError::UnknownRequest(
                 other.chars().take(MAX_TYPE_CHARS).collect(),
@@ -301,4 +316,71 @@ fn required_string_array(
             })
         })
         .collect()
+}
+
+fn required_u64(object: &Map<String, Value>, key: &str) -> Result<u64, ProtocolError> {
+    object
+        .get(key)
+        .ok_or_else(|| ProtocolError::MalformedJson(format!("missing '{key}'")))?
+        .as_u64()
+        .ok_or_else(|| {
+            ProtocolError::MalformedJson(format!("'{key}' must be a non-negative integer"))
+        })
+}
+
+/// Decode a `grant_create` body. The result is untrusted until
+/// [`validate_request`] re-normalizes it through the same constructor the
+/// approving CLI used.
+fn decode_grant_create(request: &Map<String, Value>) -> Result<GrantCreateRequest, ProtocolError> {
+    let references = required_string_array(request, "refs")?
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            EntryId::parse_ref(text).map_err(|_| {
+                ProtocolError::InvalidRequest(format!(
+                    "grant_create.refs[{index}] is not a valid pm:// reference"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let fields = match request.get("fields") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(required_string_array(request, "fields")?),
+    };
+    let bits = required_u64(request, "capabilities")?;
+    let capabilities = u8::try_from(bits)
+        .ok()
+        .and_then(|bits| Capabilities::from_bits(bits).ok())
+        .ok_or_else(|| {
+            ProtocolError::InvalidRequest(
+                "grant_create.capabilities has bits this version does not know".into(),
+            )
+        })?;
+    let max_uses = match request.get("max_uses") {
+        None | Some(Value::Null) => None,
+        Some(_) => {
+            let max = required_u64(request, "max_uses")?;
+            Some(u32::try_from(max).map_err(|_| {
+                ProtocolError::InvalidRequest("grant_create.max_uses is too large".into())
+            })?)
+        }
+    };
+    let token_hash =
+        TokenHash::from_hex(&required_string(request, "token_hash")?).ok_or_else(|| {
+            ProtocolError::InvalidRequest(format!(
+                "grant_create.token_hash must be {} lowercase hex characters",
+                TOKEN_HASH_BYTES * 2
+            ))
+        })?;
+    Ok(GrantCreateRequest {
+        label: required_string(request, "label")?,
+        references,
+        tags: required_string_array(request, "tags")?,
+        fields,
+        commands: required_string_array(request, "commands")?,
+        capabilities,
+        expires_at: required_u64(request, "expires_at")?,
+        max_uses,
+        token_hash,
+    })
 }

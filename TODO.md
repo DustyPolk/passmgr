@@ -332,7 +332,7 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       read-only vault and, with `Error::Crypto`, a vault that has no source
       container to copy the header from. Docs updated in `FORMAT.md` and
       `README.md`.
-- [ ] **3.4c `grant_create` request and daemon handler (TODO R.15b).**
+- [x] **3.4c `grant_create` request and daemon handler (TODO R.15b).**
       Protocol request `{type:"grant_create", request:{label, refs, tags,
       fields?, commands, capabilities, expires_at, max_uses?, token_hash}}
       and response `{type:"grant_approved"}` (no token, hash or grant id in
@@ -347,6 +347,12 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       `grant_create(B)` is refused; `prove(A)` then `grant_create(A)`
       succeeds exactly once and a replay is refused; the vault is byte-identical
       after both; response JSON has no secret material.
+      Done: fields are flat on the request object like `run`, not nested under
+      a `request` key. `GrantRequest::check_approvable` reuses the new
+      `grant::validate_expiry`, so a request no write could accept is
+      `bad_request` and leaves the approval unspent. A hash that is not 64
+      lowercase hex, a bad ref, unknown capability bits, an empty label and
+      `max_uses: 0` are refused at the boundary.
 - [ ] **3.4d `pm grant create` CLI** (TTY + master password via the proof,
       refused in agent context with exit 5). Flags: `--label`, `--ref`/`--tag`
       (repeatable), `--command PATH` (repeatable; resolved to a canonical

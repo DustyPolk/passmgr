@@ -16,9 +16,9 @@
 //!
 //! Every request is untrusted and any same-user process can connect. The
 //! daemon therefore has no request type that returns a secret; see
-//! [`crate::protocol`]. It answers `ping`, `lock`, `challenge` and `prove`,
-//! and `run` streams the child's already-redacted output plus an exit status
-//! (TODO 2.6c). There is no request that returns a value.
+//! [`crate::protocol`]. It answers `ping`, `lock`, `challenge`, `prove` and
+//! `grant_create`, and `run` streams the child's already-redacted output plus
+//! an exit status (TODO 2.6c). There is no request that returns a value.
 //!
 //! `challenge`/`prove` implement the human-presence proof (TODO 3.3, see
 //! [`crate::presence`]): the daemon issues a single-use 60-second nonce and
@@ -27,7 +27,9 @@
 //! grants nothing by itself, because a later write must present that same
 //! digest and spends it once. Nothing here can mint or widen a grant on its
 //! own; the daemon only ever *checks* a proof, it never computes one for a
-//! caller.
+//! caller. `grant_create` goes one step further without ever writing: it
+//! re-normalizes the request, requires the same digest, and spends the
+//! approval. The CLI that owns the raw token writes the grant.
 //!
 //! # Lifetime
 //!
@@ -66,7 +68,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use zeroize::Zeroizing;
 
@@ -78,7 +80,7 @@ use crate::protocol::{
 use crate::runner;
 use crate::session;
 use crate::socket::{DaemonSocket, RuntimePaths, SocketError};
-use crate::store::EntryId;
+use crate::store::{EntryId, MAX_TIMESTAMP_UNIX};
 use crate::token::{SessionToken, TOKEN_BYTES};
 use crate::vault::Vault;
 
@@ -637,7 +639,49 @@ fn handle_connection(
             }
         }
         Request::Run(request) => Handled::Run(stream, request),
+        Request::GrantCreate(create) => {
+            // Never writes the vault: this only checks that the human approved
+            // exactly this request. The CLI that holds the raw token writes
+            // the grant afterwards, so even a forged approval cannot mint one
+            // here, and nothing the caller sends can add a field to it.
+            let Some(now) = unix_now() else {
+                return reject(&mut stream, ResponseError::Internal);
+            };
+            let response = match create.into_grant_request() {
+                Ok(request) if request.check_approvable(now).is_err() => {
+                    // Expired, out of range, or longer than 30 days: no write
+                    // could accept it, so do not spend the approval.
+                    Response::Error(ResponseError::BadRequest)
+                }
+                Ok(request) => {
+                    if approvals.take(&request.digest(), Instant::now()).is_ok() {
+                        Response::GrantApproved
+                    } else {
+                        // Unknown or already-spent digest, and a digest for a
+                        // different request are all indistinguishable.
+                        Response::Error(ResponseError::Denied)
+                    }
+                }
+                Err(_) => Response::Error(ResponseError::BadRequest),
+            };
+            let approved = matches!(response, Response::GrantApproved);
+            let _ = write_response(&mut stream, &response);
+            if approved {
+                Handled::Served
+            } else {
+                Handled::Rejected
+            }
+        }
     }
+}
+
+/// The wall clock in Unix seconds, or `None` if it is unusable.
+///
+/// Grant expiry is absolute, so it needs the wall clock; the idle timeout and
+/// approvals use a monotonic `Instant` instead.
+fn unix_now() -> Option<u64> {
+    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    (seconds <= MAX_TIMESTAMP_UNIX).then_some(seconds)
 }
 
 /// Answer with a one-shot error and count the connection as rejected.
@@ -777,171 +821,4 @@ fn read_request(stream: &mut UnixStream) -> Result<protocol::AuthenticatedReques
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn handover_bytes(key: &[u8], token: &SessionToken) -> Vec<u8> {
-        let mut bytes = key.to_vec();
-        bytes.extend_from_slice(token.as_bytes());
-        bytes
-    }
-
-    #[test]
-    fn reads_exactly_one_key_and_token_and_rejects_short_input() {
-        let key = [7u8; KEY_LEN];
-        let token = SessionToken::from_bytes(&[0x42u8; TOKEN_BYTES]).expect("token");
-        let bytes = handover_bytes(&key, &token);
-
-        let mut reader = &bytes[..];
-        let handover = read_handover(&mut reader).expect("valid handover");
-        assert_eq!(handover.key().as_slice(), &key);
-        assert!(handover.token().matches(&token));
-
-        for length in [0usize, 1, KEY_LEN - 1, KEY_LEN, KEY_LEN + TOKEN_BYTES - 1] {
-            let mut reader = &bytes[..length];
-            assert!(
-                matches!(read_handover(&mut reader), Err(DaemonError::KeyHandover(_))),
-                "{length} bytes must be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_trailing_bytes_after_the_key_and_token() {
-        let key = [9u8; KEY_LEN];
-        let token = SessionToken::from_bytes(&[1u8; TOKEN_BYTES]).expect("token");
-        let mut bytes = handover_bytes(&key, &token);
-        bytes.push(0);
-        let mut reader = &bytes[..];
-        assert!(matches!(
-            read_handover(&mut reader),
-            Err(DaemonError::KeyHandover(_))
-        ));
-    }
-
-    #[test]
-    fn handover_debug_never_contains_key_or_token_bytes() {
-        let key = [0xABu8; KEY_LEN];
-        let token = SessionToken::from_bytes(&[0xCDu8; TOKEN_BYTES]).expect("token");
-        let bytes = handover_bytes(&key, &token);
-        let mut reader = &bytes[..];
-        let handover = read_handover(&mut reader).expect("valid handover");
-        let text = format!("{handover:?}");
-        assert!(!text.contains("171"), "{text}");
-        assert!(!text.contains("205"), "{text}");
-        assert!(text.contains("redacted"), "{text}");
-    }
-
-    #[test]
-    fn locked_key_length_is_checked() {
-        let key = Zeroizing::new(vec![0u8; KEY_LEN + 1]);
-        assert!(matches!(
-            LockedKey::new(key),
-            Err(DaemonError::KeyHandover(_))
-        ));
-    }
-
-    #[test]
-    fn debug_output_never_contains_key_bytes() {
-        let key = Zeroizing::new(vec![0xABu8; KEY_LEN]);
-        let locked = LockedKey::new(key).expect("valid key");
-        let text = format!("{locked:?}");
-        assert!(!text.contains("AB") && !text.contains("171"), "{text}");
-        assert!(text.contains("LockedKey"));
-    }
-
-    #[test]
-    fn key_handover_errors_do_not_echo_bytes() {
-        let mut reader = &b"short"[..];
-        let error = read_handover(&mut reader).unwrap_err();
-        assert!(!error.to_string().contains("short"));
-    }
-
-    #[test]
-    fn idle_timeout_parser_accepts_positive_seconds_only() {
-        assert_eq!(parse_idle_timeout("60").unwrap(), Duration::from_secs(60));
-        assert_eq!(parse_idle_timeout("1").unwrap(), Duration::from_secs(1));
-        assert_eq!(DEFAULT_IDLE_TIMEOUT, Duration::from_secs(900));
-
-        for bad in ["0", "", "-1", "1.5", "15m", " 60"] {
-            assert!(parse_idle_timeout(bad).is_err(), "'{bad}' must be rejected");
-        }
-    }
-
-    /// Serve one `prove` over a socket pair and return the daemon's answer.
-    fn prove_round_trip(
-        token: &SessionToken,
-        key: &LockedKey,
-        digest: presence::RequestDigest,
-        challenges: &mut presence::Challenges,
-        approvals: &mut presence::Approvals,
-    ) -> Response {
-        let nonce = challenges.issue(Instant::now()).expect("issue");
-        let proof = presence::Proof::compute(key.as_slice(), &nonce, &digest).expect("compute");
-        let frame = protocol::encode(
-            token,
-            &Request::Prove(protocol::ProveRequest {
-                nonce,
-                digest,
-                proof,
-            }),
-        )
-        .expect("encode");
-        let (server, mut client) = UnixStream::pair().expect("socket pair");
-        client.write_all(&frame).expect("send request");
-        assert!(matches!(
-            handle_connection(server, token, key, challenges, approvals),
-            Handled::Served
-        ));
-
-        let mut prefix = [0u8; 4];
-        client.read_exact(&mut prefix).expect("read length");
-        let length = u32::from_be_bytes(prefix) as usize;
-        let mut frame = vec![0u8; 4 + length];
-        frame[..4].copy_from_slice(&prefix);
-        client.read_exact(&mut frame[4..]).expect("read body");
-        protocol::decode_response(&frame).expect("decode response")
-    }
-
-    /// `Proven` records the digest that was actually proven, and only that
-    /// one: approving A can never authorize a write for B, and an approval is
-    /// spent by its first consumer. This is the daemon half of TODO R.15; the
-    /// write that spends an approval arrives with TODO 3.4.
-    #[test]
-    fn a_verified_proof_records_exactly_the_digest_it_covered() {
-        let key = LockedKey::new(Zeroizing::new(vec![0x5Au8; KEY_LEN])).expect("key");
-        let token = SessionToken::generate().expect("token");
-        let mut challenges = presence::Challenges::new();
-        let mut approvals = presence::Approvals::new();
-        let approved = presence::RequestDigest::new([0xA1; 32]);
-        let other = presence::RequestDigest::new([0xB2; 32]);
-
-        assert_eq!(
-            prove_round_trip(&token, &key, approved, &mut challenges, &mut approvals),
-            Response::Proven
-        );
-        assert_eq!(approvals.pending(), 1, "exactly one digest was recorded");
-        assert_eq!(
-            approvals.take(&other, Instant::now()),
-            Err(presence::PresenceError::NotApproved),
-            "approving A must not authorize B"
-        );
-        assert_eq!(approvals.take(&approved, Instant::now()), Ok(()));
-        assert_eq!(
-            approvals.take(&approved, Instant::now()),
-            Err(presence::PresenceError::NotApproved),
-            "an approval authorizes exactly one write"
-        );
-
-        // A later proof records the digest it covered, not the old one.
-        assert_eq!(
-            prove_round_trip(&token, &key, other, &mut challenges, &mut approvals),
-            Response::Proven
-        );
-        assert_eq!(
-            approvals.take(&approved, Instant::now()),
-            Err(presence::PresenceError::NotApproved)
-        );
-        assert_eq!(approvals.take(&other, Instant::now()), Ok(()));
-    }
-}
+mod tests;
