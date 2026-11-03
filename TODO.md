@@ -9,6 +9,97 @@ Rules that apply to every item:
   absent from stdout, stderr and logs).
 - No new network-capable dependency. Justify any new dependency in `PROGRESS.md`.
 
+## Phase R — review findings (fix first)
+
+- [ ] **R.15 `prove` answers "approved" without recording what was approved,
+      and the test that claims digest binding only re-tests the HMAC.**
+      `src/daemon.rs:607-627` spends the nonce, verifies
+      `HMAC(key, DOMAIN||nonce||digest)` over the client-supplied
+      `ProveRequest.digest`, returns `Response::Proven` (a unit variant,
+      `src/protocol/response.rs:31`) and keeps no record of that digest. The
+      daemon therefore learns only "a key holder MAC'd these 32 bytes"; it
+      never learns that a human approved the request it is about to perform.
+      `tests/daemon.rs:515-552` is named "A proof for one digest cannot
+      approve a different one" but computes the proof over digest `0x11` and
+      presents it with digest `0x12` — a plain MAC mismatch; it would stay
+      green if one `Proven` authorized any later write. Failure (latent: 3.4
+      owns the write): the agent files request R1, the human approves digest
+      D1, and the agent then submits R2 with digest D2; a daemon that treats
+      any recent `Proven` as approval mints R2. `PROGRESS.md` (3.3 entry)
+      already notes the separate-`prove` shape cannot authorize a write, but
+      nothing in this range can bind a digest to an approval. Fix: either
+      fold the proof into the write request so one request verifies and
+      writes, or store `(nonce, digest)` as a spent approval and require the
+      write to present the same digest; drop the misleading test comment.
+      Test: complete `prove` for digest A, submit a create whose canonical
+      digest is B, and assert it is refused and writes nothing; then assert
+      A-then-A succeeds exactly once.
+
+- [ ] **R.16 Any session-token holder can occupy all 16 challenge slots and
+      block human approval.**
+      `MAX_PENDING_CHALLENGES` (`src/presence.rs:56`) is global; `issue`
+      (`src/presence.rs:282-292`) prunes only when called and otherwise
+      refuses at the cap; `Request::Challenge` (`src/daemon.rs:593-605`)
+      needs only the session token, which the MCP agent holds by design
+      (`SECURITY.md`: any same-user process can read the 0600 session file).
+      Failure (confirmed by the code; same-user DoS is partly accepted, but
+      this one silently blocks the only path that mints a grant): the agent
+      sends 16 `challenge` requests, then the human's `pm grant approve`
+      gets `busy` ("too many outstanding challenges") and cannot approve;
+      repeat every 59 s to sustain it. No unauthorized access results, but
+      the approval flow is the boundary and must not be starvable by the
+      party it constrains. Fix: evict the oldest pending nonce (or reserve a
+      small per-connection allowance) instead of failing the human, and
+      record the choice in `DECISIONS.md`. Test: fill the pool, then assert
+      a new `challenge` still succeeds, the evicted nonce is refused and the
+      newest works; add a daemon test where approval succeeds after 16
+      agent-issued challenges.
+
+- [ ] **R.17 `store::encode` can write a payload its own decoder rejects, so
+      one bad timestamp bricks the vault.**
+      `Grant::from_stored` (`src/grant.rs:616-641`) rejects `revoked_at` /
+      `last_used` above `MAX_TIMESTAMP_UNIX`, but `Grant::mark_used`
+      (`src/grant.rs:798-803`) and `Grant::revoke` (`src/grant.rs:805-810`)
+      accept any `u64`, and `store::encode` (`src/store.rs:547-600`) checks
+      only credential timestamps (`validate_timestamps`, `src/store.rs:683`)
+      and grant-id uniqueness, never the grant invariants. Verified in a
+      scratch crate: `grant.revoke(u64::MAX - 1)` -> `encode` succeeds (191
+      bytes) -> `decode` fails with `malformed vault: revoked_at timestamp
+      18446744073709551614 exceeds the maximum of 253402300799 Unix
+      seconds`. Failure (latent: no caller today, 3.5/3.6 add some):
+      `Vault::save` replaces the good vault with the unreadable payload and
+      every later open fails `MalformedVault`; all credentials are lost.
+      `now_unix()` (`src/store.rs:215`) guards its own callers, so this needs
+      a caller that passes a raw value, but the writer must never emit what
+      its reader refuses. Fix: bound `now` in `mark_used`/`revoke` (same
+      `MAX_TIMESTAMP_UNIX` check, error return) and re-validate grants in
+      `encode` before producing bytes. Test: `mark_used(MAX_TIMESTAMP_UNIX +
+      1)` and `revoke(MAX_TIMESTAMP_UNIX + 1)` must error, and a round-trip
+      property test over every public `Grant` constructor must hold (`encode`
+      then `decode` succeeds).
+
+- [ ] **R.18 The label rejection table is broader than every document and
+      error message that describes it.**
+      `is_hidden_or_reordering` (`src/grant.rs:880-909`) rejects variation
+      selectors U+FE00-FE0F, so `Grant::create` refuses a normal emoji
+      presentation label such as "❤️ prod" (U+2764 U+FE0F) with "a grant
+      label must not contain control, bidi or zero-width characters"
+      (`src/grant.rs:855-857`). But `FORMAT.md:149` lists only "control, bidi
+      or zero-width", and `DECISIONS.md:358-359` says "an emoji without a
+      zero-width joiner ... is allowed"; only `DECISIONS.md:354-355`
+      mentions variation selectors, and the error names none of the extra
+      classes (VS, U+2028/U+2029, tag characters). `tests/grant.rs:236-266`
+      never uses U+FE0F, so the table cannot catch the regression.
+      Failure: a human approving a grant for "❤️ prod" is refused with a
+      message that names the wrong character class; 3.5 will pin whichever
+      behavior ships. Fix: decide explicitly — either allow VS15/VS16 (they
+      select a visible presentation, they do not hide text) and drop those
+      ranges, or keep rejecting them and say so in `FORMAT.md`,
+      `DECISIONS.md` and the error message. Test: add "❤️ prod" and a
+      genuine VS1-14 case to the accept/reject table with the chosen
+      outcome, and add a `tests/docs.rs` contract so the documents cannot
+      drift from the table again.
+
 ## Phase 3 — grants and audit log
 
 The design for grants, approval and audit lives in `MCP.md` ("Grants and the

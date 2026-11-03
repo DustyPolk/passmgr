@@ -1,3 +1,40 @@
+## 2026-11-03 — Review of 92448eda..a51e85fe
+
+- Findings: 4 — authorization/approval binding 1 (R.15), availability of the
+  approval path 1 (R.16), data integrity / format asymmetry 1 (R.17), doc and
+  error-message drift 1 (R.18). Details in `TODO.md` under "Phase R". R.15
+  and R.17 are latent (no write/caller yet) but shape 3.4-3.6; R.16 is live
+  today for any process that can read the session file.
+- Checked and judged sound, so the next reviewer need not redo it: R.11 list
+  scope (`AccessRequest` enum; both variants go through `authorizes`,
+  `matches_field(None)` only for an unrestricted grant, tests use in- and
+  out-of-scope refs and tags); R.12 relay reaping (no `Child` in `relay`, test
+  proves the leader stays `Z` across three poll slices and cancel reaps the
+  group); R.13 `TokenHash` has no `PartialEq` outside the compile_fail
+  doctest, `matches` is constant-time, `Debug` redacted; R.14 table is
+  independent of the module table and the tests use their own codepoint list.
+  Store v5: v4 credential bytes are unchanged, v1-v4 decode with no grants,
+  unknown capability/flag bits and field modes are malformed, counts and
+  lengths are capped, duplicate ids rejected, `Payload` `Debug` hides
+  passwords and token hashes, and no stored field can fail to round-trip
+  except the timestamp gap in R.17. Presence: pinned HMAC vector, nonce
+  spent before the MAC check, every nonce/MAC failure answers `denied`, proof
+  `Debug` redacted and zeroized, 60 s expiry / 16-cap tests, challenge and
+  prove are session-token-gated, and no proof hex reaches `pmd`
+  stdout/stderr (e2e canary).
+- Adversarial input: `store::decode` survived 2.4 M random/structured
+  payloads and 600 k mutations (bit flips, truncation, insertion) of a valid
+  v5 payload holding a credential and a grant with refs, tags, field scope
+  and commands; `protocol::decode`, `decode_response` and the presence hex
+  parsers survived the same corpus. No panic and no unbounded allocation.
+  `cargo test`, `cargo fmt --check` and `cargo clippy --all-targets -- -D
+  warnings` are clean; `cargo audit` is not installed (unchanged from 3.3).
+- Nits not filed: `Vault::is_empty` still tests only credentials (a
+  grants-only vault reports empty; only tests call it), the trailing-byte
+  error in `store::decode` says "after credential data" even for a grant
+  tail, and the daemon-output canary in `tests/daemon.rs` checks only the
+  first proof, not the one issued after the replay attempt.
+
 ## 2026-11-03 — Human-presence proof in the daemon (TODO 3.3)
 
 - New `src/presence.rs`: `ChallengeNonce` (32 random bytes, hex on the wire),
