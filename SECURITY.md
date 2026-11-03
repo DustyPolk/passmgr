@@ -51,7 +51,9 @@ inherits every limit below.
   `PR_SET_DUMPABLE=0`. Every request is checked against the peer uid before it
   is read; malformed and unauthorized requests never refresh the idle timer.
 - **Vault.** Argon2id + AES-256-GCM, authenticated header, atomic 0600 writes,
-  zeroized keys and plaintext. Details are in `README.md` and `FORMAT.md`.
+  zeroized keys and plaintext. Mutating commands hold an exclusive `flock` on
+  the sidecar `<vault>.lock` across the whole read-modify-write, so concurrent
+  writers cannot lose an update. Details are in `README.md` and `FORMAT.md`.
 - **No network.** passmgr makes no network calls and links no network-capable
   crate. MCP is stdio only.
 - **Planned, per `MCP.md`:** scoped, expiring, use-limited, revocable grants

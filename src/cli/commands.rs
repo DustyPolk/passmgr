@@ -124,7 +124,7 @@ pub(crate) fn command_edit(options: EditOptions, path: &Path) -> Result<(), Erro
     }
     let rotate = edit_rotates_password(&options);
 
-    let (mut vault, master) = unlock(path)?;
+    let (mut vault, master) = unlock_for_update(path)?;
     if vault.get(&options.service).is_none() {
         return Err(Error::ServiceNotFound(options.service.clone()));
     }
@@ -173,7 +173,7 @@ pub(crate) fn command_edit(options: EditOptions, path: &Path) -> Result<(), Erro
 }
 
 pub(crate) fn command_delete(service: &str, path: &Path) -> Result<(), Error> {
-    let (mut vault, master) = unlock(path)?;
+    let (mut vault, master) = unlock_for_update(path)?;
     vault.delete(service)?;
     vault.save(&master)?;
     eprintln!("Credential deleted successfully.");
@@ -263,6 +263,15 @@ pub(crate) fn unlock(path: &Path) -> Result<(Vault, Zeroizing<String>), Error> {
     warn_insecure(path)?;
     let master = prompt_master(false)?;
     let vault = Vault::open(path, &master)?;
+    Ok((vault, master))
+}
+
+/// Unlock for a read-modify-write command. The returned vault holds the
+/// exclusive write lock until it is dropped (after the save).
+pub(crate) fn unlock_for_update(path: &Path) -> Result<(Vault, Zeroizing<String>), Error> {
+    warn_insecure(path)?;
+    let master = prompt_master(false)?;
+    let vault = Vault::open_for_update(path, &master)?;
     Ok((vault, master))
 }
 

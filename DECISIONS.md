@@ -89,6 +89,13 @@ code does not implement yet.
   payload <= 10 MiB; vault file <= 16 MiB.
 - Saves are atomic: temp file in the vault's directory, fsync, rename, and a
   best-effort directory fsync. The vault is mode 0600.
+- Writers serialize on an exclusive `flock` over the sidecar `<vault>.lock`
+  (0600, `O_NOFOLLOW`, never unlinked), held from before the read until the
+  `Vault` is dropped. `Vault::open`/`open_with_key` are read-only and take no
+  lock (atomic rename makes reads safe); only `open_for_update`/`open_for_add`
+  may `save`, and they give up after 30 s with `VaultBusy` (exit 1, nothing
+  changed). Do not unlink a held lock file: a second writer would lock a fresh
+  inode.
 - Group- or world-readable vaults are currently **warned about** on use; TODO
   8.10 turns that into a refusal, which is what the invariant requires. Do not
   drop the warning before then.

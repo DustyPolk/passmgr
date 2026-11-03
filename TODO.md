@@ -14,10 +14,13 @@ Rules that apply to every item:
 The design for grants, approval and audit lives in `MCP.md` ("Grants and the
 approval flow", "Audit"). Follow it.
 
-- [ ] **3.1 Vault write lock.** The CLI and `pmd` will both write the vault.
+- [x] **3.1 Vault write lock.** The CLI and `pmd` will both write the vault.
       Add an exclusive `flock` on `<vault>.lock` held across every
       read-modify-write. Test: two concurrent writers both land (no lost
       update), and a reader never sees a torn file.
+      Done: `Vault::open_for_update`/`open_for_add` take the sidecar lock
+      before reading and hold it until drop; `save` refuses a read-only
+      `Vault`. `add`/`edit`/`delete` use it; reads stay lock-free.
 - [ ] **3.2 Grant model in the vault (next store version).** Fields per
       `MCP.md`: id, SHA-256 token hash, label, scope (refs, tags, optional
       field names), command allowlist, capabilities, expires_at, max_uses,

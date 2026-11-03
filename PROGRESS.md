@@ -1,3 +1,44 @@
+## 2026-11-02 — Serialize vault writers with a sidecar flock (TODO 3.1)
+
+- `src/vault.rs`: `Vault` gained a private `write_lock: Option<File>`.
+  `Vault::open_for_update` and `open_for_add` call
+  `acquire_write_lock_with_timeout`, which opens `<vault>.lock` (0600,
+  `O_NOFOLLOW|O_CLOEXEC`, `flock(LOCK_EX|LOCK_NB)` retried every 10 ms) and
+  keeps the descriptor until the `Vault` is dropped. The lock is taken
+  **before** the vault is read, so the whole read-modify-write is inside it.
+  `save` returns the new `Error::ReadOnlyVault` when no lock is held; the
+  lock file is never unlinked (unlinking a held lock lets a second writer lock
+  a fresh inode). Timeout is 30 s -> new `Error::VaultBusy` (exit 1, nothing
+  changed).
+- `src/cli/commands.rs`: new `unlock_for_update` used by `edit` and `delete`;
+  `add` already goes through `open_for_add`. `get`, `list`, `show` and the
+  daemon keep using lock-free `Vault::open`/`open_with_key`: atomic
+  temp+rename makes readers safe and must not serialize `run` workers.
+- Chose per-constructor locking over a separate writer type: `save` checking
+  `write_lock` is a cheap fail-closed backstop, and the change stays inside
+  `vault.rs`. Chose a 30 s bound over blocking forever so an unattended
+  command cannot hang on a stuck process.
+- Tests (`src/vault.rs`): exclusion + 0600 mode + release on drop + 100 ms
+  `VaultBusy`; two concurrent writers where the second is provably blocked
+  and both changes land (verified this fails without the lock: `beta` is
+  lost); a reader polling `Vault::open` while a writer saves 3 times never
+  sees a torn file; a planted `<vault>.lock` symlink is refused and its target
+  untouched; a read-only vault refuses `save`.
+- Docs: `DECISIONS.md`, `README.md` (security bullets) and `SECURITY.md`
+  describe the sidecar lock.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` pass (`cargo audit` not installed; skipped).
+- **Next iteration must know:** a shadowed `Vault` binding keeps the lock
+  until end of scope, so tests/callers that reopen the same vault must
+  `drop` the old one first. `command_add`/`command_edit` hold the lock while
+  prompting for a credential password, so a second writer can hit the 30 s
+  timeout; that is the conservative choice until prompts move before the
+  lock. `pmd` still does not write the vault; when grant rows move into the
+  payload, a key-based `open_for_update_with_key` and daemon writes must use
+  the same lock, and the daemon's cached key must be revisited after a CLI
+  re-encryption.
+- NEEDS HUMAN REVIEW: none.
+
 ## 2026-11-02 — Scope documentation contracts to the limit that carries them (TODO R.5)
 
 - Test-only change in `tests/docs.rs`; no product code and no document text

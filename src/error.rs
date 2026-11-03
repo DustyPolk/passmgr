@@ -39,6 +39,12 @@ pub enum Error {
     ServiceNotFound(String),
     /// No credential matches the given `pm://` reference. Maps to exit code 3.
     EntryNotFound(String),
+    /// The vault was opened read-only and cannot be saved. Library misuse;
+    /// mutating commands open it with [`crate::Vault::open_for_update`].
+    ReadOnlyVault(PathBuf),
+    /// Another process held the vault write lock for longer than the timeout.
+    /// Maps to exit code 1: nothing was changed, so retrying is safe.
+    VaultBusy(PathBuf),
     /// The unlock daemon could not be reached, exited during startup, or
     /// answered an error. The detail is user-facing and never contains secret
     /// material. Maps to exit code 1.
@@ -63,9 +69,12 @@ impl Error {
             Self::InvalidInput(_) => EXIT_USAGE,
             // Duplicate entries, I/O failures, crypto failures (RNG or
             // encryption setup) and daemon failures are plain runtime errors.
-            Self::Io(_) | Self::Crypto(_) | Self::DuplicateService(_) | Self::Daemon(_) => {
-                EXIT_FAILURE
-            }
+            Self::Io(_)
+            | Self::Crypto(_)
+            | Self::DuplicateService(_)
+            | Self::Daemon(_)
+            | Self::ReadOnlyVault(_)
+            | Self::VaultBusy(_) => EXIT_FAILURE,
         }
     }
 }
@@ -104,6 +113,16 @@ impl fmt::Display for Error {
             Self::EntryNotFound(reference) => {
                 write!(f, "no credential found for reference '{reference}'")
             }
+            Self::ReadOnlyVault(path) => write!(
+                f,
+                "vault '{}' was opened read-only; reopen it for update to save",
+                path.display()
+            ),
+            Self::VaultBusy(path) => write!(
+                f,
+                "another passmgr process is updating '{}'; nothing was changed, try again",
+                path.display()
+            ),
             Self::Daemon(detail) => f.write_str(detail),
             Self::InvalidInput(detail) => f.write_str(detail),
         }
@@ -146,6 +165,8 @@ mod tests {
             (Error::DuplicateService("svc".into()), EXIT_FAILURE),
             (Error::Crypto("x".into()), EXIT_FAILURE),
             (Error::Daemon("x".into()), EXIT_FAILURE),
+            (Error::ReadOnlyVault(PathBuf::from("v.dat")), EXIT_FAILURE),
+            (Error::VaultBusy(PathBuf::from("v.dat")), EXIT_FAILURE),
             (Error::Io(std::io::Error::other("x")), EXIT_FAILURE),
         ];
         for (error, expected) in cases {

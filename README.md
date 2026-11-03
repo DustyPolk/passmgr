@@ -334,6 +334,11 @@ passmgr --version
 - **Integrity:** GCM authentication covers the ciphertext and all header fields,
   including the KDF parameters, salt, nonce, and length. Truncated, extended,
   or modified files fail closed.
+- **Concurrent writers:** every read-modify-write command holds an exclusive
+  `flock` on `<vault>.lock` (0600, alongside the vault) from before the read
+  until after the atomic save, so two simultaneous `add`/`edit`/`delete`
+  commands cannot lose one another's change. A writer waits up to 30 seconds
+  and then exits 1 having changed nothing. Reads do not take the lock.
 - **Limits:** vault files are limited to 16 MiB and credentials to 10,000
   entries. These bounds are checked before expensive allocations or decryption.
 - **No recovery:** losing the master password means losing the vault. There is
