@@ -35,7 +35,7 @@ continuing Phase 3; each names the test that must prove the fix.
       Done: `AccessRequest` is now an enum; `List`/`Run` both carry the
       `Target`, `authorizes` scope-checks both, and `list()` (target-less) is
       gone. `Denied::MissingTarget`/`MissingCommand` removed with it.
-- [ ] **R.12 A run's relay reaps the process-group leader, so `terminate` can
+- [x] **R.12 A run's relay reaps the process-group leader, so `terminate` can
       signal a recycled group.** `src/runner.rs:316-318` calls
       `let _ = child.try_wait();` on every relay timeout, which reaps the
       leader as soon as it exits while a grandchild still holds a pipe.
@@ -54,6 +54,11 @@ continuing Phase 3; each names the test that must prove the fix.
       than `CANCEL_POLL`, assert `/proc/<pid>/stat` still shows state `Z`
       (not reaped), then cancel and assert both processes are gone. This test
       fails today.
+      Done: `relay` no longer takes the `Child`, so it cannot reap; the
+      timeout arm only checks the cancel flag. Test
+      `a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes`
+      proves the zombie survives three poll slices and is reaped only by the
+      cancel path.
 - [ ] **R.13 `TokenHash` exposes a non-constant-time `==`.** `src/grant.rs:127`
       derives `PartialEq, Eq` on `TokenHash`, while `SessionToken` documents
       the opposite convention ("deliberately no `PartialEq` implementation

@@ -1,3 +1,34 @@
+## 2026-11-03 — Stop the relay from reaping the process-group leader (TODO R.12)
+
+- `src/runner.rs`: `relay` no longer takes `&mut Child`, and its timeout arm no
+  longer calls `try_wait`. It only observes the cancel flag and waits for both
+  pipe readers. The leader therefore stays an unreaped zombie while a
+  grandchild keeps the pipes open, so `child.id()` is still a valid, reserved
+  pgid when `terminate` signals `-pgid`; `terminate`'s "deliberately not
+  reaped" comment is now true. The `Finished` path (both pipes at EOF) still
+  reaps via `try_wait`; nothing signals a group after that path.
+- Chose removal over "cache the pid and never derive it after a reap": the
+  review's other option would still leave two sources of truth for the group,
+  and the relay never needed the child's status -- the readers' EOF is the
+  only signal it acts on. Cost: none; the `Finished` loop already polls
+  `try_wait` once output is done.
+- Test in `src/runner.rs`:
+  `a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes` runs
+  `sh -c 'echo $$ >leader; sleep 30 & echo $! >grandchild'`, waits for the
+  leader's `/proc` state to become `Z`, then sleeps three `CANCEL_POLL`
+  slices and asserts it is still `Z` (not reaped). It then cancels, asserts
+  `RunError::Cancelled`, and polls until both pids are gone. Verified it fails
+  against the old `try_wait` in the relay (temporary patch: `left: None`) and
+  passes with the fix. `process_state`/`process_is_gone` are shared helpers.
+- `DECISIONS.md`: the process-group decision now records the no-reap rule.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` green. `cargo audit` not installed; skipped.
+- **Next iteration must know:** a run whose leader exits while a grandchild
+  holds a pipe now waits indefinitely for the pipe (as before) unless
+  cancelled; TODO 4.5's per-call timeout is what bounds it. Do not reintroduce
+  any `try_wait`/`wait` in the relay path or in anything that can run before
+  `terminate`. Next item is R.13 (drop `TokenHash`'s `PartialEq`/`Eq`).
+
 ## 2026-11-03 — Scope-check list requests by construction (TODO R.11)
 
 - `src/grant.rs`: `AccessRequest` is now an enum, not a struct with public

@@ -229,7 +229,7 @@ where
     }
     drop(sender);
 
-    let emit_result = relay(&receiver, cancel, &mut emit, &mut child);
+    let emit_result = relay(&receiver, cancel, &mut emit);
     match emit_result {
         Relay::Finished => {
             // Both pipes reached EOF. The child may have closed them and kept
@@ -280,12 +280,15 @@ enum Relay {
 
 /// Forward frames until both readers are done, the caller fails, or the
 /// daemon is shutting down.
-fn relay<F>(
-    receiver: &Receiver<Message>,
-    cancel: &AtomicBool,
-    emit: &mut F,
-    child: &mut Child,
-) -> Relay
+///
+/// Deliberately takes no `Child`: it must never reap the group leader. While
+/// the leader is an unreaped zombie its pid (and the process-group id derived
+/// from it) cannot be reused, so a later [`terminate`] cannot signal an
+/// unrelated group. That matters when the leader exits while a grandchild
+/// still holds the output pipes: the run must keep waiting for the pipes, and
+/// a cancel may arrive minutes later. The `Finished` path below reaps the
+/// child only after both pipes reached EOF.
+fn relay<F>(receiver: &Receiver<Message>, cancel: &AtomicBool, emit: &mut F) -> Relay
 where
     F: FnMut(RunFrame) -> io::Result<()>,
 {
@@ -310,12 +313,12 @@ where
             }
             // The sender side is gone: both readers stopped without a Done.
             Err(RecvTimeoutError::Disconnected) => return Relay::Finished,
-            Err(RecvTimeoutError::Timeout) => {
-                // A child that exited before closing a pipe held by a
-                // grandchild is exactly the case TODO 4.5's timeout and
-                // process-group kill handles; keep waiting for the pipe here.
-                let _ = child.try_wait();
-            }
+            // A child that exited before closing a pipe held by a grandchild
+            // is exactly the case TODO 4.5's timeout and process-group kill
+            // handles; keep waiting for the pipe here. Do not poll the child
+            // here: `try_wait` would reap a finished leader and free its pid
+            // (and pgid) while the group is still in use.
+            Err(RecvTimeoutError::Timeout) => {}
         }
     }
 }
@@ -778,19 +781,19 @@ mod tests {
 
     /// A zombie has been killed but waits for init to reap it; that counts as
     /// gone. Only Linux exposes `/proc`, and only Linux runs this suite.
+    fn process_state(pid: libc::pid_t) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // The state is the first field after the parenthesised name.
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.trim_start().chars().next())
+    }
+
     fn process_is_gone(pid: libc::pid_t) -> bool {
         // SAFETY: signal 0 only checks for the process's existence.
         if unsafe { libc::kill(pid, 0) } != 0 {
             return true;
         }
-        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            // The state is the first field after the parenthesised name.
-            Ok(stat) => stat
-                .rsplit_once(')')
-                .map(|(_, rest)| rest.trim_start().starts_with('Z'))
-                .unwrap_or(false),
-            Err(_) => false,
-        }
+        process_state(pid) == Some('Z')
     }
 
     #[test]
@@ -836,6 +839,80 @@ mod tests {
                 "the grandchild holding the pipes survived the cancel"
             );
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes() {
+        // The leader exits immediately and leaves `sleep` behind holding both
+        // output pipes, so the relay must keep waiting for them. It must not
+        // reap the leader meanwhile: while the leader is a zombie its pid (and
+        // pgid) cannot be recycled, so the later cancel cannot signal an
+        // unrelated process group.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let leader_file = dir.path().join("leader.pid");
+        let grandchild_file = dir.path().join("grandchild.pid");
+        let script = format!(
+            "echo $$ > {}; sleep 30 & echo $! > {}",
+            leader_file.display(),
+            grandchild_file.display()
+        );
+        let argv = ["/bin/sh".to_string(), "-c".to_string(), script];
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let runner_cancel = Arc::clone(&cancel);
+        let runner = std::thread::spawn(move || {
+            execute(
+                &argv,
+                "PM_TEST",
+                "secret-1234",
+                Path::new("/"),
+                &inherited(),
+                &runner_cancel,
+                |_| Ok(()),
+            )
+        });
+
+        let leader = wait_for_pid_file(&leader_file);
+        let grandchild = wait_for_pid_file(&grandchild_file);
+
+        // Wait for the leader to exit. If it disappears instead of turning
+        // into a zombie, something reaped it while the group is still alive.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match process_state(leader) {
+                Some('Z') => break,
+                Some(_) => {}
+                None => panic!("the leader was reaped while its group was still in use"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the leader never became a zombie"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Give a relay that polls `try_wait` three poll slices to reap it.
+        std::thread::sleep(CANCEL_POLL * 3);
+        assert_eq!(
+            process_state(leader),
+            Some('Z'),
+            "the relay reaped the group leader while the grandchild held the pipes"
+        );
+
+        cancel.store(true, Ordering::SeqCst);
+        let result = runner.join().expect("runner thread");
+        assert!(matches!(result, Err(RunError::Cancelled)));
+
+        for pid in [leader, grandchild] {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !process_is_gone(pid) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "process {pid} survived the cancel"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
     }
 }
