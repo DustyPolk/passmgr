@@ -274,11 +274,15 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   `gh`, `find`, `sed`, `tar`, `ssh`, `docker`, `podman`, `kubectl`, `make`,
   `cargo`, editors, pagers, …) in a command allowlist let the agent run code,
   so it can exfiltrate secrets in ways redaction cannot catch. `pm grant
-  create` prints the whole request first (label, scope, commands, expiry, use
-  limit) and a red warning per allowed runner, then requires an explicit `y`
-  or `yes`; anything else writes nothing. Allowing one still requires
-  `--allow-interpreter`. The name list is best-effort: a grant binds only
-  `argv[0]`, so allowing any program is a decision to trust what it can run.
+  create` prompts for the master password first, then prints the whole request
+  (label, the service name and username behind every `--ref`, every entry each
+  `--tag` currently matches, commands, expiry, use limit) and a red warning
+  per allowed runner, then requires an explicit `y` or `yes`; anything else
+  writes nothing. The names come from the encrypted vault, which is why the
+  password precedes the summary; an unknown ref is refused before it. Allowing
+  one still requires `--allow-interpreter`. The name list is best-effort: a
+  grant binds only `argv[0]`, so allowing any program is a decision to trust
+  what it can run.
 - Minting a token: the daemon never holds a grant token, so it cannot hand
   one over. The MCP server mints it itself when it creates a request: a
   random 32-byte secret that *is* the future grant token, sent to the daemon

@@ -918,7 +918,7 @@ Rules that apply to every item:
       `vault::tests::saving_with_the_password_keeps_the_header_and_a_running_daemons_key`
       and `vault::tests::saving_with_a_wrong_password_changes_nothing`.
 
-- [ ] **R.41 The grant approval prompt shows refs only as opaque
+- [x] **R.41 The grant approval prompt shows refs only as opaque
       `pm://<hex>` ids, and refs are never checked against the vault.**
       `src/cli/grant.rs:167` prints the approval summary via
       `describe_scope` (~`:517`), which prints `id.to_ref()` only. The CLI has
@@ -936,6 +936,11 @@ Rules that apply to every item:
       Test: in `tests/grant_cli.rs`, a ref's service name appears in the
       transcript before the confirmation prompt; a nonexistent ref exits
       with a usage/not-found error before any socket contact.
+      Done: the summary shows escaped `service (username) [pm://ref]` per ref
+      and every credential each tag matches. The master password is now
+      prompted first (the names live in the vault); an unknown ref exits 3
+      before the summary. `grant list`/`show` still print the old one-line
+      refs (follow-up).
 
 - [ ] **R.42 Grants are never removed, so a vault stops accepting new grants
       after 1,024 creates in its lifetime.**

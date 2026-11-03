@@ -16,7 +16,7 @@
 //! re-encrypt the vault with the key it already holds.
 
 use std::fs::{File, OpenOptions};
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -39,6 +39,7 @@ use super::args::{
     GrantCommand, GrantCreateOptions, GrantListOptions, GrantRevokeOptions, GrantShowOptions,
 };
 use super::commands::{prompt_master, unlock, warn_insecure, write_json};
+use super::grant_summary::{describe_expires_at, preview_scope, print_approval_prompt};
 use super::stdout_write;
 
 #[cfg(unix)]
@@ -143,9 +144,10 @@ pub(crate) fn command_grant_create(
         .map_err(|refusal| Error::Refused(refusal.message_for("create a grant")))?;
     warn_insecure(vault_path)?;
 
-    // Build the exact request first, then show the human what approving it
-    // would mean (TODO R.26). Everything here is metadata the agent supplied
-    // or the vault already stores; no credential value is involved.
+    // Build the exact request first, then resolve and show the human what
+    // approving it would mean (TODO R.26, R.41). Everything here is metadata
+    // the agent supplied or the vault already stores; no credential value is
+    // involved.
     let now = unix_now()?;
     let token = GrantToken::generate()?;
     let scope = Scope::new(options.references, options.tags, None)?;
@@ -162,23 +164,14 @@ pub(crate) fn command_grant_create(
     )?;
     request.check_approvable(now)?;
 
-    // Nothing below this line runs unless the human typed an explicit yes: a
-    // `n` must leave no token file and must not contact the daemon.
-    print_approval_prompt(&request, now);
-    if !passmgr::terminal::prompt_yes_no("Approve this grant? [y/N] ")? {
-        return Err(Error::InvalidInput(
-            "grant creation cancelled; nothing was written".to_owned(),
-        ));
-    }
+    // An existing `--out` is still refused before the password prompt; the
+    // authoritative `O_EXCL` create happens after the human says yes.
+    TokenFile::check_available(&options.out)?;
 
-    let paths = socket::RuntimePaths::resolve();
-    let session_token = load_session(&paths)?;
-
-    // Created after the human said yes and before the password prompt, so an
-    // existing `--out` fails without asking for the password; the guard
-    // removes the file if anything later fails.
-    let mut out = TokenFile::create(&options.out)?;
-
+    // The names a human needs to recognize the scope live only in the
+    // encrypted vault, so approval now starts with the master password
+    // (TODO R.41). A refused request still writes nothing, and the y/N still
+    // comes before any daemon contact and before the token file exists.
     let container = vault::read_container(vault_path)?;
     let master = prompt_master(false)?;
     // Derive and authenticate once. The same key proves the approval and
@@ -189,12 +182,36 @@ pub(crate) fn command_grant_create(
 
     let grant = request.clone().create_grant(now)?;
 
-    let precheck = vault::Vault::open_with_key(vault_path, &key)?;
-    // The daemon cannot check vault limits (it never opens the vault), so a
-    // vault that cannot hold another grant must fail *before* the human's
-    // approval is spent (TODO R.22).
-    precheck.check_grant_writable(&grant)?;
-    drop(precheck);
+    // Resolve the human-readable names and check the vault limits before the
+    // human decides. The vault is dropped before the prompt, so decrypted
+    // credentials are not kept in memory while a human reads; reopening it is
+    // a bare AES decrypt, not another Argon2 derivation.
+    let preview = {
+        let current = vault::Vault::open_with_key(vault_path, &key)?;
+        // The daemon cannot check vault limits (it never opens the vault), so
+        // a vault that cannot hold another grant must fail *before* the
+        // human's approval is spent (TODO R.22).
+        current.check_grant_writable(&grant)?;
+        // An unknown ref is refused here, before the summary and before any
+        // socket contact: a grant that names nothing must not be approvable.
+        preview_scope(request.scope(), &current)?
+    };
+
+    // Nothing below this line runs unless the human typed an explicit yes: a
+    // `n` must leave no token file and must not contact the daemon.
+    print_approval_prompt(&request, now, &preview);
+    if !passmgr::terminal::prompt_yes_no("Approve this grant? [y/N] ")? {
+        return Err(Error::InvalidInput(
+            "grant creation cancelled; nothing was written".to_owned(),
+        ));
+    }
+
+    let paths = socket::RuntimePaths::resolve();
+    let session_token = load_session(&paths)?;
+
+    // Created only after the human said yes; the guard removes the file if
+    // anything later fails.
+    let mut out = TokenFile::create(&options.out)?;
 
     let digest = request.digest();
     let nonce = client::challenge(&paths, &session_token)?;
@@ -267,84 +284,14 @@ fn display_path(path: &Path) -> String {
     escape_hidden(&path.to_string_lossy())
 }
 
-/// Show the human the request they are about to approve, on stderr.
-///
-/// Only metadata goes to the terminal: label, scope, commands, capabilities,
-/// expiry and use limit. The strings are untrusted (an agent suggested the
-/// label and paths), so each is escaped and none can drive the terminal.
-/// Every program runner that `--allow-interpreter` let through gets its own
-/// warning, because allowing one is allowing whatever it can start (TODO
-/// R.25).
-fn print_approval_prompt(request: &GrantRequest, now: u64) {
-    eprint!("{}", describe_request(request, now));
-    let color = std::io::stderr().is_terminal();
-    for warning in runner_warnings(request) {
-        eprintln!("{}", render_warning(&warning, color));
-    }
-}
-
-/// The request in the form the human reads before approving it.
-fn describe_request(request: &GrantRequest, now: u64) -> String {
-    use std::fmt::Write as _;
-
-    let mut output = String::from("Grant request:\n");
-    writeln!(output, "  label: {}", escape_hidden(request.label()))
-        .expect("writing to a String cannot fail");
-    writeln!(output, "  scope: {}", describe_scope(request.scope()))
-        .expect("writing to a String cannot fail");
-    writeln!(output, "  commands:").expect("writing to a String cannot fail");
-    for command in request.commands() {
-        writeln!(output, "    {}", escape_hidden(command))
-            .expect("writing to a String cannot fail");
-    }
-    writeln!(
-        output,
-        "  capabilities: {}",
-        request.capabilities().names().join(", ")
-    )
-    .expect("writing to a String cannot fail");
-    writeln!(
-        output,
-        "  {}",
-        describe_expires_at(request.expires_at(), now)
-    )
-    .expect("writing to a String cannot fail");
-    writeln!(
-        output,
-        "  max uses: {}",
-        request
-            .max_uses()
-            .map(|uses| uses.to_string())
-            .unwrap_or_else(|| "unlimited".to_owned())
-    )
-    .expect("writing to a String cannot fail");
-    output
-}
-
-/// A warning line for every command that can run another program.
-fn runner_warnings(request: &GrantRequest) -> Vec<String> {
-    request
-        .commands()
-        .iter()
-        .filter(|command| is_program_runner(Path::new(command)))
-        .map(|command| {
-            format!(
-                "WARNING: '{}' is a shell, interpreter or program runner: \
-                 it can run any command with the credentials this grant covers",
-                escape_hidden(command)
-            )
-        })
-        .collect()
-}
-
-/// Bold red when the human's terminal can show it, plain text otherwise: a
-/// piped summary or a captured log must not gain escape sequences.
-fn render_warning(text: &str, color: bool) -> String {
-    if color {
-        format!("\x1b[1;31m{text}\x1b[0m")
-    } else {
-        text.to_owned()
-    }
+/// The one message for an `--out` that already names something, whether the
+/// cheap pre-check or the authoritative `O_EXCL` create found it.
+#[cfg(unix)]
+fn existing_token_error(path: &Path) -> Error {
+    Error::InvalidInput(format!(
+        "refusing to overwrite the existing token file '{}'",
+        display_path(path)
+    ))
 }
 
 /// `passmgr grant list [--json]`: metadata for every stored grant.
@@ -546,34 +493,6 @@ fn describe_expiry(grant: &Grant, now: u64) -> String {
     describe_expires_at(grant.expires_at_unix(), now)
 }
 
-fn describe_expires_at(expires_at: u64, now: u64) -> String {
-    if expires_at <= now {
-        format!("expired: {}", timestamp::format_utc(expires_at))
-    } else {
-        format!(
-            "expires: {} (in {})",
-            timestamp::format_utc(expires_at),
-            humanize_seconds(expires_at - now)
-        )
-    }
-}
-
-/// A coarse, never-negative duration such as `7d 3h`, `59m` or `12s`.
-fn humanize_seconds(seconds: u64) -> String {
-    let days = seconds / 86_400;
-    let hours = (seconds % 86_400) / 3_600;
-    let minutes = (seconds % 3_600) / 60;
-    if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else if minutes > 0 {
-        format!("{minutes}m")
-    } else {
-        format!("{seconds}s")
-    }
-}
-
 /// The JSON form of a grant: references and metadata only.
 ///
 /// There is no `token`, `token_hash` or label-derived secret here. The id is
@@ -677,6 +596,19 @@ struct TokenFile {
 
 #[cfg(unix)]
 impl TokenFile {
+    /// Refuse an `--out` that already names something, without creating it.
+    ///
+    /// `create` is still the authority (`O_EXCL`); this only makes the common
+    /// refusal cheap and, since TODO R.41 moved the password prompt ahead of
+    /// the summary, keeps it ahead of the password too.
+    fn check_available(path: &Path) -> Result<(), Error> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Err(existing_token_error(path)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Error::Io(error)),
+        }
+    }
+
     fn create(path: &Path) -> Result<Self, Error> {
         let file = OpenOptions::new()
             .write(true)
@@ -686,10 +618,7 @@ impl TokenFile {
             .open(path)
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
-                    Error::InvalidInput(format!(
-                        "refusing to overwrite the existing token file '{}'",
-                        display_path(path)
-                    ))
+                    existing_token_error(path)
                 } else {
                     Error::Io(error)
                 }
@@ -727,252 +656,4 @@ impl Drop for TokenFile {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn expiry_accepts_the_documented_units() {
-        assert_eq!(parse_expiry("30m").unwrap(), Duration::from_secs(1_800));
-        assert_eq!(parse_expiry("1h").unwrap(), Duration::from_secs(3_600));
-        assert_eq!(parse_expiry("7d").unwrap(), Duration::from_secs(604_800));
-        assert_eq!(parse_expiry("30d").unwrap(), Duration::from_secs(2_592_000));
-    }
-
-    #[test]
-    fn expiry_refuses_unknown_or_unbounded_values() {
-        for text in [
-            "",
-            "0m",
-            "0",
-            "1s",
-            "1h30m",
-            "d",
-            "1.5h",
-            "-1h",
-            "31d",
-            "999999999999d",
-        ] {
-            assert!(parse_expiry(text).is_err(), "{text:?}");
-        }
-    }
-
-    /// `--out` is argv and may be agent-suggested, so a control character in
-    /// it must never be echoed raw: neither the success line nor the
-    /// existing-file error may write an escape sequence to the terminal.
-    #[cfg(unix)]
-    #[test]
-    fn a_token_path_with_hidden_characters_is_rendered_as_text() {
-        let path = Path::new("/tmp/out\u{1b}]52;c;Y2FuYXJ5\u{7}");
-        let created = grant_created_message("deploy prod", path);
-        assert!(created.contains("token written to"), "{created}");
-        assert!(
-            created.contains("/tmp/out\\u{1b}]52;c;Y2FuYXJ5\\u{7}'"),
-            "{created}"
-        );
-        assert!(!created.contains('\u{1b}'), "{created}");
-        assert!(!created.contains('\u{7}'), "{created}");
-
-        let directory = tempfile::tempdir().unwrap();
-        let existing = directory.path().join("tok\u{1b}[2K\r");
-        std::fs::write(&existing, b"keep me").unwrap();
-        let error = match TokenFile::create(&existing) {
-            Ok(_) => panic!("an existing token file must be refused"),
-            Err(error) => error.to_string(),
-        };
-        assert!(error.contains("tok\\u{1b}[2K\\r"), "{error}");
-        assert!(!error.contains('\u{1b}'), "{error}");
-        assert!(!error.contains('\r'), "{error}");
-        assert_eq!(std::fs::read(&existing).unwrap(), b"keep me");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_existing_token_file_is_never_overwritten() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("token");
-        std::fs::write(&path, b"keep me").unwrap();
-        assert!(TokenFile::create(&path).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
-    }
-
-    fn sample_request(now: u64, commands: &[&str]) -> GrantRequest {
-        GrantRequest::new(
-            GrantSpec {
-                label: "deploy prod".into(),
-                scope: Scope::new(
-                    vec![
-                        passmgr::store::EntryId::from_hex("00112233445566778899aabbccddeeff")
-                            .expect("entry id"),
-                    ],
-                    vec!["prod".into()],
-                    None,
-                )
-                .expect("scope"),
-                commands: commands.iter().map(PathBuf::from).collect(),
-                capabilities: Capabilities::RUN,
-                expires_at: now + 3_600,
-                max_uses: Some(2),
-            },
-            passmgr::grant::TokenHash::of(b"approval-canary-token"),
-        )
-        .expect("request")
-    }
-
-    /// The human approves exactly what the summary shows: the label, scope,
-    /// commands, capabilities, expiry and use limit. No secret exists at this
-    /// point, and the request's token hash has no accessor here.
-    #[test]
-    fn the_approval_summary_names_every_value_being_approved() {
-        let now = 1_700_000_000;
-        let summary = describe_request(&sample_request(now, &["/usr/bin/gh"]), now);
-        assert!(summary.starts_with("Grant request:\n"), "{summary}");
-        assert!(summary.contains("  label: deploy prod"), "{summary}");
-        assert!(
-            summary.contains("refs: pm://00112233445566778899aabbccddeeff"),
-            "{summary}"
-        );
-        assert!(summary.contains("tags: prod"), "{summary}");
-        assert!(
-            summary.contains("  commands:\n    /usr/bin/gh\n"),
-            "{summary}"
-        );
-        assert!(summary.contains("  capabilities: run"), "{summary}");
-        assert!(
-            summary.contains("expires: 2023-11-14T23:13:20Z (in 1h 0m)"),
-            "{summary}"
-        );
-        assert!(summary.contains("  max uses: 2"), "{summary}");
-        assert!(!summary.contains("approval-canary-token"), "{summary}");
-    }
-
-    #[test]
-    fn only_program_runners_produce_a_warning() {
-        let now = 1_700_000_000;
-        let warnings = runner_warnings(&sample_request(now, &["/usr/bin/gh"]));
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(
-            warnings[0].starts_with("WARNING: '/usr/bin/gh'"),
-            "{warnings:?}"
-        );
-        assert!(warnings[0].contains("can run any command"), "{warnings:?}");
-
-        assert!(runner_warnings(&sample_request(now, &["/usr/bin/true", "/bin/echo"])).is_empty());
-    }
-
-    #[test]
-    fn a_warning_is_only_coloured_for_a_terminal() {
-        assert_eq!(render_warning("WARNING", false), "WARNING");
-        assert_eq!(render_warning("WARNING", true), "\x1b[1;31mWARNING\x1b[0m");
-    }
-
-    fn sample_grant(now: u64) -> Grant {
-        Grant::create(
-            GrantSpec {
-                label: "deploy prod".into(),
-                scope: Scope::new(
-                    vec![
-                        passmgr::store::EntryId::from_hex("00112233445566778899aabbccddeeff")
-                            .expect("entry id"),
-                    ],
-                    vec!["prod".into()],
-                    Some(vec!["password".into()]),
-                )
-                .expect("scope"),
-                commands: vec![PathBuf::from("/usr/bin/gh")],
-                capabilities: Capabilities::RUN,
-                expires_at: now + 3_600,
-                max_uses: Some(2),
-            },
-            passmgr::grant::TokenHash::of(b"metadata-canary-token"),
-            now,
-        )
-        .expect("grant")
-    }
-
-    /// The JSON form of a grant is the whole agent-facing surface of `grant
-    /// list`/`show`; it must carry no token and no hash, not even an encoded
-    /// form of one.
-    #[test]
-    fn grant_metadata_never_carries_a_token_or_its_hash() {
-        let now = 1_700_000_000;
-        let grant = sample_grant(now);
-        let value = grant_metadata(&grant, now);
-        let text = value.to_string();
-        let hash_hex = grant.token_hash().to_hex();
-
-        assert!(!text.contains(&hash_hex), "{text}");
-        assert!(!text.contains("metadata-canary-token"), "{text}");
-        assert!(!text.contains("token"), "no field may name a token: {text}");
-        assert_eq!(value["id"], serde_json::json!(grant.id().to_hex()));
-        assert_eq!(value["label"], serde_json::json!("deploy prod"));
-        assert_eq!(
-            value["refs"],
-            serde_json::json!(["pm://00112233445566778899aabbccddeeff"])
-        );
-        assert_eq!(value["tags"], serde_json::json!(["prod"]));
-        assert_eq!(value["fields"], serde_json::json!(["password"]));
-        assert_eq!(value["commands"], serde_json::json!(["/usr/bin/gh"]));
-        assert_eq!(value["capabilities"], serde_json::json!(["run"]));
-        assert_eq!(value["max_uses"], serde_json::json!(2));
-        assert_eq!(value["uses"], serde_json::json!(0));
-        assert_eq!(value["uses_left"], serde_json::json!(2));
-        assert_eq!(value["revoked_at"], serde_json::Value::Null);
-        assert_eq!(value["status"], serde_json::json!("active"));
-    }
-
-    #[test]
-    fn grant_status_puts_revoked_before_expired_and_exhausted() {
-        let now = 1_700_000_000;
-        let active = sample_grant(now);
-        assert_eq!(active.status(now).name(), "active");
-
-        let mut expired = sample_grant(now);
-        assert_eq!(expired.status(now + 3_600).name(), "expired");
-
-        let mut exhausted = sample_grant(now);
-        exhausted.mark_used(now).expect("first use");
-        exhausted.mark_used(now).expect("second use");
-        assert_eq!(exhausted.status(now).name(), "exhausted");
-
-        // Revoking an expired grant still reads as revoked, not expired.
-        expired.revoke(now + 10).expect("revoke");
-        assert_eq!(expired.status(now + 3_600).name(), "revoked");
-    }
-
-    #[test]
-    fn humanized_durations_are_coarse_and_never_negative() {
-        assert_eq!(humanize_seconds(7 * 86_400 + 3 * 3_600), "7d 3h");
-        assert_eq!(humanize_seconds(3_600 + 120), "1h 2m");
-        assert_eq!(humanize_seconds(59 * 60), "59m");
-        assert_eq!(humanize_seconds(12), "12s");
-        assert_eq!(humanize_seconds(0), "0s");
-    }
-
-    #[test]
-    fn uses_and_scope_descriptions_name_metadata_only() {
-        let now = 1_700_000_000;
-        let grant = sample_grant(now);
-        assert_eq!(describe_uses(&grant), "uses: 0 of 2 (2 left)");
-        assert_eq!(
-            describe_scope(grant.scope()),
-            "refs: pm://00112233445566778899aabbccddeeff; tags: prod; fields: password"
-        );
-        assert!(describe_expiry(&grant, now).contains("expires: "));
-        assert!(describe_expiry(&grant, now).contains("(in 1h 0m)"));
-        assert!(describe_expiry(&grant, now + 3_600).starts_with("expired: "));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_new_token_file_is_0600_and_removed_when_uncommitted() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("token");
-        {
-            let mut file = TokenFile::create(&path).unwrap();
-            file.write_token(&GrantToken::generate().unwrap()).unwrap();
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600);
-        }
-        assert!(!path.exists(), "an uncommitted token file must be removed");
-    }
-}
+mod tests;

@@ -48,30 +48,32 @@ fn grant_create_writes_a_scoped_grant_and_never_prints_the_token() {
             "--out",
             out_text,
         ],
-        &format!("y\n{MASTER}\n"),
+        &format!("{MASTER}\ny\n"),
     );
     assert_ok(&output);
 
-    // The human sees the whole request, then the confirmation, before the
-    // password prompt (TODO R.26).
+    // The human types the password, then sees the whole request with the
+    // credential names, then the confirmation (TODO R.41). Nothing is written
+    // and no daemon is contacted before the explicit yes.
     let stderr = &output.stderr;
+    let password_at = stderr
+        .find("Enter Master Password:")
+        .expect("the password is prompted first");
     let summary_at = stderr.find("Grant request:").expect("the request is shown");
     let confirm_at = stderr
         .find("Approve this grant? [y/N]")
         .expect("the confirmation follows the request");
-    let password_at = stderr
-        .find("Enter Master Password:")
-        .expect("the password prompt comes last");
     assert!(
-        summary_at < confirm_at && confirm_at < password_at,
-        "the request and confirmation must precede the password prompt: {stderr}"
+        password_at < summary_at && summary_at < confirm_at,
+        "the credential names and confirmation must follow the password, before anything else: {stderr}"
     );
     let canonical_printenv = fs::canonicalize("/usr/bin/printenv").expect("canonical printenv");
     let canonical_printenv = canonical_printenv.to_str().expect("path is UTF-8");
     let expected = [
         "label: deploy prod".to_owned(),
-        format!("refs: {}", fixture.reference),
-        "tags: prod".to_owned(),
+        format!("example.test (alice) [{}]", fixture.reference),
+        "tags:".to_owned(),
+        "      prod:".to_owned(),
         format!("    {canonical_printenv}"),
         "capabilities: run".to_owned(),
         "expires: ".to_owned(),
@@ -151,6 +153,131 @@ fn grant_create_writes_a_scoped_grant_and_never_prints_the_token() {
     assert_success(&run);
     assert!(stdout(&run).contains("[REDACTED]"), "{}", stdout(&run));
     assert!(!stdout(&run).contains(SECRET));
+}
+
+/// TODO R.41: the summary names the credential behind each reference, so an
+/// approval cannot be steered onto a different entry by a trusty-looking
+/// label. Cancelling here also proves the summary comes before any write.
+#[test]
+fn grant_create_shows_the_credential_behind_a_reference() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    fixture.unlock();
+
+    let out = fixture.temp_path("named.token");
+    let output = fixture.run_pty(
+        &[
+            "--db",
+            fixture.db(),
+            "grant",
+            "create",
+            "--label",
+            "github ci token",
+            "--ref",
+            &fixture.reference,
+            "--command",
+            "/usr/bin/true",
+            "--expires",
+            "1h",
+            "--out",
+            out.to_str().expect("path is UTF-8"),
+        ],
+        &format!("{MASTER}\nn\n"),
+    );
+
+    assert_eq!(output.status.code(), Some(2), "{}", output.stderr);
+    let summary_at = output.stderr.find("Grant request:").expect("summary");
+    let named_at = output
+        .stderr
+        .find(&format!("example.test (alice) [{}]", fixture.reference))
+        .expect("the service and username behind the ref are shown");
+    let confirm_at = output
+        .stderr
+        .find("Approve this grant? [y/N]")
+        .expect("confirmation");
+    assert!(
+        summary_at < named_at && named_at < confirm_at,
+        "the credential must be named before the human approves: {}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains(SECRET), "no value is shown");
+    assert!(!out.exists(), "a cancelled grant writes no token");
+    assert!(
+        Vault::open(&fixture.vault, MASTER)
+            .expect("vault")
+            .grants()
+            .is_empty()
+    );
+}
+
+/// A reference the vault does not hold is refused before the summary and
+/// before any socket contact (TODO R.41): the human is never asked to approve
+/// a grant that names nothing, and no approval is spent.
+#[test]
+fn grant_create_refuses_an_unknown_reference_before_any_socket_contact() {
+    let _guard = serial();
+    let fixture = Fixture::new();
+    let paths = fixture.daemon_paths();
+    let token = SessionToken::generate().expect("session token");
+    passmgr::session::store(&paths, &token).expect("session file");
+    let listener = UnixListener::bind(paths.socket()).expect("stub socket");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+
+    let missing = "pm://ffffffffffffffffffffffffffffffff";
+    let out = fixture.temp_path("missing.token");
+    let output = fixture.run_pty(
+        &[
+            "--db",
+            fixture.db(),
+            "grant",
+            "create",
+            "--label",
+            "deploy prod",
+            "--ref",
+            missing,
+            "--command",
+            "/usr/bin/true",
+            "--expires",
+            "1h",
+            "--out",
+            out.to_str().expect("path is UTF-8"),
+        ],
+        &format!("{MASTER}\ny\n"),
+    );
+
+    assert_eq!(output.status.code(), Some(3), "{}", output.stderr);
+    assert!(output.stderr.contains(missing), "{}", output.stderr);
+    assert!(
+        output.stderr.contains("no credential found for reference"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains("Grant request:"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains("Approve this grant?"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ),
+        "an unknown ref must not contact the daemon"
+    );
+    assert!(!out.exists(), "a refused grant must write no token file");
+    assert!(
+        Vault::open(&fixture.vault, MASTER)
+            .expect("vault")
+            .grants()
+            .is_empty()
+    );
 }
 
 /// An existing `--out` file is never truncated, even when everything else is
@@ -319,13 +446,13 @@ fn grant_create_accepts_a_program_runner_when_the_human_allows_it() {
             "--out",
             out.to_str().expect("path is UTF-8"),
         ],
-        &format!("y\n{MASTER}\n"),
+        &format!("{MASTER}\ny\n"),
     );
     assert_ok(&output);
 
-    // Allowing a runner is the human's decision, so the prompt says what it
-    // means before the password is asked for. stderr is piped here, not a
-    // terminal, so the warning is plain text with no escape sequences.
+    // Allowing a runner is the human's decision, so the summary says what it
+    // means before the confirmation. stderr is piped here, not a terminal, so
+    // the warning is plain text with no escape sequences.
     let runner_path = fs::canonicalize(&runner).expect("canonical runner");
     let runner_path = runner_path.to_str().expect("path is UTF-8");
     let warning = format!(
@@ -339,8 +466,8 @@ fn grant_create_accepts_a_program_runner_when_the_human_allows_it() {
     let password_at = output
         .stderr
         .find("Enter Master Password:")
-        .expect("the password prompt follows");
-    assert!(warning_at < password_at, "{}", output.stderr);
+        .expect("the password prompt comes first");
+    assert!(password_at < warning_at, "{}", output.stderr);
     assert!(
         !output.stderr.contains('\u{1b}'),
         "a piped summary must not gain colour escapes: {}",
@@ -432,7 +559,7 @@ fn grant_create_refuses_a_full_vault_before_asking_the_daemon() {
             "--out",
             out.to_str().expect("path is UTF-8"),
         ],
-        &format!("y\n{MASTER}\n"),
+        &format!("{MASTER}\ny\n"),
     );
 
     assert_eq!(output.status.code(), Some(2), "{}", output.stderr);
@@ -463,7 +590,8 @@ fn grant_create_refuses_a_full_vault_before_asking_the_daemon() {
 
 /// Anything but an explicit yes cancels the creation: exit 2, no token file,
 /// an unchanged vault, and no connection to the daemon — even though the
-/// summary was printed first.
+/// summary was printed first. The password comes first now (TODO R.41), so
+/// canceling still proves nothing was written after a real unlock.
 #[test]
 fn grant_create_cancels_without_an_explicit_yes() {
     let _guard = serial();
@@ -494,7 +622,7 @@ fn grant_create_cancels_without_an_explicit_yes() {
             "--out",
             out.to_str().expect("path is UTF-8"),
         ],
-        "n\n",
+        &format!("{MASTER}\nn\n"),
     );
 
     assert_eq!(output.status.code(), Some(2), "{}", output.stderr);
@@ -511,11 +639,6 @@ fn grant_create_cancels_without_an_explicit_yes() {
     assert!(
         output.stderr.contains("cancelled; nothing was written"),
         "{}",
-        output.stderr
-    );
-    assert!(
-        !output.stderr.contains("Enter Master Password:"),
-        "a cancelled grant must not ask for the password: {}",
         output.stderr
     );
     assert!(!out.exists(), "a cancelled grant must write no token file");
@@ -645,7 +768,7 @@ fn grant_create_keeps_a_concurrent_vault_write_and_still_succeeds() {
                     "--out",
                     out_text,
                 ],
-                &format!("y\n{MASTER}\n"),
+                &format!("{MASTER}\ny\n"),
             )
         });
         // Long enough for the approved CLI to be waiting at the lock. If it is

@@ -1,3 +1,40 @@
+## 2026-11-03 — Name the credential behind each grant ref (TODO R.41)
+
+- `src/cli/grant.rs`: `preview_scope` resolves every ref and tag against the
+  decrypted vault into `ScopeEntry { reference, service, username }`;
+  `write_scope` prints `service (username) [pm://ref]` per ref and every
+  credential each tag currently matches (`(no credential currently matches)`
+  when empty). Every name goes through `grant::escape_hidden`; no value is
+  read. A missing ref is `Error::EntryNotFound(ref)` (exit 3), raised before
+  the summary, any socket contact and the token file.
+- Ordering changed: the master password is prompted **before** the summary,
+  because the names live only in the encrypted vault. The vault is dropped
+  before the y/N; after yes the old path resumes (`load_session`, token file,
+  challenge/prove, `grant_create`, vault write). An existing `--out` is still
+  refused before the password through the new `TokenFile::check_available`
+  (`symlink_metadata`; `O_EXCL` stays the authority). DECISIONS/README/MCP/
+  help updated to the new order.
+- Tests: unit `a_ref_is_shown_with_its_service_and_username`,
+  `a_tag_is_shown_with_every_credential_it_matches`,
+  `an_unknown_ref_is_refused_before_the_summary`,
+  `credential_names_are_escaped_in_the_summary`, plus a dangling-symlink
+  `--out` check; e2e `grant_create_shows_the_credential_behind_a_reference`
+  (name before the confirmation, no secret, nothing written) and
+  `grant_create_refuses_an_unknown_reference_before_any_socket_contact`
+  (exit 3, no accept, no file, vault unchanged). Existing grant-create tests
+  now feed `MASTER` first; the cancel test no longer asserts that the
+  password was never asked.
+- Layout: the change pushed `src/cli/grant.rs` past the 1,000-line guard, so
+  the approval summary now lives in `src/cli/grant_summary.rs` (224 lines,
+  `pub(super)` items) and the unit tests in `src/cli/grant/tests.rs`; the
+  command module is back to 661 lines.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` pass (274 lib + 56 args
+  + 21 cli + the rest).
+- **Next iteration must know:** R.42 is next. `grant list`/`grant show` still
+  print the old one-line `refs: pm://...` via `describe_scope`; reusing
+  `preview_scope`/`write_scope` there is the follow-up, but leave the `--json`
+  shape unchanged.
+
 ## 2026-11-03 — Keep the vault header on save (TODO R.40)
 
 - `src/crypto.rs`: new `encrypt_with_template(plaintext, master_password,

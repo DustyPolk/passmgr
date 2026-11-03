@@ -614,16 +614,23 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   any daemon request; `src/grant.rs` and `tests/grant_cli.rs` (a fake `gh`) pin
   both the table and the end-to-end refusal.
 - `pm grant create` shows the request and asks the human to confirm it before
-  anything else happens (TODO R.26). The summary is stderr-only metadata:
-  escaped label, scope, canonical commands, capabilities, expiry and use
-  limit, plus one red warning per allowed program runner (bold ANSI only when
-  stderr is a terminal, so a piped log gains no escapes). Confirmation reads
-  one line and accepts only `y`/`yes`, case-insensitive; a blank line, any
-  other word or EOF exits 2 with "cancelled; nothing was written". Ordering
-  is deliberate: request build and validation, then summary and confirmation,
-  then `load_session`, the token file, the password prompt and the daemon. A
-  `n` therefore leaves no file, and an existing `--out` is still refused
-  before the password. Display text uses `grant::escape_hidden`, which
+  anything is written or the daemon is contacted (TODO R.26, R.41). The
+  summary is stderr-only metadata: escaped label, the credentials behind the
+  scope (each ref as `service (username) [pm://ref]`, each tag with every
+  credential it currently matches), canonical commands, capabilities, expiry
+  and use limit, plus one red warning per allowed program runner (bold ANSI
+  only when stderr is a terminal, so a piped log gains no escapes). The master
+  password comes *before* the summary, because those names live only in the
+  encrypted vault and recognizing the credential is the point of the approval
+  (TODO R.41 reversed the R.26 order here); the vault is dropped before the
+  y/N so plaintext is not held while the human reads. Confirmation reads one
+  line and accepts only `y`/`yes`, case-insensitive; a blank line, any other
+  word or EOF exits 2 with "cancelled; nothing was written". Ordering is
+  deliberate: request build, `--out` availability, password and vault unlock,
+  vault-limit check and scope resolution (an unknown ref exits 3), then the
+  summary and confirmation, then `load_session`, the token file and the
+  daemon. A `n` therefore leaves no file, and an existing `--out` is still
+  refused before the password. Display text uses `grant::escape_hidden`, which
   escapes only hidden characters so `Bob's token` keeps its apostrophe; error
   messages keep the quoted variant that also escapes quotes and backslashes.
   Paths taken from argv (`--out`) go through the same escape before they are
