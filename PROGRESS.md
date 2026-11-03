@@ -1,3 +1,47 @@
+## 2026-11-02 — Streaming output redactor (TODO 2.6a)
+
+- New `src/redact.rs`, exported from `src/lib.rs`. No new dependency
+  (`zeroize` was already present).
+- `Redactor::push(&[u8]) -> Vec<u8>` streams child output. It scans a pending
+  buffer and appends safe bytes to the output; on a complete occurrence it
+  appends `[REDACTED]`. The longest suffix that is still a proper prefix of the
+  value is held back (at most `secret.len() - 1` bytes) until the next push, so
+  a value split across two reads is caught. `finish()` flushes a trailing
+  partial prefix: a prefix is not the value, and holding it forever would
+  truncate legitimate output.
+- Matching is greedy left-to-right and operates on bytes, so binary output
+  works (no UTF-8 assumption). Overlapping occurrences are consumed in order;
+  the replacement marker cannot recreate the value at a boundary because it is
+  itself scanned only as normal output.
+- Marker: `[REDACTED]` unless that literal contains the value (e.g. the value
+  is `[REDACTED]`, `REDACTED`, `D]`, `ACT`). In that case a run of a byte that
+  does not occur in the value is used, so the marker cannot contain it and no
+  occurrence can span the marker boundary. `finish()` is safe to call once;
+  callers must not reuse a redactor afterwards.
+- Secret lifetime: the value lives in a private `Vec`, is never exposed via
+  `Debug`/`Display` (Debug prints only `secret_len`/`pending_len`), and the
+  value plus the pending overlap are zeroized on drop. `discard_prefix` uses
+  `copy_within`, then zeroizes the stale duplicate of the retained tail before
+  truncating, so no fragment stays in the spare capacity.
+- Documented limit (also for `SECURITY.md`, TODO 2.7): redaction protects the
+  agent's context from accidental output. It is not a sandbox — the child has
+  the value in its environment, so a hostile child can exfiltrate it through
+  files, the network, or `/proc/<pid>/environ`. Only an exact contiguous
+  occurrence is replaced.
+- Tests (12 in `src/redact.rs`): whole/repeated occurrences, a split at every
+  byte offset of the input, byte-at-a-time input, arbitrary chunk sizes,
+  overlapping values (`aba`/`ababa`, `aa`/`aaaaa`), binary bytes with NUL and
+  `0xff`, empty value passthrough, `finish` flushing a trailing prefix and
+  releasing a disproved one, pending bound strictly below the value length,
+  fallback marker for values that are substrings of `[REDACTED]`, and redacted
+  `Debug` both fresh and half-consumed.
+- Gate: `cargo fmt --check` clean; `cargo clippy --all-targets -- -D warnings`
+  clean; `cargo test` passes (139 lib, 20 bin, 27 CLI, 12 daemon, 8 unlock);
+  `cargo audit` is not installed on this machine.
+- Next: 2.6b adds `stdout`/`stderr`/`exit` frames to the protocol; 2.6c wires
+  `Redactor` into the daemon's `run` handler; 2.6d adds the CLI reader. Audit
+  log assertions for `run` stay in 3.3.
+
 ## 2026-11-02 — Session token for the unlock daemon (TODO 2.5)
 
 - New `src/token.rs` (`SessionToken`): 32 OS-random bytes from `getrandom`,

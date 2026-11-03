@@ -12,6 +12,7 @@ pub mod daemon;
 pub mod error;
 pub mod password;
 pub mod protocol;
+pub mod redact;
 #[cfg(unix)]
 pub mod session;
 #[cfg(unix)]

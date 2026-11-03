@@ -141,11 +141,36 @@ come first.
       field; `unauthorized` is a distinct response and does not refresh the
       idle timer. `lock` and a daemon exit remove the file. Clients refuse a
       token file that is not a regular 0600 file owned by the user.)
-- [ ] **2.6 `run --env NAME=<ref> -- <cmd>` via the daemon.** The daemon spawns the
-      child, relaying redacted stdout/stderr and the exit code. Tests: child sees
-      the variable; the secret appears in neither the socket bytes nor the client's
-      output nor the audit log; large output is redacted in chunks (no
-      chunk-boundary leak — implement streaming redaction with an overlap window).
+- [ ] **2.6 `run --env NAME=<ref> -- <cmd>` via the daemon.** Split into ordered
+      pieces because the item spans the redactor, the wire protocol, the daemon
+      and the CLI.
+- [x] **2.6a Streaming redactor (`src/redact.rs`).** Pure, reusable byte-stream
+      redactor: replaces every occurrence of the injected value with a fixed
+      marker and holds back a partial-match suffix so a value split across two
+      reads is still caught. Bounded pending buffer, zeroized on drop, redacted
+      `Debug`. Tests: whole and repeated occurrences, a split at every byte
+      offset, byte-at-a-time input, overlapping occurrences, binary bytes, an
+      empty value, `finish` flushing a trailing partial prefix, the pending
+      bound, and no secret bytes in `Debug`. (If the default `[REDACTED]`
+      marker would itself contain the value, a run of a byte absent from the
+      value is used instead. Best-effort: a hostile child that holds the value
+      can still exfiltrate it by other channels.)
+- [ ] **2.6b Protocol streaming `run` responses.** `stdout`, `stderr` and `exit`
+      frames with hex-encoded data (arbitrary bytes survive JSON), plus stable
+      failure codes (`not_found`, `spawn_failed`). Tests: round-trip of binary
+      payloads, chunk-size cap, unknown frame types rejected without panic.
+- [ ] **2.6c Daemon executes `run`.** Decrypt, resolve the `pm://` ref, spawn the
+      child with only the requested variable injected, stream redacted
+      stdout/stderr, return its exit code. Tests: child sees the variable; the
+      value appears in neither socket bytes nor daemon output; missing ref and
+      failed spawn are distinct non-fatal errors; streaming output larger than
+      one chunk is redacted across chunk boundaries.
+- [ ] **2.6d CLI `run` + client reader.** `passmgr run --env NAME=<ref> -- <cmd>`
+      forwards frames to its own stdout/stderr and exits with the child's status;
+      refuses malformed specs and non-daemon operation with stable exit codes.
+      Tests: end-to-end injection, output relay, redaction, exit-code
+      propagation, and agent-mode use (this is the intended agent surface).
+      Audit-log assertions belong to 3.3, when the log exists.
 - [ ] **2.7 `SECURITY.md` limit note**: same-user process can read
       `/proc/<pid>/environ` while the child runs. Not optional.
 
