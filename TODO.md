@@ -22,11 +22,15 @@ Rules that apply to every item:
       (Also covers dependencies and the planned grant/MCP design from
       `MCP.md`, plus an "Open questions" section that is explicitly *not* a
       decision list.)
-- [ ] **H.2 Split `src/main.rs` (≈1,600 lines) into `src/cli/` modules**
+- [x] **H.2 Split `src/main.rs` (≈1,600 lines) into `src/cli/` modules**
       (argument parsing, one module per command group, output formatting). No
       behavior change: every existing test passes unmodified, and `--help`
       output is byte-identical (assert this with a test that runs before and
       after). This makes room for the ~20 commands still to come.
+      (`src/cli/{mod,args,commands,unlock,help}.rs`; `main.rs` is 7 lines.
+      `--help` is pinned by `tests/fixtures/help.txt`, captured from the
+      pre-split binary. Also fixed a `BrokenPipe` panic in the daemon test
+      helper, not a behavior change.)
 
 ## Phase 2 — unlock daemon (`pmd`)
 

@@ -1,3 +1,40 @@
+## 2026-11-02 — Split the CLI into `src/cli/` modules (TODO H.2)
+
+- `src/main.rs` is now 7 lines (`mod cli;` + `fn main` -> `cli::main`).
+  New modules: `src/cli/mod.rs` (entry, dispatch, `stdout_write`,
+  `report_runtime_error`, the moved unit tests), `src/cli/args.rs` (all
+  parsing, `Command`/option types, `DEFAULT_DB`), `src/cli/commands.rs`
+  (local commands, prompts, JSON metadata, `unlock` helper, `warn_insecure`),
+  `src/cli/unlock.rs` (`command_unlock`/`command_lock`, both cfgs) and
+  `src/cli/help.rs` (`USAGE`, `HELP`). No behavior change.
+- Visibility: items are `pub(crate)` and re-exported with globs from
+  `cli/mod.rs`, so the moved test module still works with `use super::*`
+  and every test body is unchanged. Struct fields are `pub(crate)`; enum
+  variant fields inherit the enum's visibility (a field modifier there would
+  not compile).
+- `--help` byte-identity: captured `tests/fixtures/help.txt` from the
+  **pre-split** binary (7933 bytes, md5 `8c185a1d9b9cdf012ededd6c00f331b6`)
+  and added `help_output_matches_the_golden_file` in `tests/cli.rs`, which
+  compares exact stdout. This is the before/after proof H.2 asked for; do not
+  regenerate the fixture to "fix" a failure — a diff means behavior changed.
+- Flaky test fix (test harness only, not shipped behavior): the full-suite
+  run hit `write request: BrokenPipe` in
+  `unauthorized_requests_do_not_refresh_the_idle_timeout`. The daemon can
+  expire between `connect` and `write_all`, but `tests/daemon.rs::try_request`
+  used `.expect("write request")`, so the probe loop's `_ => break` never ran.
+  It now propagates the write error (`?`), the same class of fix as the
+  iteration-21 read fix. The test's assertions are unchanged; ran it 5x
+  alone and once in the full suite.
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
+  clean, `cargo test` passes (139 lib, 20 bin, 28 CLI, 12 daemon, 8 unlock;
+  CLI is +1 for the golden help test). `cargo audit` is not installed;
+  skipped, not installed.
+- **Next iteration must know:** next is **2.6b** (protocol `stdout`/`stderr`/
+  `exit` frames). Add new commands as `src/cli/<group>.rs` modules, not by
+  growing `mod.rs`; keep each file under ~1,000 lines. `--help` is now a
+  tested contract: update `tests/fixtures/help.txt` deliberately in the same
+  commit when help text changes. `DECISIONS.md` has the layout decision.
+
 ## 2026-11-02 — Create `DECISIONS.md` (TODO H.1)
 
 - New `DECISIONS.md` (~280 lines, 90 bullet entries): one-line standing

@@ -140,9 +140,9 @@ fn try_request(
 ) -> std::io::Result<Response> {
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(WAIT)).expect("read timeout");
-    stream
-        .write_all(&protocol::encode(token, request).expect("encode request"))
-        .expect("write request");
+    // The daemon can expire between `connect` and this write; report that as
+    // an I/O error so callers that probe can stop instead of panicking.
+    stream.write_all(&protocol::encode(token, request).expect("encode request"))?;
     try_read_response(&mut stream)
 }
 

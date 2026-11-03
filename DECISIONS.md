@@ -119,6 +119,11 @@ code does not implement yet.
 - A broken stdout pipe (`BrokenPipe` while writing command data) exits 0.
 - `generate` prints a fresh value on stdout. It exposes no stored secret, but
   whether agent mode should refuse it is still open (see "Open questions").
+- CLI code lives in `src/cli/`: `mod.rs` (entry, dispatch, output, tests),
+  `args.rs` (parsing), `commands.rs` (local commands and prompts),
+  `unlock.rs` (daemon commands) and `help.rs` (`USAGE`/`HELP`). `src/main.rs`
+  is only `mod cli;` plus `fn main`. `--help` output is pinned byte-for-byte
+  by `tests/fixtures/help.txt` and a CLI test.
 
 ## Exit codes
 

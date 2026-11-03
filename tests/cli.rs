@@ -935,6 +935,16 @@ fn agent_flag_is_global_and_documented() {
     assert!(stdout(&output).contains("must come before the command"));
 }
 
+/// `--help` is a stable contract that docs and agents quote. The golden file
+/// was captured from the binary before the `src/cli/` split (TODO H.2), so
+/// this test proves the refactor did not change a single byte of output.
+#[test]
+fn help_output_matches_the_golden_file() {
+    let output = run(&["--help"], "");
+    assert_success(&output);
+    assert_eq!(stdout(&output), include_str!("fixtures/help.txt"));
+}
+
 /// Editing without metadata flags rotates the password. The new value is
 /// prompted twice, stored, and never written to stdout or stderr.
 #[test]
