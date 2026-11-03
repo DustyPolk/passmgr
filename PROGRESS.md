@@ -1,3 +1,28 @@
+## 2026-11-02 — Review of 3500f6d..533b68d
+
+- Findings: 5 — containment/shutdown 1 (R.6), run policy 1 (R.7), resource
+  bound 1 (R.8), lock scope 1 (R.9), doc drift 1 (R.10). Secret exposure 0,
+  authorization 0, crypto 0, maintainability 0 (the >1000-line files predate
+  this range).
+- R.6 is reproduced at HEAD with a scratch script: a child that leaves a
+  grandchild on its stdout/stderr makes `abort` join a reader that can never
+  see EOF, so `lock` prints "has wiped its key and stopped" while `pmd` keeps
+  the key, socket and session file and the child survives. The R.1 tests close
+  the pipes first (`exec >&- 2>&-`), which is why they pass.
+- R.7 reproduced too: a run accepted 0.4 s before a 4 s idle timeout is killed
+  0.4 s in ("the unlock daemon closed the connection before the command
+  finished").
+- Looked at and judged fine: the sidecar flock (`src/vault.rs:247-297` — 0600
+  via fchmod on the fd, `O_NOFOLLOW|O_CLOEXEC`, `is_file()`, `flock` retry,
+  never unlinked, 30 s `VaultBusy`, `save` refuses a read-only vault); the new
+  vault tests (exclusion, no lost update, no torn read, symlink refusal) are
+  not vacuous; protocol v3 `cwd`/`command[0]` absolute-path validation;
+  `run` refusing `--db`/`PASSMGR_DB` (no bypass through global-flag order or
+  `--`); caller-cwd/caller-PATH resolution; the exact-bytes redaction test
+  (asserts base64 is relayed verbatim, so it would fail if encodings came
+  back); `denied_env_name` re-checked in `pmd`; no new secret-bearing
+  `println!`/`{:?}`/serialize in the diff.
+
 ## 2026-11-02 — Serialize vault writers with a sidecar flock (TODO 3.1)
 
 - `src/vault.rs`: `Vault` gained a private `write_lock: Option<File>`.
