@@ -288,32 +288,40 @@ Rules that apply to every item:
       `GrantRequest::new` use it, so create and decode agree and stored grants
       need no migration.
 
-- [ ] **R.22 "Never spent on a request no write could accept" is false for
-      vault-level limits, so a full vault silently burns the approval.**
+- [x] **R.22a "Never spent on a request no write could accept" was false for
+      vault-level limits.**
       `GrantRequest::check_approvable` (`src/grant/request.rs:146-152`) checks
-      only the expiry, and both its doc comment (`src/grant/request.rs:150`)
-      and the daemon comment at `src/daemon.rs:655-657` claim that no write
-      could then refuse the request. But the write also fails on vault limits:
-      `store::encode` refuses more than `MAX_GRANTS` (1024) grants
-      (`src/store/payload.rs:118`) or more than `MAX_PLAINTEXT_BYTES`
-      (`src/store/payload.rs:125`), and `Vault::save_with_key`
-      (`src/vault.rs:194-208`) only discovers that after the approval is gone.
-      Failure: a vault that already holds 1024 grants; the human proves the
-      digest, the daemon answers `grant_approved` and spends both the nonce and
-      the approval, then 3.4d's `save_with_key` fails with "too many grants".
-      The master-password prompt produced neither a grant nor a retryable
-      approval, the token the human believed was approved was never written,
-      and the human has no way to tell this from a crash.
-      Fix: the daemon must not learn vault state (it never opens the vault), so
-      narrow the claim to the validator rules it actually enforces, and make
-      3.4d's `pm grant create` open the vault with the derived key and refuse a
-      full vault *before* it asks for a proof. Do not add `MAX_GRANTS` to
-      `check_approvable`.
-      Test: seed a vault at `MAX_GRANTS`, run `pm grant create` on a PTY, and
-      assert it fails with the "too many grants" error without ever sending
-      `challenge`/`prove` (record the frames at a stub socket) and that
-      `Approvals::pending()` is still 0; plus a `tests/docs.rs` contract pinning
-      the reworded sentence so the absolute claim cannot come back.
+      only the expiry, but its doc comment and the daemon comment at
+      `src/daemon.rs:650-660` claimed that no write could then refuse the
+      request. The write also fails on vault limits: `store::encode` refuses
+      more than `MAX_GRANTS` (1024) grants or more than `MAX_PLAINTEXT_BYTES`,
+      and `Vault::save_with_key` only discovers that after the approval is
+      gone. The daemon must not learn vault state, so the claim was narrowed
+      to the expiry rule and the vault-level check moved to the writer.
+      Done: new `Vault::check_grant_writable(&Grant)` (`src/vault.rs`) runs the
+      writer's own `store::encode` over the candidate grant list and writes
+      nothing, so the pre-check cannot drift from the write path. The
+      `check_approvable` and daemon comments now say the daemon checks the
+      expiry rule only and name the CLI's pre-check; `MCP.md` and
+      `DECISIONS.md` say who owns the vault-level check and when it runs, and
+      `tests/docs.rs::docs_say_who_checks_vault_limits_before_the_proof` pins
+      those sentences and forbids the old absolute claim in both comments.
+      Tests: `check_grant_writable_refuses_a_full_vault_without_writing` (a
+      vault at `MAX_GRANTS` reports the writer's "too many grants", the vault
+      is unmodified and the file is never created) and
+      `check_grant_writable_accepts_a_grant_that_still_fits` (one slot left is
+      accepted; a duplicate id is refused before the write). The
+      `MAX_PLAINTEXT_BYTES` branch shares the same `store::encode` call.
+- [!] **R.22b `pm grant create` must refuse a full vault before the proof.**
+      Blocked on TODO 3.4d, which owns the CLI and its vault access. 3.4d must
+      open the vault with the derived key and call
+      `Vault::check_grant_writable` on the grant it is about to propose
+      **before** it sends `challenge`/`prove`, so a vault at `MAX_GRANTS`
+      fails with "too many grants" and spends no approval. Test: seed a vault
+      at `MAX_GRANTS`, run `pm grant create` on a PTY, assert the
+      "too many grants" error, assert no `challenge`/`prove` frame reached a
+      stub socket, and assert `Approvals::pending() == 0`. Do not add
+      `MAX_GRANTS` to `check_approvable`; tick this item when 3.4d lands.
 
 - [ ] **R.23 Nothing tests the 30-day branch of the pre-spend check, so the
       30-day refusal could be dropped without a failure.**
@@ -482,13 +490,18 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       success opens the vault with that same key (`open_with_key` +
       `lock_for_update` + `save_with_key`) and writes the grant; it then
       writes the raw token to `--out` with `O_EXCL` and mode 0600, never to
-      stdout. Requires a running daemon (`pm unlock` first); it does not
-      auto-unlock in this item. Refuse interpreter commands (a shared pure
-      list in `grant/validate.rs`) without `--allow-interpreter`. Tests: the
-      token is absent from stdout/stderr, the file mode is 0600, an existing
-      `--out` is refused without overwriting, interpreter commands are
-      refused without the flag, agent/TTY refusal exits 5, and the daemon is
-      still usable after the write (its key was not invalidated).
+      stdout. Before it asks for the proof it must call
+      `Vault::check_grant_writable` on the grant it proposes, so a vault at
+      `MAX_GRANTS` fails with "too many grants" and spends no approval (closes
+      R.22b; tick that item too). Requires a running daemon (`pm unlock`
+      first); it does not auto-unlock in this item. Refuse interpreter
+      commands (a shared pure list in `grant/validate.rs`) without
+      `--allow-interpreter`. Tests: the token is absent from stdout/stderr,
+      the file mode is 0600, an existing `--out` is refused without
+      overwriting, interpreter commands are refused without the flag,
+      agent/TTY refusal exits 5, a full vault sends no `challenge`/`prove`
+      (R.22b), and the daemon is still usable after the write (its key was
+      not invalidated).
 - [ ] **3.5 `pm grant list|show|revoke` (+ `--json`).** list/show print
       metadata only, never tokens or hashes. revoke needs no password and takes
       effect on the next request. `revoke --all` exists. Tests for each.

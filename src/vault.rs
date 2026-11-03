@@ -301,6 +301,27 @@ impl Vault {
         Ok(())
     }
 
+    /// Check that adding `grant` and saving this vault would be accepted.
+    ///
+    /// [`Vault::save_with_key`] refuses a payload that holds more than
+    /// [`crate::grant::MAX_GRANTS`] grants or more than
+    /// [`crypto::MAX_PLAINTEXT_BYTES`] bytes, but `pm grant create` spends the
+    /// human's one-shot approval *before* it writes. The CLI asks this question
+    /// first, with the vault it opened using the same derived key, so a vault
+    /// that is already full is refused before the proof is spent (TODO R.22).
+    /// The check runs the writer's own [`store::encode`] over the candidate
+    /// grant list, so the pre-check and the write cannot drift apart.
+    ///
+    /// Nothing is written and the vault is not modified. A concurrent writer
+    /// can still fill the vault between this check and the save; the write
+    /// lock then reports [`Error::VaultChanged`] (or the encode refuses), which
+    /// would take two grant creations racing by hand.
+    pub fn check_grant_writable(&self, grant: &Grant) -> Result<()> {
+        let mut grants = self.grants.clone();
+        grants.push(grant.clone());
+        store::encode(&self.credentials, &grants).map(|_| ())
+    }
+
     pub fn is_empty(&self) -> bool {
         self.credentials.is_empty()
     }

@@ -143,11 +143,17 @@ impl GrantRequest {
         &self.token_hash
     }
 
-    /// Check the expiry against `now` before an approval is spent.
+    /// Check the part of the request the daemon can verify before an approval
+    /// is spent.
     ///
     /// The daemon calls this for `grant_create`: it applies the same expiry
     /// and 30-day lifetime rules [`Grant::create`] applies at write time, so a
-    /// human's approval is never spent on a request no write could accept.
+    /// human's approval is not spent on a request the expiry rule alone
+    /// rejects. It cannot check the vault-level limits (`MAX_GRANTS`, payload
+    /// size) because the daemon never opens the vault for this request; the
+    /// approving CLI asks [`crate::vault::Vault::check_grant_writable`] with
+    /// the vault it already decrypted, *before* it asks for the proof
+    /// (TODO R.22).
     pub fn check_approvable(&self, now: u64) -> Result<()> {
         validate_expiry(self.expires_at, now)
     }

@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-use crate::grant::{Capabilities, Grant, GrantSpec, Scope, TokenHash};
+use crate::grant::{Capabilities, Grant, GrantSpec, MAX_GRANTS, Scope, TokenHash};
 
 fn credential(service: &str, username: &str, password: &str) -> Credential {
     Credential::new(
@@ -703,6 +703,68 @@ fn refuses_a_duplicate_grant_id() {
         Err(Error::InvalidInput(message)) if message.contains("duplicate grant id")
     ));
     assert_eq!(vault.grants().len(), 1);
+}
+
+/// TODO R.22: `save_with_key` refuses a vault holding more than `MAX_GRANTS`
+/// grants, but `pm grant create` spends the human's approval before it writes.
+/// The pre-check must report the writer's own error and touch nothing.
+#[test]
+fn check_grant_writable_refuses_a_full_vault_without_writing() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("vault.dat");
+    let mut vault = Vault::empty(&path);
+    let entry = EntryId::generate().unwrap();
+    for index in 0..MAX_GRANTS {
+        vault
+            .add_grant(test_grant(entry, &format!("g{index}"), 1_700_000_000))
+            .unwrap();
+    }
+
+    let error = vault
+        .check_grant_writable(&test_grant(entry, "one too many", 1_700_000_000))
+        .expect_err("a vault at MAX_GRANTS cannot take another grant");
+    assert!(
+        matches!(&error, Error::InvalidInput(message) if message.contains("too many grants")),
+        "the pre-check must run the writer's own rule: {error}"
+    );
+    assert_eq!(
+        vault.grants().len(),
+        MAX_GRANTS,
+        "must not modify the vault"
+    );
+    assert!(!path.exists(), "a capacity check must not create the vault");
+}
+
+#[test]
+fn check_grant_writable_accepts_a_grant_that_still_fits() {
+    let directory = tempfile::tempdir().unwrap();
+    let vault_path = directory.path().join("vault.dat");
+    let mut vault = Vault::empty(&vault_path);
+    let entry = EntryId::generate().unwrap();
+    for index in 0..MAX_GRANTS - 1 {
+        vault
+            .add_grant(test_grant(entry, &format!("g{index}"), 1_700_000_000))
+            .unwrap();
+    }
+
+    // One slot left: the next grant fits, so the CLI may proceed to the proof.
+    assert!(
+        vault
+            .check_grant_writable(&test_grant(entry, "last slot", 1_700_000_000))
+            .is_ok()
+    );
+    assert_eq!(vault.grants().len(), MAX_GRANTS - 1);
+
+    // The same check runs the writer's duplicate-id rule too, so a replayed
+    // grant is refused here instead of after the approval is spent.
+    let duplicate = vault.grants()[0].clone();
+    let error = vault
+        .check_grant_writable(&duplicate)
+        .expect_err("a duplicate grant id must be refused before the write");
+    assert!(
+        matches!(&error, Error::InvalidInput(message) if message.contains("duplicate grant id")),
+        "the pre-check must report a duplicate id: {error}"
+    );
 }
 
 #[test]

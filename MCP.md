@@ -225,7 +225,10 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   days out *without* spending the approval, and otherwise spends the digest
   and answers a bare `grant_approved`, which carries no token, hash, grant id
   or label. The CLI that holds the raw token assigns the id and writes the
-  vault.
+  vault. The daemon cannot see the vault's limits, because it never opens the
+  vault for this request: the approving CLI checks them against the vault it
+  already decrypted (`MAX_GRANTS`, payload size) **before it asks for a
+  proof**, so a full vault cannot consume an approval (TODO R.22).
 - Interpreters and shells (`sh`, `bash`, `zsh`, `fish`, `dash`, `env`, `xargs`,
   `python*`, `node`, `perl`, `ruby`, `busybox`, …) in a command allowlist let
   the agent exfiltrate secrets in ways redaction cannot catch. Approval shows a

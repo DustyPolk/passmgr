@@ -1,3 +1,35 @@
+## 2026-11-03 — Narrow the pre-spend claim and give the writer a capacity check (TODO R.22a)
+
+- `Vault::check_grant_writable(&Grant)` (`src/vault.rs`) runs the writer's own
+  `store::encode` over the candidate grant list and discards the bytes: nothing
+  is written and the vault is unmodified. The pre-check and `save_with_key`
+  therefore share one rule set (`MAX_GRANTS`, `MAX_PLAINTEXT_BYTES`, duplicate
+  grant ids, grant validation), so they cannot drift.
+- The daemon cannot make that check: it never opens the vault for
+  `grant_create`. `GrantRequest::check_approvable`'s doc and the
+  `Request::GrantCreate` comment in `src/daemon.rs` now claim only the
+  expiry/30-day rule and name the CLI's pre-check. `MCP.md` and `DECISIONS.md`
+  say who owns the vault-level check and that it runs before the proof; the
+  advisory-vs-concurrent-writer caveat is in the method doc and DECISIONS.md
+  (the write lock still refuses a lost update).
+- R.22 is split: R.22a (this) is done; R.22b is `[!]` blocked on 3.4d, which
+  must call the pre-check before `challenge`/`prove` and tick R.22b. 3.4d's
+  text now carries that requirement plus the PTY test (seed at `MAX_GRANTS`,
+  assert no challenge/prove frame, `Approvals::pending() == 0`).
+- Tests: two unit tests in `src/vault/tests.rs` (a vault at `MAX_GRANTS`
+  reports the writer's "too many grants" while the vault and the filesystem
+  stay untouched; one slot left is accepted and a duplicate id is refused
+  before the write -- the `MAX_PLAINTEXT_BYTES` branch shares the same
+  `store::encode` call). `tests/docs.rs::
+  docs_say_who_checks_vault_limits_before_the_proof` pins the MCP.md and
+  DECISIONS.md sentences and fails if `src/grant/request.rs` or
+  `src/daemon.rs` regains "no write could accept".
+- No dependency change. Gate: `fmt --check`, `clippy --all-targets -D warnings`
+  and the full `cargo test` green (230 lib tests); `cargo audit` not installed,
+  skipped as the gate allows.
+- **Next iteration must know:** the helper has no caller yet, on purpose. Do
+  not teach `pmd` about vault limits (it must not learn vault state); 3.4d owns
+  opening the vault and calling `check_grant_writable` before the proof.
 ## 2026-11-03 — Refuse hidden characters in grant command paths (TODO R.21)
 
 - `src/grant/validate.rs`: `validate_commands` now rejects any command path

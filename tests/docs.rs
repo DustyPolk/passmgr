@@ -272,3 +272,44 @@ fn mcp_says_the_daemon_checks_the_canonical_command_path() {
         "MCP.md must not leave command[0] resolution to the untrusted MCP server"
     );
 }
+
+/// The pre-spend check can only apply the expiry rules, because the daemon
+/// never opens the vault for `grant_create`. It once claimed an approval was
+/// "never spent on a request no write could accept", which a full vault
+/// falsified (TODO R.22). The documents must name the owner of the vault-level
+/// check and when it runs, and the code comments must not promise more.
+#[test]
+fn docs_say_who_checks_vault_limits_before_the_proof() {
+    let mcp = plain(MCP).to_lowercase();
+    assert!(
+        mcp.contains("the daemon cannot see the vault's limits, because it never opens the vault for this request"),
+        "MCP.md must say why the daemon cannot check vault-level limits"
+    );
+    assert!(
+        mcp.contains("before it asks for a proof, so a full vault cannot consume an approval"),
+        "MCP.md must say the CLI checks a full vault before the proof"
+    );
+
+    let decisions = plain(DECISIONS);
+    assert!(
+        decisions.contains("Vault::check_grant_writable"),
+        "DECISIONS.md must name the pre-check the CLI runs"
+    );
+
+    // The code comments describe the same rule, not an absolute guarantee.
+    const REQUEST_SRC: &str = include_str!("../src/grant/request.rs");
+    const DAEMON_SRC: &str = include_str!("../src/daemon.rs");
+    for (name, source) in [
+        ("src/grant/request.rs", REQUEST_SRC),
+        ("src/daemon.rs", DAEMON_SRC),
+    ] {
+        assert!(
+            !source.to_lowercase().contains("no write could accept"),
+            "{name} must not claim the pre-spend check covers vault-level limits"
+        );
+    }
+    assert!(
+        REQUEST_SRC.contains("check_grant_writable") && REQUEST_SRC.contains("expiry rule alone"),
+        "check_approvable's doc must say it covers the expiry rule only"
+    );
+}

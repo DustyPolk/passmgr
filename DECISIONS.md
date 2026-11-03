@@ -495,8 +495,13 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   Implemented in TODO 3.4c: `grant_create` decodes into `GrantCreateRequest`,
   re-runs `GrantRequest::new` so the digest is always over the normalized
   request, and refuses an expiry outside `(now, now + 30 days]` with
-  `bad_request` **before** `Approvals::take`; a request the vault writer
-  would refuse therefore never spends the human's approval. The wire fields
+  `bad_request` **before** `Approvals::take`, so the expiry rule can never
+  spend a human's approval. Vault-level limits are a different owner: the
+  daemon never opens the vault for this request, so `pm grant create` checks
+  `Vault::check_grant_writable` (the writer's own `store::encode`) **before**
+  it asks for the proof, and refuses a full vault with no approval spent
+  (TODO R.22). That pre-check is advisory against a concurrent writer; the
+  write lock still refuses a lost update. The wire fields
   are flat like `run` (no nested `request` object) and `grant_approved`
   carries nothing but its type. The daemon still never writes; the CLI in
   3.4d owns the vault write.

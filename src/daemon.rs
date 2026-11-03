@@ -649,8 +649,12 @@ fn handle_connection(
             };
             let response = match create.into_grant_request() {
                 Ok(request) if request.check_approvable(now).is_err() => {
-                    // Expired, out of range, or longer than 30 days: no write
-                    // could accept it, so do not spend the approval.
+                    // Expired, out of range, or longer than 30 days: the
+                    // writer would reject this on its expiry rule alone, so
+                    // do not spend the approval. Vault-level limits are not
+                    // visible here (the daemon never opens the vault for this
+                    // request); the CLI checks them before it asks for a
+                    // proof (TODO R.22).
                     Response::Error(ResponseError::BadRequest)
                 }
                 Ok(request) => {
