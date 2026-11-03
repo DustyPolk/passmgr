@@ -1,3 +1,38 @@
+## 2026-11-03 — Split the CLI tests and empty the layout allowlist (TODO R.20d)
+
+- `tests/cli.rs` 1,463 -> 975 lines (21 tests). The reveal/agent section moved
+  verbatim to `tests/cli_reveal.rs` (368 lines, 9 tests): the piped-stdin
+  refusal, the agent-marker matrix, the `--agent` refusals over a PTY and over
+  pipes, the metadata-command allowance, and the global `--agent` contract.
+- Every helper moved to `tests/cli_support/mod.rs` (283): the `SERIAL` mutex
+  and `serial()`, `run`/`run_with_env`/`base_command`, `vault_path`,
+  `vault_password`, `add_example`, `EXAMPLE_SECRET`,
+  `stdout`/`stderr`/`assert_success`/`get_reference`/
+  `assert_canonical_reference`, `wait_for_prompt`, and the Linux-only
+  `PtyOutput`/`run_on_pty`/`read_pty`. Both binaries include it with
+  `mod cli_support;` + `use cli_support::*;`; helpers are `pub` (and
+  `PtyOutput`'s fields) because a module's items are private to it, and the
+  file has `#![allow(dead_code)]` like `tests/support/mod.rs` because each
+  binary uses a different subset.
+- `tests/layout.rs`: `PENDING_SPLITS` is now empty; the guard and its
+  allowlist-shrinks test are unchanged (the second test simply iterates
+  nothing). No new allowlist entries or `MAX_LINES` change.
+- The move is mechanical: a per-function diff against `HEAD:tests/cli.rs`
+  shows all 30 test bodies and every helper body identical apart from the
+  `pub` prefixes and `PtyOutput` field visibility. Total CLI tests unchanged
+  at 30 (21 + 9); no behavior change.
+- Each binary has its own `SERIAL` static, so cargo may run `cli` and
+  `cli_reveal` concurrently, each internally serial. Argon2 memory is still
+  bounded per binary (64 MiB per unlock); the CLI binaries now peak at ~2x.
+- Gate: `fmt --check`, `clippy --all-targets -D warnings`, full `cargo test`
+  green (lib 223, cli 21, cli_reveal 9, daemon 20, docs 11, grant 23, layout 2,
+  run 13, unlock 8, main 34, concurrency/shutdown plus doctests). `cargo audit`
+  not installed; skipped per instructions.
+- **Next iteration must know:** R.20 is complete and `TODO.md` Phase R has no
+  unchecked items left; the next item is 3.4c (`grant_create` request and
+  daemon handler, which also discharges the blocked R.15b). Phase R's only
+  remaining entry is R.15b, which is `- [!]` blocked on 3.4/4.9.
+
 ## 2026-11-03 — Split the protocol frame codec from the request model (TODO R.20c)
 
 - `src/protocol/mod.rs` 1,317 -> 444 lines: request/response types,

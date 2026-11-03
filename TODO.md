@@ -225,7 +225,7 @@ Rules that apply to every item:
       `HEAD:src/protocol/mod.rs` apart from the module wrapper; only
       indentation, the two relocated imports and rustfmt's re-wrapping
       differ. Lib test count unchanged at 223 (40 in `protocol::tests`).
-- [ ] **R.20d Split `tests/cli.rs` (1,463 lines).**
+- [x] **R.20d Split `tests/cli.rs` (1,463 lines).**
       Move the PTY/reveal/agent-marker tests and their helpers (`run_on_pty`,
       `read_pty`, the serial guard where needed) into a second test binary
       (e.g. `tests/cli_reveal.rs`), keeping the shared helpers in one place
@@ -234,6 +234,16 @@ Rules that apply to every item:
       Test: the layout guard passes without that entry and every moved test
       keeps its behavior (same assertions, same canaries); total test count is
       unchanged.
+      Done: `tests/cli_reveal.rs` (368 lines, 9 tests: the reveal refusals,
+      the PTY success path, and the `--agent` tests); `tests/cli.rs` is 975
+      lines with the remaining 21 tests. `tests/cli_support/mod.rs` (283) holds
+      every helper, now `pub`, including `SERIAL`/`serial`, `run_on_pty` and
+      `read_pty`. `PENDING_SPLITS` is empty; its second guard test still runs.
+      All 30 test bodies are byte-identical to `HEAD` apart from the `pub`
+      prefixes (verified by a per-function diff), total CLI tests unchanged at
+      30, and the rest of the suite is unchanged. Each binary has its own
+      `SERIAL` mutex, so the two binaries can run concurrently; both still run
+      their own tests one at a time.
 
 ## Phase 3 — grants and audit log
 

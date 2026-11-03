@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 /// The rule from `PROMPT.md` ("keep files under ~1,000 lines").
 const MAX_LINES: usize = 1_000;
 
-/// Files that TODO R.20d still has to split, relative to the crate root
-/// with `/` separators. This list only shrinks; the guard fails for every file
-/// over the limit that is not named here.
-const PENDING_SPLITS: &[&str] = &["tests/cli.rs"];
+/// Files that TODO R.20 still has to split, relative to the crate root with
+/// `/` separators. This list only shrinks; the guard fails for every file over
+/// the limit that is not named here. It is empty now that R.20a-R.20d are done,
+/// so any new file over the limit fails immediately.
+const PENDING_SPLITS: &[&str] = &[];
 
 fn collect_rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let entries = fs::read_dir(dir).unwrap_or_else(|err| panic!("read {}: {err}", dir.display()));

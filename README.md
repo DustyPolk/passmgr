@@ -423,14 +423,18 @@ cargo test
 ```
 
 The library crate exposes the crypto, storage, password generation, and vault
-modules for testing. End-to-end CLI tests live in `tests/cli.rs`; they run
+modules for testing. End-to-end CLI tests live in `tests/cli.rs` and
+`tests/cli_reveal.rs` (the TTY-only reveal and agent-mode refusals); both
+include `tests/cli_support/mod.rs` for the shared helpers and run their tests
 serially because each unlock uses 64 MiB for Argon2.
 
 Repository layout:
 
 ```text
 src/            Rust implementation
-tests/cli.rs    end-to-end tests
+tests/cli.rs            end-to-end CLI tests
+tests/cli_reveal.rs     TTY-gated reveal and agent-mode tests
+tests/cli_support/      helpers shared by both CLI test binaries
 legacy-c/       archived C implementation and its README
 FORMAT.md       vault format specification
 ```

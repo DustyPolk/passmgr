@@ -551,8 +551,12 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Gate per iteration: `cargo fmt --check`,
   `cargo clippy --all-targets -- -D warnings`, `cargo test`, then
   `cargo audit` where it exists.
-- Keep files under ~1,000 lines and split before growing past that;
-  `src/main.rs` is already over (TODO H.2 splits it).
+- Keep files under ~1,000 lines and split before growing past that.
+  `tests/layout.rs` enforces the limit for every `src/**` and `tests/**` file;
+  `PENDING_SPLITS` was a shrinking-only allowlist for the files TODO R.20 had
+  not split yet and is now empty, so a new oversized file fails immediately.
+  A split moves code mechanically (byte-identical bodies) into a sibling
+  module, and its tests move with it rather than being rewritten.
 
 ## Open questions (not decided; do not cite as decisions)
 
