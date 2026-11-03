@@ -29,6 +29,14 @@
 //! process behind makes the pipe never reach EOF and shutdown waits forever.
 //! The readers also poll a stop flag while waiting for input, so a process
 //! that somehow escaped the group still cannot make the join unbounded.
+//!
+//! Two external conditions stop a run, both checked in the relay loop and in
+//! the wait-for-exit loop: the daemon is shutting down ([`Stop::on_cancel`]),
+//! and the run's client is gone (`Stop::new`). The second matters because a
+//! client that drops its connection is how an agent host reports a timed-out
+//! tool call: without it the child keeps running with the secret in its
+//! environment, and the idle timeout stays suspended for as long as the child
+//! lives.
 
 use std::ffi::OsString;
 use std::io::{self, Read};
@@ -125,6 +133,45 @@ impl std::fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
+/// The external conditions that stop a run.
+///
+/// A run stops when the daemon is shutting down (`lock`, a signal, the idle
+/// timeout) or when the caller that asked for it is gone. Both are polled by
+/// the output loop and by the wait-for-exit loop, so neither a noisy child nor
+/// a silent one can delay the kill.
+///
+/// The client predicate is a closure rather than a flag so the caller can
+/// poll its own socket without a watchdog thread; it runs at most once per
+/// [`CANCEL_POLL`] slice in the silent case (and once per relayed frame while
+/// output flows).
+pub struct Stop<'a> {
+    cancel: &'a AtomicBool,
+    client_gone: Option<&'a dyn Fn() -> bool>,
+}
+
+impl<'a> Stop<'a> {
+    /// Stop only when `cancel` becomes true (no client to watch).
+    pub fn on_cancel(cancel: &'a AtomicBool) -> Self {
+        Self {
+            cancel,
+            client_gone: None,
+        }
+    }
+
+    /// Also stop when `client_gone` reports that the caller disconnected.
+    pub fn new(cancel: &'a AtomicBool, client_gone: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            cancel,
+            client_gone: Some(client_gone),
+        }
+    }
+
+    /// Whether the run must stop now.
+    fn requested(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst) || self.client_gone.is_some_and(|gone| gone())
+    }
+}
+
 /// A message from a pipe reader to the output loop.
 enum Message {
     Frame(RunFrame),
@@ -143,9 +190,9 @@ enum Message {
 /// chosen `argv[0]`.
 ///
 /// `inherited` is the already-filtered environment the child starts from
-/// (usually [`inherited_env`] of the daemon's own variables). `cancel` is
-/// polled while the child runs; when it becomes true the child is killed and
-/// [`RunError::Cancelled`] is returned.
+/// (usually [`inherited_env`] of the daemon's own variables). `stop` is polled
+/// while the child runs; when it reports a shutdown or a vanished client the
+/// child is killed and [`RunError::Cancelled`] is returned.
 ///
 /// `cwd` is the caller's working directory. The child starts there, so a
 /// relative argument means what the caller meant; the daemon never runs a
@@ -166,12 +213,18 @@ pub fn execute<F>(
     secret: &str,
     cwd: &Path,
     inherited: &[(OsString, OsString)],
-    cancel: &AtomicBool,
+    stop: &Stop<'_>,
     mut emit: F,
 ) -> Result<RunExit, RunError>
 where
     F: FnMut(RunFrame) -> io::Result<()>,
 {
+    // A client that left between sending the request and the spawn gets no
+    // child at all. The caller checks the same condition before decrypting,
+    // but a request can be authorized and then wait behind the vault lock.
+    if stop.requested() {
+        return Err(RunError::Cancelled);
+    }
     if program.as_os_str().is_empty() {
         return Err(RunError::Spawn(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -223,33 +276,33 @@ where
     let stderr = child.stderr.take().expect("stderr was piped");
 
     let (sender, receiver) = mpsc::sync_channel::<Message>(8);
-    let stop = Arc::new(AtomicBool::new(false));
+    let readers_stop = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::with_capacity(2);
     for (reader, is_stderr) in [
         (Box::new(stdout) as Box<dyn OutputPipe + Send>, false),
         (Box::new(stderr) as Box<dyn OutputPipe + Send>, true),
     ] {
         let redactor = Redactor::new(secret.as_bytes());
-        let reader_stop = Arc::clone(&stop);
+        let reader_stop = Arc::clone(&readers_stop);
         match spawn_reader(reader, redactor, sender.clone(), is_stderr, reader_stop) {
             Ok(handle) => readers.push(handle),
             Err(err) => {
                 drop(sender);
-                abort(&mut child, receiver, readers, &stop);
+                abort(&mut child, receiver, readers, &readers_stop);
                 return Err(RunError::Output(err));
             }
         }
     }
     drop(sender);
 
-    let emit_result = relay(&receiver, cancel, &mut emit);
+    let emit_result = relay(&receiver, stop, &mut emit);
     match emit_result {
         Relay::Finished => {
             // Both pipes reached EOF. The child may have closed them and kept
-            // running, so keep waiting for it -- but poll the cancel flag as
-            // well. A plain `wait()` here would make `lock`, `SIGTERM` and the
-            // idle timeout wait for a child that closed its output on purpose.
-            // `try_wait` is a `waitpid(WNOHANG)` internally.
+            // running, so keep waiting for it -- but poll the stop conditions
+            // as well. A plain `wait()` here would make `lock`, `SIGTERM`, the
+            // idle timeout and a vanished client wait for a child that closed
+            // its output on purpose. `try_wait` is a `waitpid(WNOHANG)`.
             loop {
                 match child.try_wait() {
                     Ok(Some(status)) => {
@@ -257,25 +310,25 @@ where
                         return Ok(exit_status(status));
                     }
                     Ok(None) => {
-                        if cancel.load(Ordering::SeqCst) {
-                            abort(&mut child, receiver, readers, &stop);
+                        if stop.requested() {
+                            abort(&mut child, receiver, readers, &readers_stop);
                             return Err(RunError::Cancelled);
                         }
                         std::thread::sleep(CANCEL_POLL);
                     }
                     Err(err) => {
-                        abort(&mut child, receiver, readers, &stop);
+                        abort(&mut child, receiver, readers, &readers_stop);
                         return Err(RunError::Output(err));
                     }
                 }
             }
         }
         Relay::OutputError(err) => {
-            abort(&mut child, receiver, readers, &stop);
+            abort(&mut child, receiver, readers, &readers_stop);
             Err(RunError::Output(err))
         }
         Relay::Cancelled => {
-            abort(&mut child, receiver, readers, &stop);
+            abort(&mut child, receiver, readers, &readers_stop);
             Err(RunError::Cancelled)
         }
     }
@@ -287,7 +340,7 @@ enum Relay {
     Finished,
     /// Writing a frame to the caller failed.
     OutputError(io::Error),
-    /// The daemon asked the run to stop.
+    /// The daemon is shutting down or the client is gone.
     Cancelled,
 }
 
@@ -301,15 +354,16 @@ enum Relay {
 /// still holds the output pipes: the run must keep waiting for the pipes, and
 /// a cancel may arrive minutes later. The `Finished` path below reaps the
 /// child only after both pipes reached EOF.
-fn relay<F>(receiver: &Receiver<Message>, cancel: &AtomicBool, emit: &mut F) -> Relay
+fn relay<F>(receiver: &Receiver<Message>, stop: &Stop<'_>, emit: &mut F) -> Relay
 where
     F: FnMut(RunFrame) -> io::Result<()>,
 {
     let mut finished = 0usize;
     loop {
-        // Observe cancellation even while a noisy child keeps the channel
-        // full: a `lock` or signal must not wait for the output to pause.
-        if cancel.load(Ordering::SeqCst) {
+        // Observe a stop even while a noisy child keeps the channel full: a
+        // `lock`, a signal or a vanished client must not wait for the output
+        // to pause.
+        if stop.requested() {
             return Relay::Cancelled;
         }
         match receiver.recv_timeout(CANCEL_POLL) {
@@ -500,439 +554,4 @@ fn exit_status(status: ExitStatus) -> RunExit {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn inherited() -> Vec<(OsString, OsString)> {
-        inherited_env([
-            (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
-            (OsString::from("HOME"), OsString::from("/tmp")),
-            (OsString::from("LC_ALL"), OsString::from("C")),
-            (OsString::from("LD_PRELOAD"), OsString::from("/tmp/x.so")),
-            (OsString::from("UNRELATED"), OsString::from("value")),
-        ])
-    }
-
-    fn collect(
-        argv: &[&str],
-        env_name: &str,
-        secret: &str,
-    ) -> (Vec<RunFrame>, Result<RunExit, RunError>) {
-        let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
-        let cancel = AtomicBool::new(false);
-        let mut frames = Vec::new();
-        let result = execute(
-            Path::new(&argv[0]),
-            &argv[1..],
-            env_name,
-            secret,
-            Path::new("/"),
-            &inherited(),
-            &cancel,
-            |frame| {
-                frames.push(frame);
-                Ok(())
-            },
-        );
-        (frames, result)
-    }
-
-    fn stdout_bytes(frames: &[RunFrame]) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for frame in frames {
-            if let RunFrame::Stdout(data) = frame {
-                bytes.extend_from_slice(data);
-            }
-        }
-        bytes
-    }
-
-    #[test]
-    fn the_inherited_environment_is_a_small_allowlist() {
-        let names: Vec<String> = inherited()
-            .into_iter()
-            .map(|(name, _)| name.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, ["PATH", "HOME", "LC_ALL"]);
-    }
-
-    #[test]
-    fn loader_and_shell_hook_names_are_denied() {
-        for name in [
-            "LD_PRELOAD",
-            "LD_LIBRARY_PATH",
-            "DYLD_INSERT_LIBRARIES",
-            "BASH_ENV",
-            "ENV",
-            "PROMPT_COMMAND",
-            "IFS",
-            "PATH",
-            "HOME",
-            "SHELLOPTS",
-            "PS4",
-        ] {
-            assert!(denied_env_name(name), "{name} must be denied");
-        }
-        for name in ["API_KEY", "GH_TOKEN", "LANG", "TZ", "LC_ALL", "X"] {
-            assert!(!denied_env_name(name), "{name} must be allowed");
-        }
-    }
-
-    #[test]
-    fn the_child_sees_the_injected_variable() {
-        let secret = "unit-test-secret-1234";
-        let (frames, result) = collect(
-            &["/bin/sh", "-c", "printf %s \"$PM_TEST\""],
-            "PM_TEST",
-            secret,
-        );
-        assert_eq!(result.expect("run"), RunExit::Code(0));
-        assert_eq!(stdout_bytes(&frames), b"[REDACTED]");
-        assert!(frames.iter().all(|frame| match frame {
-            RunFrame::Stdout(data) | RunFrame::Stderr(data) =>
-                !String::from_utf8_lossy(data).contains(secret),
-            _ => true,
-        }));
-    }
-
-    #[test]
-    fn the_injected_variable_is_the_only_secret_and_the_env_is_not_inherited() {
-        // SECRET_FROM_TEST is set in this test process but must not reach the
-        // child; only the fixed allowlist and the injected name do.
-        // SAFETY: tests in this module do not read this variable concurrently.
-        unsafe { std::env::set_var("PASSMGR_RUNNER_TEST_ONLY", "leaked-if-inherited") };
-        let (frames, result) = collect(
-            &[
-                "/bin/sh",
-                "-c",
-                "printf %s \"$PASSMGR_RUNNER_TEST_ONLY|$PM_TEST\"",
-            ],
-            "PM_TEST",
-            "unit-test-secret-5678",
-        );
-        assert_eq!(result.expect("run"), RunExit::Code(0));
-        let output = String::from_utf8(stdout_bytes(&frames)).expect("utf8");
-        assert_eq!(output, "|[REDACTED]");
-    }
-
-    #[test]
-    fn a_secret_split_across_pipe_reads_is_redacted() {
-        // Larger than READ_CHUNK, so the value cannot arrive in one read.
-        let secret = format!("prefix-{}-suffix", "a".repeat(10_000));
-        let (frames, result) = collect(
-            &["/bin/sh", "-c", "printf %s \"$BIG_SECRET\""],
-            "BIG_SECRET",
-            &secret,
-        );
-        assert_eq!(result.expect("run"), RunExit::Code(0));
-        let output = stdout_bytes(&frames);
-        assert_eq!(output, b"[REDACTED]");
-        assert!(
-            !output
-                .windows(secret.len())
-                .any(|window| window == secret.as_bytes())
-        );
-    }
-
-    #[test]
-    fn large_output_is_split_into_protocol_sized_frames() {
-        let (frames, result) = collect(
-            &[
-                "/bin/sh",
-                "-c",
-                "dd if=/dev/zero bs=1024 count=40 2>/dev/null | tr '\\000' x; printf %s \"$PM_TEST\"",
-            ],
-            "PM_TEST",
-            "unit-test-secret-9012",
-        );
-        assert_eq!(result.expect("run"), RunExit::Code(0));
-        let stdout: Vec<&Vec<u8>> = frames
-            .iter()
-            .filter_map(|frame| match frame {
-                RunFrame::Stdout(data) => Some(data),
-                _ => None,
-            })
-            .collect();
-        assert!(stdout.len() > 1, "expected more than one chunk");
-        assert!(
-            stdout.iter().all(|chunk| chunk.len() <= MAX_CHUNK_BYTES),
-            "every chunk must fit the protocol"
-        );
-        let total: usize = stdout.iter().map(|chunk| chunk.len()).sum();
-        let bytes = stdout_bytes(&frames);
-        assert_eq!(total, 40 * 1024 + b"[REDACTED]".len());
-        assert_eq!(&bytes[40 * 1024..], b"[REDACTED]");
-    }
-
-    #[test]
-    fn the_exit_code_is_propagated() {
-        let (_frames, result) = collect(&["/bin/sh", "-c", "exit 7"], "PM_TEST", "secret-1234");
-        assert_eq!(result.expect("run"), RunExit::Code(7));
-    }
-
-    #[test]
-    fn a_signalled_child_is_not_reported_as_an_exit_code() {
-        let (_frames, result) = collect(
-            &["/bin/sh", "-c", "kill -TERM $$"],
-            "PM_TEST",
-            "secret-1234",
-        );
-        assert_eq!(result.expect("run"), RunExit::Signal(libc::SIGTERM as u8));
-    }
-
-    #[test]
-    fn a_missing_program_is_a_spawn_error() {
-        let (_frames, result) = collect(
-            &["/nonexistent/passmgr-runner-test"],
-            "PM_TEST",
-            "secret-1234",
-        );
-        assert!(matches!(result, Err(RunError::Spawn(_))));
-    }
-
-    #[test]
-    fn the_child_starts_in_the_callers_working_directory() {
-        // A relative argument must resolve against `cwd`, not against the
-        // process's own directory: this is the difference between running the
-        // caller's script and an unrelated file in the daemon's cwd.
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("marker.txt"), b"from-the-cwd").expect("write marker");
-        let argv = ["/bin/cat".to_string(), "marker.txt".to_string()];
-        let cancel = AtomicBool::new(false);
-        let mut frames = Vec::new();
-        let result = execute(
-            Path::new(&argv[0]),
-            &argv[1..],
-            "PM_TEST",
-            "secret-1234",
-            dir.path(),
-            &inherited(),
-            &cancel,
-            |frame| {
-                frames.push(frame);
-                Ok(())
-            },
-        );
-        assert_eq!(result.expect("run"), RunExit::Code(0));
-        assert_eq!(stdout_bytes(&frames), b"from-the-cwd");
-    }
-
-    #[test]
-    fn an_invalid_environment_name_is_refused_before_spawning() {
-        let cancel = AtomicBool::new(false);
-        let argv = ["/bin/true".to_string()];
-        let err = execute(
-            Path::new(&argv[0]),
-            &argv[1..],
-            "BAD=NAME",
-            "secret-1234",
-            Path::new("/"),
-            &inherited(),
-            &cancel,
-            |_| Ok(()),
-        )
-        .expect_err("invalid env name");
-        assert!(matches!(err, RunError::Spawn(_)));
-    }
-
-    #[test]
-    fn output_errors_and_cancellation_stop_the_child() {
-        // One chunk first, then stay alive: the failing emit must kill the
-        // child instead of waiting for it.
-        let noisy = [
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "printf x; sleep 30".to_string(),
-        ];
-        let quiet = [
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "sleep 30".to_string(),
-        ];
-        let argv = noisy;
-
-        let cancel = AtomicBool::new(false);
-        let err = execute(
-            Path::new(&argv[0]),
-            &argv[1..],
-            "PM_TEST",
-            "secret-1234",
-            Path::new("/"),
-            &inherited(),
-            &cancel,
-            |_| Err(io::Error::new(io::ErrorKind::BrokenPipe, "gone")),
-        )
-        .expect_err("output failed");
-        assert!(matches!(err, RunError::Output(_)));
-
-        let argv = quiet;
-        let cancel = AtomicBool::new(true);
-        let err = execute(
-            Path::new(&argv[0]),
-            &argv[1..],
-            "PM_TEST",
-            "secret-1234",
-            Path::new("/"),
-            &inherited(),
-            &cancel,
-            |_| Ok(()),
-        )
-        .expect_err("cancelled");
-        assert!(matches!(err, RunError::Cancelled));
-    }
-
-    fn wait_for_pid_file(path: &Path) -> libc::pid_t {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Ok(text) = std::fs::read_to_string(path) {
-                if let Ok(pid) = text.trim().parse::<libc::pid_t>() {
-                    return pid;
-                }
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the child did not report the grandchild's pid"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    /// A zombie has been killed but waits for init to reap it; that counts as
-    /// gone. Only Linux exposes `/proc`, and only Linux runs this suite.
-    fn process_state(pid: libc::pid_t) -> Option<char> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        // The state is the first field after the parenthesised name.
-        stat.rsplit_once(')')
-            .and_then(|(_, rest)| rest.trim_start().chars().next())
-    }
-
-    fn process_is_gone(pid: libc::pid_t) -> bool {
-        // SAFETY: signal 0 only checks for the process's existence.
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            return true;
-        }
-        process_state(pid) == Some('Z')
-    }
-
-    #[test]
-    fn cancellation_kills_a_grandchild_that_holds_the_pipes() {
-        // The shell exits immediately but leaves `sleep` behind with both
-        // output pipes open, so EOF never arrives. Cancelling must still stop
-        // the run: the readers poll a stop flag, and the group kill reaps the
-        // process holding the pipes.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let pid_file = dir.path().join("grandchild.pid");
-        let script = format!("sleep 30 & echo $! > {}", pid_file.display());
-        let argv = ["/bin/sh".to_string(), "-c".to_string(), script];
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        let runner_cancel = Arc::clone(&cancel);
-        let runner = std::thread::spawn(move || {
-            execute(
-                Path::new(&argv[0]),
-                &argv[1..],
-                "PM_TEST",
-                "secret-1234",
-                Path::new("/"),
-                &inherited(),
-                &runner_cancel,
-                |_| Ok(()),
-            )
-        });
-
-        let grandchild = wait_for_pid_file(&pid_file);
-        let started = std::time::Instant::now();
-        cancel.store(true, Ordering::SeqCst);
-        let result = runner.join().expect("runner thread");
-        assert!(matches!(result, Err(RunError::Cancelled)));
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "cancelling waited on a grandchild: {:?}",
-            started.elapsed()
-        );
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !process_is_gone(grandchild) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the grandchild holding the pipes survived the cancel"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    #[test]
-    fn a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes() {
-        // The leader exits immediately and leaves `sleep` behind holding both
-        // output pipes, so the relay must keep waiting for them. It must not
-        // reap the leader meanwhile: while the leader is a zombie its pid (and
-        // pgid) cannot be recycled, so the later cancel cannot signal an
-        // unrelated process group.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let leader_file = dir.path().join("leader.pid");
-        let grandchild_file = dir.path().join("grandchild.pid");
-        let script = format!(
-            "echo $$ > {}; sleep 30 & echo $! > {}",
-            leader_file.display(),
-            grandchild_file.display()
-        );
-        let argv = ["/bin/sh".to_string(), "-c".to_string(), script];
-
-        let cancel = Arc::new(AtomicBool::new(false));
-        let runner_cancel = Arc::clone(&cancel);
-        let runner = std::thread::spawn(move || {
-            execute(
-                Path::new(&argv[0]),
-                &argv[1..],
-                "PM_TEST",
-                "secret-1234",
-                Path::new("/"),
-                &inherited(),
-                &runner_cancel,
-                |_| Ok(()),
-            )
-        });
-
-        let leader = wait_for_pid_file(&leader_file);
-        let grandchild = wait_for_pid_file(&grandchild_file);
-
-        // Wait for the leader to exit. If it disappears instead of turning
-        // into a zombie, something reaped it while the group is still alive.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match process_state(leader) {
-                Some('Z') => break,
-                Some(_) => {}
-                None => panic!("the leader was reaped while its group was still in use"),
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the leader never became a zombie"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        // Give a relay that polls `try_wait` three poll slices to reap it.
-        std::thread::sleep(CANCEL_POLL * 3);
-        assert_eq!(
-            process_state(leader),
-            Some('Z'),
-            "the relay reaped the group leader while the grandchild held the pipes"
-        );
-
-        cancel.store(true, Ordering::SeqCst);
-        let result = runner.join().expect("runner thread");
-        assert!(matches!(result, Err(RunError::Cancelled)));
-
-        for pid in [leader, grandchild] {
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while !process_is_gone(pid) {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "process {pid} survived the cancel"
-                );
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        }
-    }
-}
+mod tests;

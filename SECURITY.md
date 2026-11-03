@@ -61,9 +61,14 @@ inherits every limit below.
   is read; malformed and unauthorized requests never refresh the idle timer.
   Accepting a `run` does refresh it, and the idle deadline is suspended while
   a run is in flight, so a long command is not killed mid-work; `lock` and
-  signals still cancel it. At most 16 `run` requests are served at once; a
-  request beyond that is answered `busy` before the vault is opened, so no
-  child starts and no reader thread or injected environment is created.
+  signals still cancel it. A run whose client connection is closed is
+  cancelled as well (its whole process group is killed), so an agent host that
+  drops a timed-out tool call cannot keep the key alive or leave the child
+  running with the secret in its environment. A client that shuts down only
+  its write half is still reading and keeps its run. At most 16 `run` requests
+  are served at once; a request beyond that is answered `busy` before the
+  vault is opened, so no child starts and no reader thread or injected
+  environment is created.
 - **Vault.** Argon2id + AES-256-GCM, authenticated header, atomic 0600 writes,
   zeroized keys and plaintext. Mutating commands hold an exclusive `flock` on
   the sidecar `<vault>.lock` across the whole read-modify-write, so concurrent

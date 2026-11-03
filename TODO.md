@@ -812,8 +812,11 @@ Rules that apply to every item:
       covers one input per shape, whole-buffer and byte-at-a-time, and fails
       on the old rule.
 
-- [ ] **R.37 A run whose client disconnects keeps running and holds the key
-      past the idle timeout.**
+- [x] **R.37 A run whose client disconnects keeps running and holds the key
+      past the idle timeout.** Done: `runner::Stop` carries the client
+      predicate into both loops; `daemon::run::client_closed` polls the socket
+      for HUP/ERR/NVAL (a half-closed client is still reading and keeps its
+      run).
       `src/runner.rs:291-323` (`relay`) and the `Finished` wait loop
       (`:240-252`) never check the client socket; a dead client is noticed
       only when a frame write fails. `src/daemon.rs:462` suspends the idle
@@ -988,8 +991,9 @@ Rules that apply to every item:
       `src/cli/mod.rs:46-48` maps any `Error::Io(BrokenPipe)` to `EXIT_OK`;
       the stdout relay in `src/cli/run.rs:122-127` returns exactly that. Help
       (`src/cli/help.rs:76-77`) and `README.md:199` say `run` exits with the
-      child's status. The child also keeps running after the CLI exits (see
-      R.37).
+      child's status. The child no longer survives the CLI exit (R.37
+      cancelled the run when the client disconnects); the status is still
+      lost.
       Failure (reproduced): `set -o pipefail; passmgr run ... -- deploy |
       head -1` reports success when `deploy` exits 7.
       Fix: for `run`, a broken stdout pipe exits non-zero (141, or the

@@ -6,6 +6,7 @@
 //! vault that the daemon opens itself.
 
 use std::io::{self, Read};
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,6 +116,13 @@ pub(super) fn serve_run(
     if cancel.load(Ordering::SeqCst) {
         return;
     }
+    // The run ends when the client does. A host that times out a tool call
+    // drops the connection; the child must not keep the secret in its
+    // environment, and the idle timeout must not stay suspended, for as long
+    // as that child happens to live.
+    let fd = stream.as_raw_fd();
+    let client_gone = || client_closed(fd);
+    let stop = runner::Stop::new(cancel, &client_gone);
     let result = runner::execute(
         &program,
         &request.command[1..],
@@ -122,7 +130,7 @@ pub(super) fn serve_run(
         secret.as_str(),
         Path::new(&request.cwd),
         &inherited,
-        cancel,
+        &stop,
         |frame| write_run_frame(&mut stream, &frame),
     );
     match result {
@@ -136,6 +144,31 @@ pub(super) fn serve_run(
         // and there is nobody left to tell.
         Err(runner::RunError::Output(_) | runner::RunError::Cancelled) => {}
     }
+}
+
+/// Whether the run's client has closed its end of the socket.
+///
+/// A `run` client sends exactly one request and then only reads frames, so a
+/// closed peer is visible without consuming anything: `poll` reports
+/// `POLLHUP` for a connection the peer closed, and it keeps reporting it while
+/// unread bytes remain. `POLLERR` is a reset and `POLLNVAL` a socket that is
+/// no longer open; both mean the same thing here.
+///
+/// A client that shuts down only its write half is *not* gone: it is still
+/// reading, so its run continues. Only a fully closed connection (the host
+/// dropped it, or died) cancels the child.
+fn client_closed(fd: RawFd) -> bool {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: 0,
+        revents: 0,
+    };
+    // SAFETY: one initialized `pollfd`; a zero timeout means do not block.
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+    if ready <= 0 {
+        return false;
+    }
+    poll_fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
 }
 
 /// Authorize the grant, record the use in the vault, then return the one
@@ -254,5 +287,50 @@ pub(super) fn read_request(
                 return Err(ProtocolError::EmptyMessage);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Write};
+    use std::net::Shutdown;
+    use std::os::unix::io::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    use super::client_closed;
+
+    #[test]
+    fn an_open_client_is_not_closed() {
+        let (daemon, _client) = UnixStream::pair().expect("socketpair");
+        assert!(!client_closed(daemon.as_raw_fd()));
+    }
+
+    #[test]
+    fn a_client_that_shut_down_its_write_half_is_still_there() {
+        // It may have sent its request and be reading frames; that client is
+        // alive, so its run must not be cancelled.
+        let (daemon, client) = UnixStream::pair().expect("socketpair");
+        client.shutdown(Shutdown::Write).expect("shutdown");
+        assert!(!client_closed(daemon.as_raw_fd()));
+    }
+
+    #[test]
+    fn a_dropped_client_is_closed() {
+        let (daemon, client) = UnixStream::pair().expect("socketpair");
+        drop(client);
+        assert!(client_closed(daemon.as_raw_fd()));
+    }
+
+    #[test]
+    fn unread_bytes_do_not_hide_a_dropped_client() {
+        let (mut daemon, mut client) = UnixStream::pair().expect("socketpair");
+        client.write_all(b"left over").expect("write");
+        drop(client);
+        assert!(client_closed(daemon.as_raw_fd()));
+        // Detection must not consume a byte: whatever the protocol layer
+        // still has to read stays readable.
+        let mut buf = [0u8; 4];
+        assert_eq!(daemon.read(&mut buf).expect("read"), 4);
+        assert_eq!(&buf, b"left");
     }
 }

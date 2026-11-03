@@ -12,6 +12,7 @@ mod support;
 use support::*;
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -48,7 +49,12 @@ fn wait_for_pid(path: &Path) -> libc::pid_t {
 
 /// Poll until `pid` no longer exists, proving the daemon reaped the child.
 fn wait_for_process_exit(pid: libc::pid_t) {
-    let deadline = Instant::now() + WAIT;
+    wait_for_process_exit_within(pid, WAIT);
+}
+
+/// As [`wait_for_process_exit`], but with a caller-chosen deadline.
+fn wait_for_process_exit_within(pid: libc::pid_t, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
     loop {
         // SAFETY: signal 0 only checks for the process's existence; the pid
         // came from a child of this test's daemon.
@@ -66,6 +72,46 @@ fn wait_for_process_exit(pid: libc::pid_t) {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// A run whose client disconnects must be cancelled: the child cannot keep
+/// the secret in its environment because nobody is listening any more, and the
+/// idle deadline cannot stay suspended for as long as that child happens to
+/// live.
+#[test]
+fn a_run_whose_client_disconnects_is_cancelled_and_lets_the_idle_timeout_expire() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start_with(&["--idle-timeout", "2"]);
+    let socket = fixture.socket();
+    let pid_file = fixture.temp_path("child.pid");
+    // Report the pid, then keep both output pipes open and stay alive. The
+    // daemon has nothing to relay, so only the client socket can tell it that
+    // the caller is gone.
+    let script = format!("echo $$ > {}; exec sleep 30", pid_file.display());
+    let ask = fixture.run_request("API_KEY", &["/bin/sh", "-c", &script]);
+
+    let mut stream = UnixStream::connect(&socket).expect("connect");
+    stream
+        .write_all(&passmgr::protocol::encode(&fixture.token, &ask).expect("encode request"))
+        .expect("write run request");
+
+    let pid = wait_for_pid(&pid_file);
+    let started = Instant::now();
+    // What an agent host does when a tool call times out.
+    drop(stream);
+
+    wait_for_process_exit_within(pid, Duration::from_secs(2));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the daemon only noticed the disconnect after the child exited"
+    );
+
+    // The run is unregistered, so the idle deadline is reached and the key is
+    // wiped. Without the cancellation this run would suspend the deadline for
+    // the child's full 30 s.
+    let status = wait_for_exit(&mut child, Duration::from_secs(6));
+    assert!(status.success(), "pmd exit status after idle: {status:?}");
+    assert!(!socket.exists(), "an idle timeout removes the socket");
 }
 
 #[test]

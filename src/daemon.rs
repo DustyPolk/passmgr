@@ -47,7 +47,9 @@
 //! request wipe the key, remove the socket and the session file, and exit.
 //! The idle deadline is suspended while a run is in flight, so a long command
 //! is never killed mid-work; accepting a run refreshes the timer, which starts
-//! again when the last run finishes.
+//! again when the last run finishes. A run is also cancelled when its client
+//! disconnects: an agent host that drops a timed-out tool call cannot keep the
+//! key alive by leaving the child behind.
 //! Each `run` is served on its own worker thread so the accept loop stays
 //! responsive: `lock`, `ping` and a signal are observed even while a child is
 //! still running. At most [`MAX_CONCURRENT_RUNS`] workers exist at once; a
@@ -399,7 +401,9 @@ pub fn shutdown_requested() -> bool {
 /// request, not from the last byte received: a malformed, half-sent or
 /// unauthorized frame must not extend the key's lifetime. Accepting a run
 /// counts as activity, and the deadline is suspended while any run is in
-/// flight, so a command longer than the remaining budget still finishes.
+/// flight, so a command longer than the remaining budget still finishes. A
+/// run whose client disconnects is cancelled, so a dropped connection cannot
+/// suspend the deadline for the child's lifetime.
 ///
 /// On every exit path the session file is removed, but only if it still holds
 /// `token`: a newer session's file is never deleted.
@@ -457,8 +461,10 @@ pub fn run(
             }
             // A run that is still going suspends the idle deadline: a build
             // or test suite must not be killed because it outlived the
-            // remaining budget. It is bounded by `lock`/signals (and, from
-            // TODO 4.5, the run timeout) instead.
+            // remaining budget. It is bounded by `lock`/signals and by its
+            // client: a run whose caller disconnected is cancelled by the
+            // worker (TODO R.37), so a vanished agent host cannot keep the
+            // key alive by leaving a child behind.
             let idle_expired = runs.is_empty() && last_activity.elapsed() >= idle_timeout;
             if shutdown_requested() || idle_expired {
                 // Out of activity or asked to stop: wipe the key and exit.

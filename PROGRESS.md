@@ -1,3 +1,31 @@
+## 2026-11-03 — Cancel a run when its client disconnects (TODO R.37)
+
+- `runner::execute` now takes a `Stop` instead of the cancel flag: `cancel`
+  (`pmd` shutdown) plus an optional `client_gone` predicate. It is checked
+  before the spawn and at the top of both wait loops. Before this, `pmd` only
+  noticed a dead client when a frame write failed, so the child kept the
+  secret in its environment and the idle deadline stayed suspended.
+- `daemon::run::client_closed(fd)` polls the accepted socket with a zero
+  timeout and reports `POLLHUP|POLLERR|POLLNVAL`, so a silent child cannot
+  delay it. A client that shuts down only its write half is still reading and
+  keeps its run; only a full close cancels.
+- `src/runner/tests.rs` is new: the tests moved out of `src/runner.rs`, which
+  passed 1,000 lines with this change (same pattern as `src/daemon/tests.rs`;
+  the layout guard now passes with no pending splits).
+- Tests: `client_closed` (open, half-closed, dropped, unread bytes); a gone
+  client in both runner loops (child killed within 2 s) and before the spawn
+  (no child); an integration test that drops a run's client under
+  `--idle-timeout 2` and sees child gone within 2 s, `pmd` within 6 s. All
+  three fail without the fix.
+- Also: `output_errors_and_cancellation_stop_the_child` printed one byte,
+  which the redactor holds until EOF, so it waited out the child's 30 s sleep.
+  It now prints more than the holdback window and the suite is 30 s faster.
+- Gate: fmt, clippy and the full test suite pass.
+- **Next iteration must know:** R.38 is next. On Linux a full close reports
+  `POLLHUP` (with buffered bytes) and a half-close does not, so no zero-byte
+  probe is needed. R.47's "child survives the CLI" half is fixed here; its
+  exit status is still lost.
+
 ## 2026-11-03 — Pick a redaction marker that cannot spell the value (TODO R.36a)
 
 - `src/redact.rs::choose_marker` only rejected a default marker that

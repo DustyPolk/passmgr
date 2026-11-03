@@ -327,6 +327,14 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   remaining budget finishes instead of being killed mid-work. Such a run is
   bounded by `lock`/signals (and, from TODO 4.5, the run timeout). When the
   last run finishes, the timer starts again.
+- A `run` whose client closes its connection is cancelled (TODO R.37): the
+  runner checks the condition in both the relay loop and the wait-for-exit
+  loop, and the client socket is polled with a zero timeout, so a silent child
+  cannot delay it. `POLLHUP`/`POLLERR`/`POLLNVAL` mean the connection is gone;
+  a client that shuts down only its write half is still reading and keeps its
+  run. Without this, an agent host that dropped a timed-out tool call left the
+  child running with the secret in its environment and suspended the idle
+  deadline for the child's lifetime.
 - At most `MAX_CONCURRENT_RUNS` (16) `run` workers exist at once. A request
   over the cap is answered with the terminal error `busy` before the vault is
   opened: nothing is decrypted or spawned and no worker is created. A worker
