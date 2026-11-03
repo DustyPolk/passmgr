@@ -58,7 +58,9 @@ inherits every limit below.
 - **Vault.** Argon2id + AES-256-GCM, authenticated header, atomic 0600 writes,
   zeroized keys and plaintext. Mutating commands hold an exclusive `flock` on
   the sidecar `<vault>.lock` across the whole read-modify-write, so concurrent
-  writers cannot lose an update. Details are in `README.md` and `FORMAT.md`.
+  writers cannot lose an update; interactive prompts happen before the lock is
+  taken, and a vault that changed meanwhile is refused rather than overwritten.
+  Details are in `README.md` and `FORMAT.md`.
 - **No network.** passmgr makes no network calls and links no network-capable
   crate. MCP is stdio only.
 - **Planned, per `MCP.md`:** scoped, expiring, use-limited, revocable grants

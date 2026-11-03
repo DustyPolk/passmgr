@@ -31,7 +31,16 @@ pub(crate) fn command_add(options: AddOptions, path: &Path) -> Result<(), Error>
     let creating = !path.exists();
     warn_insecure(path)?;
     let master = prompt_master(creating)?;
-    let mut vault = Vault::open_for_add(path, &master)?;
+
+    // Read and check before the credential prompt: a human can leave that
+    // prompt open for minutes, and nothing may hold the write lock meanwhile
+    // (TODO R.9). `lock_for_update` below then takes the lock and proves the
+    // vault is still the state that was checked here.
+    let mut vault = match Vault::open(path, &master) {
+        Ok(vault) => vault,
+        Err(Error::VaultNotFound(_)) => Vault::empty(path),
+        Err(err) => return Err(err),
+    };
 
     if vault.get(&options.service).is_some() {
         return Err(Error::DuplicateService(options.service.clone()));
@@ -41,6 +50,8 @@ pub(crate) fn command_add(options: AddOptions, path: &Path) -> Result<(), Error>
         Some(generated) => generated,
         None => prompt_credential_password(&options.service)?,
     };
+
+    vault.lock_for_update()?;
 
     let service = options.service;
     let credential = Credential::new(service.clone(), options.username, credential_password)?
@@ -124,10 +135,28 @@ pub(crate) fn command_edit(options: EditOptions, path: &Path) -> Result<(), Erro
     }
     let rotate = edit_rotates_password(&options);
 
-    let (mut vault, master) = unlock_for_update(path)?;
+    // Read and validate, then prompt for the replacement secret, and only then
+    // take the write lock (TODO R.9). The lock is held across the mutation and
+    // the save, never across a prompt; `lock_for_update` refuses to save if
+    // another writer changed the vault while the human was typing.
+    warn_insecure(path)?;
+    let master = prompt_master(false)?;
+    let mut vault = Vault::open(path, &master)?;
     if vault.get(&options.service).is_none() {
         return Err(Error::ServiceNotFound(options.service.clone()));
     }
+
+    let replacement = if rotate {
+        Some(if options.generate {
+            password::generate_password(options.preset, options.length)?
+        } else {
+            prompt_credential_password(options.rename.as_deref().unwrap_or(&options.service))?
+        })
+    } else {
+        None
+    };
+
+    vault.lock_for_update()?;
 
     if let Some(rename) = &options.rename {
         vault.rename(&options.service, rename)?;
@@ -148,12 +177,7 @@ pub(crate) fn command_edit(options: EditOptions, path: &Path) -> Result<(), Erro
             .set_tags(options.tags.unwrap_or_default())?;
     }
 
-    if rotate {
-        let password = if options.generate {
-            password::generate_password(options.preset, options.length)?
-        } else {
-            prompt_credential_password(service)?
-        };
+    if let Some(password) = replacement {
         vault
             .get_mut(service)
             .expect("the credential was just found or renamed")

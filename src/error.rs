@@ -45,6 +45,10 @@ pub enum Error {
     /// Another process held the vault write lock for longer than the timeout.
     /// Maps to exit code 1: nothing was changed, so retrying is safe.
     VaultBusy(PathBuf),
+    /// The vault was read, the human was prompted, and another process changed
+    /// the vault before the write lock could be taken. Maps to exit code 1:
+    /// nothing was changed, so retrying is safe.
+    VaultChanged(PathBuf),
     /// The unlock daemon could not be reached, exited during startup, or
     /// answered an error. The detail is user-facing and never contains secret
     /// material. Maps to exit code 1.
@@ -74,7 +78,8 @@ impl Error {
             | Self::DuplicateService(_)
             | Self::Daemon(_)
             | Self::ReadOnlyVault(_)
-            | Self::VaultBusy(_) => EXIT_FAILURE,
+            | Self::VaultBusy(_)
+            | Self::VaultChanged(_) => EXIT_FAILURE,
         }
     }
 }
@@ -123,6 +128,11 @@ impl fmt::Display for Error {
                 "another passmgr process is updating '{}'; nothing was changed, try again",
                 path.display()
             ),
+            Self::VaultChanged(path) => write!(
+                f,
+                "vault '{}' changed while it was open; nothing was changed, try again",
+                path.display()
+            ),
             Self::Daemon(detail) => f.write_str(detail),
             Self::InvalidInput(detail) => f.write_str(detail),
         }
@@ -167,6 +177,7 @@ mod tests {
             (Error::Daemon("x".into()), EXIT_FAILURE),
             (Error::ReadOnlyVault(PathBuf::from("v.dat")), EXIT_FAILURE),
             (Error::VaultBusy(PathBuf::from("v.dat")), EXIT_FAILURE),
+            (Error::VaultChanged(PathBuf::from("v.dat")), EXIT_FAILURE),
             (Error::Io(std::io::Error::other("x")), EXIT_FAILURE),
         ];
         for (error, expected) in cases {

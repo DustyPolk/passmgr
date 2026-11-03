@@ -25,16 +25,24 @@ const WRITE_LOCK_RETRY: Duration = Duration::from_millis(10);
 
 /// An open vault. Changes are kept in memory until [`Vault::save`] is called.
 ///
-/// A vault opened for update holds an exclusive `flock` on the sidecar
-/// `<vault>.lock` from before the file is read until the `Vault` is dropped.
-/// That makes the whole read-modify-write atomic with respect to other
-/// passmgr processes. A read-only vault does not take the lock: reads are
-/// safe because saves rename a complete temp file into place.
+/// A vault that may be saved holds an exclusive `flock` on the sidecar
+/// `<vault>.lock` until the `Vault` is dropped. That makes the whole
+/// read-modify-write atomic with respect to other passmgr processes. The lock
+/// is either taken before the read ([`Vault::open_for_update`],
+/// [`Vault::open_for_add`]) or afterwards with [`Vault::lock_for_update`],
+/// which first proves the file did not change in between. A read-only vault
+/// does not take the lock: reads are safe because saves rename a complete
+/// temp file into place.
 pub struct Vault {
     path: PathBuf,
     credentials: Vec<Credential>,
     /// `Some` when the vault may be saved. Held for the vault's lifetime.
     write_lock: Option<File>,
+    /// The exact container bytes this state was decrypted from, or `None` when
+    /// the file did not exist. [`Vault::lock_for_update`] compares it with the
+    /// file after taking the lock, so a writer that read before locking can
+    /// never save over a change it did not see. Ciphertext only, never plaintext.
+    source: Option<Vec<u8>>,
 }
 
 /// The sidecar lock path for `vault`: `<vault>.lock` in the same directory.
@@ -58,6 +66,7 @@ impl Vault {
             path,
             credentials,
             write_lock: None,
+            source: Some(container),
         })
     }
 
@@ -89,6 +98,7 @@ impl Vault {
             path,
             credentials,
             write_lock: None,
+            source: Some(container),
         })
     }
 
@@ -107,11 +117,55 @@ impl Vault {
                 path,
                 credentials: Vec::new(),
                 write_lock: None,
+                source: None,
             },
             Err(err) => return Err(err),
         };
         vault.write_lock = Some(lock);
         Ok(vault)
+    }
+
+    /// An empty in-memory vault for a file that does not exist yet.
+    ///
+    /// This is for commands that must read, check and prompt the human before
+    /// they may create anything, so that a prompt never holds the write lock.
+    /// [`Vault::save`] still refuses until [`Vault::lock_for_update`] has
+    /// confirmed that the file is *still* absent, so a vault created by a
+    /// concurrent process is never silently replaced.
+    pub fn empty(path: impl AsRef<Path>) -> Self {
+        Self {
+            path: path.as_ref().to_path_buf(),
+            credentials: Vec::new(),
+            write_lock: None,
+            source: None,
+        }
+    }
+
+    /// Take the write lock and confirm the vault on disk is unchanged.
+    ///
+    /// Use this after a lock-free [`Vault::open`] when the read-modify-write
+    /// has to prompt the human in between: a prompt can last minutes, and a
+    /// writer that holds the lock that long blocks unrelated commands. The
+    /// lock is the same exclusive `flock` as [`Vault::open_for_update`] uses,
+    /// and the container is compared byte for byte with the one this vault was
+    /// decrypted from, so a change made while the human was typing is reported
+    /// as [`Error::VaultChanged`] instead of being overwritten. The state that
+    /// is then modified is exactly the state that was read.
+    pub fn lock_for_update(&mut self) -> Result<()> {
+        if self.write_lock.is_some() {
+            return Ok(());
+        }
+        let lock = acquire_write_lock(&self.path)?;
+        let current = match read_container(&self.path) {
+            Ok(container) => Some(container),
+            Err(Error::VaultNotFound(_)) => None,
+            Err(err) => return Err(err),
+        };
+        if current != self.source {
+            return Err(Error::VaultChanged(self.path.clone()));
+        }
+        self.write_lock = Some(lock);
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
@@ -711,6 +765,125 @@ mod tests {
         drop(first);
         let second = Vault::open_for_add(&vault_path, master);
         assert!(second.is_ok(), "the lock must be released on drop");
+    }
+
+    #[test]
+    fn lock_for_update_detects_a_writer_that_arrived_while_the_human_typed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "master";
+
+        {
+            let mut seed = Vault::open_for_add(&path, master).unwrap();
+            seed.add(credential("seed", "u", "p")).unwrap();
+            seed.save(master).unwrap();
+        }
+
+        // Stands in for `edit`: it reads, then prompts for a while.
+        let mut stale = Vault::open(&path, master).unwrap();
+
+        {
+            let mut other = Vault::open_for_update(&path, master).unwrap();
+            other.add(credential("other", "u", "p")).unwrap();
+            other.save(master).unwrap();
+        }
+
+        assert!(matches!(
+            stale.lock_for_update(),
+            Err(Error::VaultChanged(_))
+        ));
+        assert!(
+            matches!(stale.save(master), Err(Error::ReadOnlyVault(_))),
+            "a vault whose lock was refused must stay unsaveable"
+        );
+
+        let loaded = Vault::open(&path, master).unwrap();
+        let services: Vec<_> = loaded.list().iter().map(Credential::service).collect();
+        assert_eq!(
+            services,
+            ["seed", "other"],
+            "the concurrent change must survive a refused save"
+        );
+    }
+
+    #[test]
+    fn lock_for_update_takes_the_lock_only_after_the_check_and_blocks_writers() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "master";
+
+        {
+            let mut seed = Vault::open_for_add(&path, master).unwrap();
+            seed.add(credential("seed", "u", "p")).unwrap();
+            seed.save(master).unwrap();
+        }
+
+        let mut vault = Vault::open(&path, master).unwrap();
+        vault.lock_for_update().unwrap();
+        assert!(
+            matches!(
+                acquire_write_lock_with_timeout(&path, Duration::from_millis(100)),
+                Err(Error::VaultBusy(_))
+            ),
+            "a vault locked after a lock-free read must exclude other writers"
+        );
+        // Locking twice is a no-op, not an error.
+        vault.lock_for_update().unwrap();
+        vault.add(credential("second", "u", "p")).unwrap();
+        vault.save(master).unwrap();
+
+        assert_eq!(Vault::open(&path, master).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_empty_vault_cannot_replace_a_file_that_appeared_meanwhile() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "master";
+
+        let mut empty = Vault::empty(&path);
+        assert!(matches!(empty.save(master), Err(Error::ReadOnlyVault(_))));
+
+        {
+            let mut other = Vault::open_for_add(&path, master).unwrap();
+            other.add(credential("seed", "u", "p")).unwrap();
+            other.save(master).unwrap();
+        }
+
+        assert!(matches!(
+            empty.lock_for_update(),
+            Err(Error::VaultChanged(_))
+        ));
+        assert!(matches!(empty.save(master), Err(Error::ReadOnlyVault(_))));
+        assert!(
+            Vault::open(&path, master).unwrap().get("seed").is_some(),
+            "the vault that appeared must not be replaced"
+        );
+    }
+
+    #[test]
+    fn an_empty_vault_saves_only_after_the_lock_confirms_it_is_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "master";
+
+        let mut vault = Vault::empty(&path);
+        vault.add(credential("first", "u", "p")).unwrap();
+        assert!(
+            !lock_path(&path).exists(),
+            "an unlocked empty vault must not create the lock file"
+        );
+        vault.lock_for_update().unwrap();
+        vault.save(master).unwrap();
+
+        assert_eq!(
+            Vault::open(&path, master)
+                .unwrap()
+                .get("first")
+                .unwrap()
+                .password(),
+            "p"
+        );
     }
 
     #[test]

@@ -93,9 +93,15 @@ code does not implement yet.
   (0600, `O_NOFOLLOW`, never unlinked), held from before the read until the
   `Vault` is dropped. `Vault::open`/`open_with_key` are read-only and take no
   lock (atomic rename makes reads safe); only `open_for_update`/`open_for_add`
-  may `save`, and they give up after 30 s with `VaultBusy` (exit 1, nothing
-  changed). Do not unlink a held lock file: a second writer would lock a fresh
-  inode.
+  and `lock_for_update` may `save`, and they give up after 30 s with
+  `VaultBusy` (exit 1, nothing changed). Do not unlink a held lock file: a
+  second writer would lock a fresh inode.
+- Commands that prompt for a secret (`add`, `edit`) must not hold the lock
+  while a human types: they read and validate lock-free, prompt, then call
+  `Vault::lock_for_update`, which takes the lock and refuses with
+  `VaultChanged` (exit 1, nothing changed) if the on-disk bytes differ from
+  what was decrypted. The prompts and the mutation are therefore separated by
+  only the lock, never by an unattended wait.
 - Group- or world-readable vaults are currently **warned about** on use; TODO
   8.10 turns that into a refusal, which is what the invariant requires. Do not
   drop the warning before then.

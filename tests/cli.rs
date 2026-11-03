@@ -2,8 +2,11 @@
 
 use std::fs;
 use std::io::Write;
-use std::process::{Command, Output, Stdio};
+use std::path::Path;
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -462,6 +465,151 @@ fn duplicate_service_is_rejected() {
     );
     assert_eq!(output.status.code(), Some(1));
     assert!(stderr(&output).contains("already exists"));
+}
+
+/// Wait until the child's stderr (redirected to `stderr_path`) contains
+/// `needle`, polling with a deadline so a regression fails instead of hanging.
+/// Kills the child on timeout so a failing test leaves no process behind.
+fn wait_for_prompt(
+    child: &mut Child,
+    stderr_path: &Path,
+    needle: &str,
+    timeout: Duration,
+) -> String {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let text = fs::read_to_string(stderr_path).unwrap_or_default();
+        if text.contains(needle) {
+            return text;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("timed out after {timeout:?} waiting for {needle:?}; stderr so far:\n{text}");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// `add` must collect the master password and the credential secret before it
+/// takes the write lock, so a human sitting at a prompt cannot block a scripted
+/// writer (TODO R.9). The sidecar lock file must not even exist yet.
+#[test]
+fn add_prompts_for_the_secret_before_creating_the_write_lock() {
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    let stderr_path = directory.path().join("add-stderr.txt");
+    let stderr_file = fs::File::create(&stderr_path).unwrap();
+
+    let mut child = base_command(&["--db", &vault, "add", "example.com", "alice"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .expect("failed to start passmgr add");
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    // Master password and its confirmation for a new vault.
+    stdin.write_all(b"master\nmaster\n").unwrap();
+
+    let lock_path = passmgr::vault::lock_path(Path::new(&vault));
+    wait_for_prompt(
+        &mut child,
+        &stderr_path,
+        "Enter password for example.com:",
+        Duration::from_secs(10),
+    );
+    assert!(
+        !lock_path.exists(),
+        "the write lock file must not exist while the credential is prompted"
+    );
+    assert!(
+        !Path::new(&vault).exists(),
+        "nothing may be written before the secret is collected"
+    );
+
+    stdin
+        .write_all(format!("{EXAMPLE_SECRET}\n{EXAMPLE_SECRET}\n").as_bytes())
+        .unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().expect("failed to wait for add");
+    assert_success(&output);
+    assert!(!stdout(&output).contains(EXAMPLE_SECRET));
+    assert_eq!(
+        vault_password(&vault, "example.com", "master"),
+        EXAMPLE_SECRET
+    );
+    assert!(
+        lock_path.exists(),
+        "the lock file is created when the lock is finally taken"
+    );
+}
+
+/// `edit` must prompt for the replacement secret before it waits for the write
+/// lock. Here the lock is held by the test: at the unfixed HEAD the command
+/// blocks for the whole 30 s lock timeout without ever prompting (TODO R.9).
+#[test]
+fn edit_prompts_for_the_secret_before_waiting_for_the_write_lock() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let _guard = serial();
+    let directory = TempDir::new().unwrap();
+    let vault = vault_path(&directory);
+    add_example(&vault);
+
+    let lock_path = passmgr::vault::lock_path(Path::new(&vault));
+    let lock_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .expect("the lock file exists after add");
+    // SAFETY: `lock_file` owns a valid descriptor for the whole call.
+    assert_eq!(
+        unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX) },
+        0,
+        "failed to hold the vault write lock"
+    );
+
+    let stderr_path = directory.path().join("edit-stderr.txt");
+    let stderr_file = fs::File::create(&stderr_path).unwrap();
+    let mut child = base_command(&["--db", &vault, "edit", "example.com"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+        .expect("failed to start passmgr edit");
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    stdin.write_all(b"master\n").unwrap();
+
+    wait_for_prompt(
+        &mut child,
+        &stderr_path,
+        "Enter password for example.com:",
+        Duration::from_secs(10),
+    );
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "edit must wait at the prompt, not exit with a lock error"
+    );
+
+    // Release the lock only now: the secret was collected without holding it.
+    drop(lock_file);
+
+    const NEW_SECRET: &str = "rotated-before-the-lock-was-taken";
+    stdin
+        .write_all(format!("{NEW_SECRET}\n{NEW_SECRET}\n").as_bytes())
+        .unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().expect("failed to wait for edit");
+    assert_success(&output);
+    assert!(
+        !stdout(&output).contains(NEW_SECRET) && !stderr(&output).contains(NEW_SECRET),
+        "the replacement secret must never be printed"
+    );
+    assert_eq!(vault_password(&vault, "example.com", "master"), NEW_SECRET);
 }
 
 #[test]

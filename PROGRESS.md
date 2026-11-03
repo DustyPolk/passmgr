@@ -1,3 +1,30 @@
+## 2026-11-02 — Prompt before taking the vault write lock (TODO R.9)
+
+- `src/vault.rs`: new `Vault::empty` and `Vault::lock_for_update`. The latter
+  takes the same `<vault>.lock` flock but first compares the on-disk container
+  bytes with those the vault was decrypted from (`Vault.source`), returning
+  the new `Error::VaultChanged` (exit 1, nothing saved) on mismatch.
+  `src/error.rs` gains that variant. `add`/`edit` now read + validate
+  lock-free, prompt for the master password and new secret through a temp
+  `Vault::open`, and only then lock and save (`src/cli/commands.rs`).
+- Chose optimistic locking over "prompt first, then check": duplicate and
+  not-found checks must stay before the credential prompt (existing tests),
+  and feedback for a wrong master password should not wait for a lock. Cost:
+  still two KDF runs per write (open + save), no lock held across a prompt, no
+  lost update. DECISIONS.md/README.md/SECURITY.md updated.
+- Tests: unit tests for the changed-bytes refusal, the lock actually
+  excluding other writers, and an empty vault that never replaces a file that
+  appeared meanwhile; CLI tests spawn `add`/`edit`, poll stderr until the
+  secret prompt appears (10 s deadline, kill on timeout), then assert the
+  lock file does not exist yet (`add`) and that a test-held flock makes
+  `edit` sit at the prompt rather than exit `VaultBusy` (`edit`). Both fail on
+  HEAD.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` pass.
+- **Next iteration must know:** `VaultChanged` is a new exit-1 error; anything
+  that prints errors for writers may need wording. `open_for_add` is now
+  unused by the CLI (kept, used by vault tests) — `delete` still uses
+  `unlock_for_update`. Next item is R.10 (MCP.md drift).
+
 ## 2026-11-02 — Bound concurrent runs and worker creation (TODO R.8)
 
 - `src/daemon.rs`: new `pub const MAX_CONCURRENT_RUNS: usize = 16`. An

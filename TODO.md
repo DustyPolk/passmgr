@@ -90,7 +90,7 @@ come before Phase 3.
       failure is answered `busy` instead of panicking out of the scope (see
       PROGRESS.md 2026-11-02 R.8). Protocol stays version 3: a new error code
       is additive, and an older client fails closed on an unknown code.
-- [ ] **R.9 The vault write lock is held across interactive prompts.**
+- [x] **R.9 The vault write lock is held across interactive prompts.**
       `src/cli/commands.rs:34` (`open_for_add`) takes the lock before
       `prompt_credential_password` (`src/cli/commands.rs:42`); `edit` takes it
       in `unlock_for_update` (`src/cli/commands.rs:271-274`) before the
@@ -104,6 +104,10 @@ come before Phase 3.
       secrets before acquiring the lock. Test: hold the lock in one thread,
       prompt-block a second writer, and assert it does not fail with
       `VaultBusy` (or assert `add` prompts before `<vault>.lock` exists).
+      Done: `add` and `edit` read and validate lock-free, prompt, then call
+      `Vault::lock_for_update`, which takes the lock and refuses with
+      `VaultChanged` if the vault bytes changed meanwhile. The duplicate /
+      not-found checks stay before the prompt, so their tests are unchanged.
 - [ ] **R.10 MCP.md still promises encoded-secret redaction and contradicts
       itself on who resolves `command[0]`.**
       `MCP.md:151-153` says redaction covers "best-effort encodings (lower/upper
