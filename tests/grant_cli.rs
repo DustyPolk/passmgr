@@ -588,6 +588,54 @@ fn grant_create_refuses_a_full_vault_before_asking_the_daemon() {
     );
 }
 
+/// TODO R.42: a vault that reached `MAX_GRANTS` over its lifetime is usable
+/// again. `grant create` drops grants that died past the retention window in
+/// the same write that adds the new one, so the human approves a creation
+/// that actually lands and the vault ends with just the live grant.
+#[test]
+fn grant_create_prunes_dead_grants_from_a_full_vault() {
+    let _guard = serial();
+    let fixture = Fixture::with_dead_grants(MAX_GRANTS);
+    fixture.unlock();
+
+    let out = fixture.temp_path("recovered.token");
+    let output = fixture.run_pty(
+        &[
+            "--db",
+            fixture.db(),
+            "grant",
+            "create",
+            "--label",
+            "recovered",
+            "--tag",
+            "prod",
+            "--command",
+            "/usr/bin/true",
+            "--expires",
+            "1h",
+            "--out",
+            out.to_str().expect("path is UTF-8"),
+        ],
+        &format!("{MASTER}\ny\n"),
+    );
+    assert_ok(&output);
+    assert!(
+        out.exists(),
+        "a successful creation writes the token file: {}",
+        output.stderr
+    );
+    assert!(!output.stderr.contains(SECRET), "no value is shown");
+
+    let vault = Vault::open(&fixture.vault, MASTER).expect("open vault");
+    assert_eq!(
+        vault.grants().len(),
+        1,
+        "the dead grants are pruned by the creating write"
+    );
+    assert_eq!(vault.grants()[0].label(), "recovered");
+    assert!(vault.grants()[0].is_active(unix_now()));
+}
+
 /// Anything but an explicit yes cancels the creation: exit 2, no token file,
 /// an unchanged vault, and no connection to the daemon — even though the
 /// summary was printed first. The password comes first now (TODO R.41), so

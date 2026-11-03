@@ -1,3 +1,33 @@
+## 2026-11-03 — Prune dead grants so a vault never fills up (TODO R.42)
+
+- `pm grant create` now drops grants that are dead (revoked, or expired) and
+  died at least 7 days before the write, in the same write that adds the new
+  grant: new `src/grant/prune.rs` (`DEAD_GRANT_RETENTION_SECS`, pure
+  `prune_dead`), `Vault::prune_dead_grants`, and `Vault::check_grant_writable`
+  now takes `now` and prunes its candidate copy so the pre-approval check asks
+  exactly what the write will do. Active and exhausted-but-unexpired grants
+  are never dropped; the daemon's revoke/use writes still never prune.
+- Chose prune-on-write over a `pm grant purge` subcommand: no new surface for
+  an agent to reach, no extra approval, and the vault heals itself. Retention
+  keeps `grant list`/`show` able to explain recent denials.
+- Tests: pure prune table (kept/dropped at the window boundary, future
+  deadlines, revoked/expired/exhausted/active); vault-level full-of-dead-grants
+  creation round trip plus "keeps live and recently dead"; e2e pty
+  `grant_create_prunes_dead_grants_from_a_full_vault` (proved failing without
+  the CLI prune line). Fixture gained `with_dead_grants` and `seeded(count,
+  created)`.
+- Docs: FORMAT.md (the 1,024 limit counts dead rows; pruning changes no byte
+  layout) and DECISIONS.md (the retention rule and why the daemon does not
+  prune).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  `cargo test` all pass. `cargo audit` skipped (not installed).
+- **Next iteration must know:** pruning only runs in `pm grant create`. A vault
+  that is full of *recently* dead grants still refuses new ones (deliberate:
+  the window is bounded by `DEAD_GRANT_RETENTION_SECS`), and `pm grant create`
+  reports it as "too many grants". If a `pm grant purge` is ever wanted, it
+  should require the master password at a TTY and go through the daemon like
+  revoke. No other writer prunes, so `pm run` cannot silently drop history.
+
 ## 2026-11-03 — Review of a14dc54..f4c7796
 
 - Findings by category: tests that don't prove what they claim 1 (R.57), drift

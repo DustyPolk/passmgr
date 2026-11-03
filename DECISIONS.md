@@ -450,6 +450,17 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   `pm grant create` (TODO 3.4d) creates grants in the human's CLI; `pmd`
   still has no request type that writes one (see the write-path decision
   below).
+- Grant rows are pruned, not immortal (TODO R.42): a vault caps the whole
+  grant list at `MAX_GRANTS` (1,024), so `pm grant create` drops grants that
+  are revoked or expired **and** died at least `DEAD_GRANT_RETENTION_SECS`
+  (7 days) before the write, in the same write that adds the new grant. The
+  window keeps `pm grant list`/`show` able to explain a recent denial.
+  Active and exhausted-but-unexpired grants are never pruned; the daemon's
+  revocation and use-recording writes do not prune, so the kill switch stays
+  a pure state change. Implemented as the pure `grant::prune_dead(grants, now)`
+  and `Vault::prune_dead_grants`; `Vault::check_grant_writable(grant, now)`
+  prunes its candidate copy, so the pre-approval check asks exactly what the
+  write will do.
 - Agents get access only through grants stored in the encrypted vault: scope
   (refs, tags, optional field names), a command allowlist of canonical
   absolute paths, capabilities, `expires_at` (max 30 days), optional

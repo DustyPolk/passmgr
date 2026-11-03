@@ -40,6 +40,21 @@ impl Fixture {
     }
 
     pub fn with_grants(count: usize) -> Self {
+        Self::seeded(count, unix_now())
+    }
+
+    /// A vault whose grant list is already full of grants that died well past
+    /// the retention window, with a live credential to scope a new grant to
+    /// (TODO R.42).
+    pub fn with_dead_grants(count: usize) -> Self {
+        let died =
+            unix_now().saturating_sub(passmgr::grant::DEAD_GRANT_RETENTION_SECS + 2 * 24 * 60 * 60);
+        Self::seeded(count, died)
+    }
+
+    /// `created` is the creation timestamp of every seeded grant; each one
+    /// expires an hour later, so passing an old value seeds dead grants.
+    fn seeded(count: usize, created: u64) -> Self {
         let directory = tempfile::tempdir().expect("tempdir");
         let vault = directory.path().join("vault.dat");
         let credential = Credential::new(
@@ -50,7 +65,6 @@ impl Fixture {
         .expect("credential");
         let reference = credential.reference();
 
-        let now = unix_now();
         let grants: Vec<Grant> = (0..count)
             .map(|index| {
                 let spec = GrantSpec {
@@ -58,13 +72,13 @@ impl Fixture {
                     scope: Scope::new(vec![], vec!["prod".into()], None).expect("scope"),
                     commands: vec![PathBuf::from("/usr/bin/true")],
                     capabilities: Capabilities::RUN,
-                    expires_at: now + 3_600,
+                    expires_at: created + 3_600,
                     max_uses: None,
                 };
                 Grant::create(
                     spec,
                     TokenHash::of(format!("seed-token-{index}").as_bytes()),
-                    now,
+                    created,
                 )
                 .expect("seed grant")
             })

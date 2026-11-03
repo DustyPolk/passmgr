@@ -955,6 +955,7 @@ impl fmt::Debug for Grant {
 
 mod capabilities;
 mod file;
+mod prune;
 mod request;
 mod token;
 mod validate;
@@ -962,6 +963,7 @@ mod validate;
 pub use crate::text::escape_hidden;
 pub use capabilities::{Capabilities, Capability};
 pub use file::{GrantFileError, read_grant_token};
+pub use prune::{DEAD_GRANT_RETENTION_SECS, prune_dead};
 pub use request::GrantRequest;
 pub use token::{GRANT_TOKEN_BYTES, GrantToken};
 pub use validate::{LABEL_FORBIDDEN_CLASSES, is_program_runner, validate_field_name};

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::crypto::{self, KdfParams};
 use crate::error::{Error, Result};
-use crate::grant::{Grant, GrantId};
+use crate::grant::{Grant, GrantId, prune_dead};
 use crate::store::{self, Credential, EntryId};
 
 use self::lock::{acquire_write_lock, with_path, write_container};
@@ -340,6 +340,20 @@ impl Vault {
         Ok(())
     }
 
+    /// Drop every grant that has been dead (revoked or expired) for at least
+    /// [`crate::grant::DEAD_GRANT_RETENTION_SECS`], and return how many were
+    /// removed.
+    ///
+    /// Grants are capped at [`crate::grant::MAX_GRANTS`] records in the whole
+    /// payload, so without pruning a vault that met the cap over its lifetime
+    /// could never accept another grant (TODO R.42). `pm grant create` calls
+    /// this under the write lock before it saves; active and merely exhausted
+    /// grants are never dropped. Nothing is written here: the change is
+    /// persisted by the next [`Vault::save`] or [`Vault::save_with_key`].
+    pub fn prune_dead_grants(&mut self, now: u64) -> usize {
+        prune_dead(&mut self.grants, now)
+    }
+
     /// Check that adding `grant` and saving this vault would be accepted.
     ///
     /// [`Vault::save_with_key`] refuses a payload that holds more than
@@ -351,12 +365,18 @@ impl Vault {
     /// The check runs the writer's own [`store::encode`] over the candidate
     /// grant list, so the pre-check and the write cannot drift apart.
     ///
+    /// The candidate list is pruned exactly as the write path prunes it, so a
+    /// vault whose slots are all occupied by long-dead grants (TODO R.42) is
+    /// **not** reported as full: the human is not told a creation is
+    /// impossible when dropping the dead rows makes room.
+    ///
     /// Nothing is written and the vault is not modified. A concurrent writer
     /// can still fill the vault between this check and the save; the write
     /// lock then reports [`Error::VaultChanged`] (or the encode refuses), which
     /// would take two grant creations racing by hand.
-    pub fn check_grant_writable(&self, grant: &Grant) -> Result<()> {
+    pub fn check_grant_writable(&self, grant: &Grant, now: u64) -> Result<()> {
         let mut grants = self.grants.clone();
+        prune_dead(&mut grants, now);
         grants.push(grant.clone());
         store::encode(&self.credentials, &grants).map(|_| ())
     }

@@ -10,7 +10,9 @@ use std::thread;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-use crate::grant::{Capabilities, Grant, GrantSpec, MAX_GRANTS, Scope, TokenHash};
+use crate::grant::{
+    Capabilities, DEAD_GRANT_RETENTION_SECS, Grant, GrantSpec, MAX_GRANTS, Scope, TokenHash,
+};
 
 fn credential(service: &str, username: &str, password: &str) -> Credential {
     Credential::new(
@@ -795,7 +797,10 @@ fn check_grant_writable_refuses_a_full_vault_without_writing() {
     }
 
     let error = vault
-        .check_grant_writable(&test_grant(entry, "one too many", 1_700_000_000))
+        .check_grant_writable(
+            &test_grant(entry, "one too many", 1_700_000_000),
+            1_700_000_000,
+        )
         .expect_err("a vault at MAX_GRANTS cannot take another grant");
     assert!(
         matches!(&error, Error::InvalidInput(message) if message.contains("too many grants")),
@@ -824,7 +829,10 @@ fn check_grant_writable_accepts_a_grant_that_still_fits() {
     // One slot left: the next grant fits, so the CLI may proceed to the proof.
     assert!(
         vault
-            .check_grant_writable(&test_grant(entry, "last slot", 1_700_000_000))
+            .check_grant_writable(
+                &test_grant(entry, "last slot", 1_700_000_000),
+                1_700_000_000
+            )
             .is_ok()
     );
     assert_eq!(vault.grants().len(), MAX_GRANTS - 1);
@@ -833,11 +841,102 @@ fn check_grant_writable_accepts_a_grant_that_still_fits() {
     // grant is refused here instead of after the approval is spent.
     let duplicate = vault.grants()[0].clone();
     let error = vault
-        .check_grant_writable(&duplicate)
+        .check_grant_writable(&duplicate, 1_700_000_000)
         .expect_err("a duplicate grant id must be refused before the write");
     assert!(
         matches!(&error, Error::InvalidInput(message) if message.contains("duplicate grant id")),
         "the pre-check must report a duplicate id: {error}"
+    );
+}
+
+/// TODO R.42: every grant record counts toward `MAX_GRANTS`, so a vault that
+/// has held 1,024 grants in its lifetime would otherwise refuse every new
+/// one, with no CLI recovery. The pre-check must see the room the write path
+/// makes by dropping grants that have been dead past the retention window.
+#[test]
+fn a_full_vault_of_dead_grants_accepts_a_new_grant() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("vault.dat");
+    let master = "test master password";
+    // `test_grant` expires an hour after creation, so every seeded grant died
+    // long before `now`.
+    let created = 1_700_000_000;
+    let now = created + DEAD_GRANT_RETENTION_SECS + 86_400;
+
+    let mut vault = Vault::open_for_add(&path, master).unwrap();
+    let entry = EntryId::generate().unwrap();
+    for index in 0..MAX_GRANTS {
+        vault
+            .add_grant(test_grant(entry, &format!("dead {index}"), created))
+            .unwrap();
+    }
+    assert_eq!(vault.grants().len(), MAX_GRANTS);
+
+    let fresh = test_grant(entry, "fresh", now);
+    vault
+        .check_grant_writable(&fresh, now)
+        .expect("dropping the dead grants leaves room for this one");
+    assert_eq!(
+        vault.grants().len(),
+        MAX_GRANTS,
+        "the pre-check prunes a copy, never the in-memory list"
+    );
+
+    assert_eq!(vault.prune_dead_grants(now), MAX_GRANTS);
+    vault.add_grant(fresh).unwrap();
+    vault.save(master).unwrap();
+    drop(vault);
+
+    let vault = Vault::open(&path, master).unwrap();
+    assert_eq!(vault.grants().len(), 1);
+    assert_eq!(vault.grants()[0].label(), "fresh");
+    assert!(vault.grants()[0].is_active(now));
+}
+
+/// TODO R.42: pruning is only for grants that are dead *and* past the
+/// retention window. An active grant, an exhausted-but-unexpired one and a
+/// recently expired or revoked one all stay, so `grant list` can still
+/// explain recent denials.
+#[test]
+fn pruning_keeps_every_grant_that_is_live_or_recently_dead() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut vault = Vault::empty(directory.path().join("vault.dat"));
+    let entry = EntryId::generate().unwrap();
+    let now = 1_800_000_000;
+
+    let mut exhausted = test_grant(entry, "exhausted", now);
+    exhausted.mark_used(now).unwrap();
+    exhausted.mark_used(now).unwrap();
+    assert_eq!(exhausted.uses_left(), Some(0));
+
+    let mut recently_revoked = test_grant(entry, "recently revoked", now - 7_200);
+    recently_revoked.revoke(now - 60).unwrap();
+
+    let long_dead = test_grant(entry, "long dead", now - DEAD_GRANT_RETENTION_SECS - 7_200);
+    let kept = [
+        test_grant(entry, "active", now),
+        exhausted,
+        recently_revoked,
+        test_grant(
+            entry,
+            "recently expired",
+            now - (DEAD_GRANT_RETENTION_SECS - 3_600),
+        ),
+    ];
+    for grant in kept.iter().chain(std::iter::once(&long_dead)) {
+        vault.add_grant(grant.clone()).unwrap();
+    }
+
+    assert_eq!(vault.prune_dead_grants(now), 1);
+    let labels: Vec<&str> = vault.grants().iter().map(Grant::label).collect();
+    assert_eq!(
+        labels,
+        [
+            "active",
+            "exhausted",
+            "recently revoked",
+            "recently expired"
+        ]
     );
 }
 

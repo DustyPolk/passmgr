@@ -942,7 +942,7 @@ Rules that apply to every item:
       before the summary. `grant list`/`show` still print the old one-line
       refs (follow-up).
 
-- [ ] **R.42 Grants are never removed, so a vault stops accepting new grants
+- [x] **R.42 Grants are never removed, so a vault stops accepting new grants
       after 1,024 creates in its lifetime.**
       `src/store/payload.rs:118-123` refuses `grants.len() > MAX_GRANTS`
       counting revoked and expired grants; `src/vault.rs:277-302` has no
@@ -957,6 +957,8 @@ Rules that apply to every item:
       the retention rule in `DECISIONS.md` and `FORMAT.md`.
       Test: a vault with `MAX_GRANTS` expired/revoked grants accepts a new
       grant; active grants are never removed.
+      Done as prune-on-write in `pm grant create` (7-day retention after
+      death), not as a `pm grant purge` subcommand.
 
 - [ ] **R.43 The README's main `run` example is refused with exit 5.**
       `README.md:170-173` creates a grant with `--command /usr/bin/gh` and no

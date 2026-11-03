@@ -159,6 +159,14 @@ no duplicate refs, tags, field names or commands inside one grant; a `run`
 grant needs at least one command; `max_uses`, when present, is at least 1 and
 not below `uses`.
 
+The 1,024 limit counts every record, including revoked and expired ones.
+`pm grant create` therefore drops grants that have been dead (revoked, or
+expired) for at least 7 days in the same write that adds the new one, so a
+vault that met the cap over its lifetime accepts new grants again. Active
+grants and exhausted-but-unexpired grants are never dropped. Pruning only
+removes records, so it changes no byte layout and every store version still
+decodes unchanged.
+
 Tags are lowercase metadata labels used for scoped agent access. On disk each
 credential stores a sorted, duplicate-free list: each tag must be 1-32 bytes,
 start with an ASCII lowercase letter or digit, and otherwise contain only

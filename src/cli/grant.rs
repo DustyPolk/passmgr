@@ -190,8 +190,10 @@ pub(crate) fn command_grant_create(
         let current = vault::Vault::open_with_key(vault_path, &key)?;
         // The daemon cannot check vault limits (it never opens the vault), so
         // a vault that cannot hold another grant must fail *before* the
-        // human's approval is spent (TODO R.22).
-        current.check_grant_writable(&grant)?;
+        // human's approval is spent (TODO R.22). The check applies the same
+        // dead-grant prune the write below does, so "still full" here means
+        // full of grants that are actually alive (TODO R.42).
+        current.check_grant_writable(&grant, now)?;
         // An unknown ref is refused here, before the summary and before any
         // socket contact: a grant that names nothing must not be approvable.
         preview_scope(request.scope(), &current)?
@@ -254,7 +256,13 @@ pub(crate) fn command_grant_create(
     // R.39); the pre-check above was on a lock-free read and is repeated on
     // this fresh state.
     let mut vault = vault::Vault::open_with_key_for_update(vault_path, &key)?;
-    vault.check_grant_writable(&grant)?;
+    // Drop grants that died more than the retention window ago, in the same
+    // write that adds the new one, so a vault that reached `MAX_GRANTS` over
+    // its lifetime is usable again (TODO R.42). Reusing `now` from the top of
+    // the command is conservative: a grant that dies while the human is
+    // deciding is kept, never dropped early.
+    vault.prune_dead_grants(now);
+    vault.check_grant_writable(&grant, now)?;
     vault.add_grant(grant)?;
     vault.save_with_key(&key)?;
 
