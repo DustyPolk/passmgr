@@ -493,7 +493,8 @@ mod tests {
 
     #[test]
     fn json_entry_exposes_tags_and_utc_timestamps_but_no_password() {
-        let credentials = store::decode(&store_v4_payload(951_782_400, 1_735_689_600)).unwrap();
+        let payload = store::decode(&store_v4_payload(951_782_400, 1_735_689_600)).unwrap();
+        let credentials = payload.credentials;
         let entry = entry_metadata(&credentials[0]);
         assert_eq!(entry["ref"], serde_json::json!(credentials[0].reference()));
         assert_eq!(entry["service"], serde_json::json!("example.com"));
@@ -513,7 +514,8 @@ mod tests {
     fn json_entry_renders_unknown_timestamps_as_null() {
         // Pre-v4 payloads migrate with 0 in both fields; that absence must stay
         // visible as `null` instead of being rendered as 1970-01-01.
-        let credentials = store::decode(&store_v4_payload(0, 0)).unwrap();
+        let payload = store::decode(&store_v4_payload(0, 0)).unwrap();
+        let credentials = payload.credentials;
         let entry = entry_metadata(&credentials[0]);
         assert_eq!(entry["created"], serde_json::Value::Null);
         assert_eq!(entry["last_rotated"], serde_json::Value::Null);

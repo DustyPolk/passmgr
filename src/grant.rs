@@ -523,6 +523,27 @@ pub struct Grant {
     last_used: Option<u64>,
 }
 
+/// The stored fields of one grant, decoded from the vault payload.
+///
+/// Only the payload decoder builds this. [`Grant::from_stored`] re-checks every
+/// invariant [`Grant::create`] enforces, so a corrupt or hand-edited payload
+/// cannot produce a grant this build would never have created. The token
+/// itself is absent: the payload holds only its SHA-256.
+pub struct StoredGrant {
+    pub id: GrantId,
+    pub token_hash: TokenHash,
+    pub label: String,
+    pub scope: Scope,
+    pub commands: Vec<PathBuf>,
+    pub capabilities: Capabilities,
+    pub created: u64,
+    pub expires_at: u64,
+    pub max_uses: Option<u32>,
+    pub uses: u32,
+    pub revoked_at: Option<u64>,
+    pub last_used: Option<u64>,
+}
+
 impl Grant {
     /// Create a brand-new grant (no uses yet, not revoked) from validated
     /// input and the hash of its token.
@@ -583,6 +604,91 @@ impl Grant {
             uses: 0,
             revoked_at: None,
             last_used: None,
+        })
+    }
+
+    /// Rebuild a grant from decoded payload fields.
+    ///
+    /// This re-checks every rule [`Grant::create`] enforces, plus the ones
+    /// only stored data can violate: a use count past `max_uses`, and
+    /// timestamps beyond the maximum this build can represent. Errors are
+    /// `InvalidInput`; the payload decoder maps them to `MalformedVault`.
+    pub fn from_stored(stored: StoredGrant) -> Result<Self> {
+        for (name, value) in [
+            ("created", stored.created),
+            ("expires_at", stored.expires_at),
+        ] {
+            if value > MAX_TIMESTAMP_UNIX {
+                return Err(Error::InvalidInput(format!(
+                    "{name} timestamp {value} exceeds the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds"
+                )));
+            }
+        }
+        for (name, value) in [
+            ("revoked_at", stored.revoked_at),
+            ("last_used", stored.last_used),
+        ] {
+            if let Some(value) = value
+                && value > MAX_TIMESTAMP_UNIX
+            {
+                return Err(Error::InvalidInput(format!(
+                    "{name} timestamp {value} exceeds the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds"
+                )));
+            }
+        }
+        if stored.expires_at <= stored.created {
+            return Err(Error::InvalidInput(
+                "a stored grant expires before or when it was created".into(),
+            ));
+        }
+        if stored.expires_at - stored.created > MAX_GRANT_LIFETIME_SECS {
+            return Err(Error::InvalidInput(format!(
+                "a stored grant lasts longer than the maximum of {} days",
+                MAX_GRANT_LIFETIME_SECS / 86_400
+            )));
+        }
+        validate_label(&stored.label)?;
+        if stored.capabilities.is_empty() {
+            return Err(Error::InvalidInput(
+                "a stored grant has no capabilities".into(),
+            ));
+        }
+        let specified = stored.commands.len();
+        let commands = validate_commands(stored.commands)?;
+        if commands.len() != specified {
+            return Err(Error::InvalidInput(
+                "a stored grant lists the same command twice".into(),
+            ));
+        }
+        if stored.capabilities.contains(Capabilities::RUN) && commands.is_empty() {
+            return Err(Error::InvalidInput(
+                "a stored run grant has no allowed command".into(),
+            ));
+        }
+        if stored.max_uses == Some(0) {
+            return Err(Error::InvalidInput("a stored grant has max_uses 0".into()));
+        }
+        if let Some(max_uses) = stored.max_uses
+            && stored.uses > max_uses
+        {
+            return Err(Error::InvalidInput(format!(
+                "a stored grant used {} times but allows only {max_uses}",
+                stored.uses
+            )));
+        }
+        Ok(Self {
+            id: stored.id,
+            token_hash: stored.token_hash,
+            label: stored.label,
+            scope: stored.scope,
+            commands,
+            capabilities: stored.capabilities,
+            created: stored.created,
+            expires_at: stored.expires_at,
+            max_uses: stored.max_uses,
+            uses: stored.uses,
+            revoked_at: stored.revoked_at,
+            last_used: stored.last_used,
         })
     }
 

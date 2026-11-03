@@ -332,14 +332,20 @@ passmgr --version
   change).
 - **Tags:** tags are metadata stored in the same encrypted payload. Store
   version 3 added per-credential tags; version 2 and version 1 payloads read
-  as untagged and are rewritten as version 4 on the next save. Tag names are
+  as untagged and are rewritten as version 5 on the next save. Tag names are
   validated on both write and read, so a malformed payload fails closed.
 - **Timestamps:** each credential records `created` and `last_rotated` as Unix
   seconds inside the encrypted payload. Store version 4 added them; payloads
   from version 3 and older decode with `0` ("unknown") and are rewritten as
-  version 4 on the next save. Rotation never changes `created`. Timestamps are
+  version 5 on the next save. Rotation never changes `created`. Timestamps are
   metadata: `list --json` and `show --json` render them as RFC 3339 UTC
   strings (`null` when unknown).
+- **Grants:** the grant list lives in the same encrypted payload, after the
+  credentials. Store version 5 added it; version 4 and older payloads decode
+  with no grants and are rewritten as version 5 on the next save. Only the
+  SHA-256 of a grant token is stored, never the token. Every rule a new grant
+  must satisfy is checked again when the payload is read, so a modified vault
+  cannot widen a grant.
 - **Memory handling:** decrypted payloads, master passwords, generated
   passwords, keys, and credential fields use `zeroize` containers. Credential
   `Debug` output redacts the password.

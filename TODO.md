@@ -36,13 +36,16 @@ approval flow", "Audit"). Follow it.
       Done: model + pure check in `src/grant.rs`, tests in `tests/grant.rs`;
       `hmac` deferred to 3.3 so no unused dependency lands. Grants are not
       persisted yet.
-- [ ] **3.2b Persist grants in store version 5.** Add the grant list after
+- [x] **3.2b Persist grants in store version 5.** Add the grant list after
       the credentials in the payload, encode/decode with the same length
       caps, v5 keeps credentials byte-identical to v4 and earlier versions
       migrate to an empty grant list. `Vault` gains grant accessors used by
       `save`. Update `FORMAT.md` and `DECISIONS.md`. Tests: v4 -> v5
       migration, every older version decodes with no grants, a round trip,
       duplicate grant ids and a truncated grant record are `MalformedVault`.
+      Note: optional fields are behind a flags byte (not a magic `0`
+      timestamp), and `Vault::add_grant` reports a duplicate id as
+      `InvalidInput` rather than a new error variant.
 - [ ] **3.3 Human-presence proof.** Add `hmac` (RustCrypto) here, its first
       use. Daemon `challenge` request returns a nonce. The CLI answers with
       `HMAC-SHA256(key, "passmgr-approve-v1" || nonce || digest)`. The daemon

@@ -3,7 +3,7 @@
 //! The payload is versioned binary data (integers little-endian):
 //!
 //! ```text
-//! u8                     store version (4)
+//! u8                     store version (5)
 //! u32                    credential count
 //! for each credential:
 //!     byte[16]           entry id
@@ -15,12 +15,15 @@
 //!     u32                tag count
 //!     for each tag:
 //!         u32 + bytes    tag      (UTF-8)
+//! u32                    grant count
+//! for each grant:        see `encode_grant`/`decode_grant`
 //! ```
 //!
-//! Store version 1 had no entry ids, version 2 had no tags, and version 3 had
-//! no timestamps. All are still read for migration; missing ids are generated
-//! in memory and missing timestamps decode as 0 ("unknown") and are written
-//! out on the next save (no data loss, no crypto change).
+//! Store version 1 had no entry ids, version 2 had no tags, version 3 had no
+//! timestamps and version 4 had no grants. All are still read for migration;
+//! missing ids are generated in memory, missing timestamps decode as 0
+//! ("unknown") and missing grants decode as an empty list, and the next save
+//! writes store version 5 (no data loss, no crypto change).
 //!
 //! Length-prefixing means services, usernames, and passwords may contain any
 //! characters (including `:` and newlines) without escaping.
@@ -35,6 +38,12 @@ use zeroize::Zeroizing;
 
 use crate::crypto::MAX_PLAINTEXT_BYTES;
 use crate::error::{Error, Result};
+use crate::grant::{
+    Capabilities, GRANT_ID_BYTES, Grant, GrantId, MAX_COMMANDS, MAX_FIELD_NAME_BYTES, MAX_GRANTS,
+    MAX_LABEL_BYTES, MAX_SCOPE_FIELDS, MAX_SCOPE_REFS, Scope, StoredGrant, TOKEN_HASH_BYTES,
+    TokenHash,
+};
+use crate::protocol::MAX_PATH_BYTES;
 
 pub const MAX_CREDENTIALS: usize = 10_000;
 pub const MAX_FIELD_BYTES: usize = 4096;
@@ -50,7 +59,10 @@ const ENTRY_REF_PREFIX: &str = "pm://";
 /// which keeps date rendering from overflowing and rejects nonsense values.
 pub const MAX_TIMESTAMP_UNIX: u64 = 253_402_300_799;
 
-const STORE_VERSION: u8 = 4;
+const STORE_VERSION: u8 = 5;
+/// Version 4 is read-only for migration: it has credentials with ids, tags and
+/// timestamps, but no grant list.
+const STORE_VERSION_WITHOUT_GRANTS: u8 = 4;
 /// Version 3 is read-only for migration: it has ids and tags but no
 /// timestamps.
 const STORE_VERSION_WITHOUT_TIMESTAMPS: u8 = 3;
@@ -58,6 +70,17 @@ const STORE_VERSION_WITHOUT_TIMESTAMPS: u8 = 3;
 const STORE_VERSION_WITHOUT_TAGS: u8 = 2;
 /// Version 1 is read-only for migration: it has no ids and no tags.
 const STORE_VERSION_WITHOUT_IDS: u8 = 1;
+
+/// Presence bits for a grant record's optional fields. Unset bits mean the
+/// optional value is absent, so `None` is never encoded as a magic timestamp
+/// that a real clock could produce.
+const GRANT_FLAG_REVOKED: u8 = 0b0000_0001;
+const GRANT_FLAG_LAST_USED: u8 = 0b0000_0010;
+const GRANT_FLAG_MAX_USES: u8 = 0b0000_0100;
+const GRANT_FLAG_KNOWN: u8 = GRANT_FLAG_REVOKED | GRANT_FLAG_LAST_USED | GRANT_FLAG_MAX_USES;
+/// Field-scope mode byte: `0` = every field, `1` = only the listed names.
+const FIELD_SCOPE_ALL: u8 = 0;
+const FIELD_SCOPE_LISTED: u8 = 1;
 
 /// A stable random identifier for a credential (16 bytes, rendered as 32
 /// lowercase hex characters). Agents use the `pm://<hex>` reference form; the
@@ -76,6 +99,12 @@ impl EntryId {
 
     fn from_bytes(bytes: [u8; ENTRY_ID_BYTES]) -> Self {
         Self(bytes)
+    }
+
+    /// The raw id bytes, for encoding the vault payload only. Ids are
+    /// metadata, never secrets, but they are still not rendered raw.
+    pub fn as_bytes(&self) -> &[u8; ENTRY_ID_BYTES] {
+        &self.0
     }
 
     pub fn to_hex(self) -> String {
@@ -432,12 +461,16 @@ fn validate_field(name: &str, value: &str, required: bool) -> Result<()> {
     Ok(())
 }
 
-fn byte_len(credentials: &[Credential]) -> Result<usize> {
-    let mut total: usize = 1 + 4;
+fn contents_too_large() -> Error {
+    Error::InvalidInput("vault contents are too large".into())
+}
+
+fn byte_len(credentials: &[Credential], grants: &[Grant]) -> Result<usize> {
+    let mut total: usize = 1 + 4 + 4;
     for credential in credentials {
         total = total
             .checked_add(ENTRY_ID_BYTES + 8 + 8)
-            .ok_or_else(|| Error::InvalidInput("vault contents are too large".into()))?;
+            .ok_or_else(contents_too_large)?;
         for field in [
             credential.service(),
             credential.username(),
@@ -445,29 +478,86 @@ fn byte_len(credentials: &[Credential]) -> Result<usize> {
         ] {
             total = total
                 .checked_add(4 + field.len())
-                .ok_or_else(|| Error::InvalidInput("vault contents are too large".into()))?;
+                .ok_or_else(contents_too_large)?;
         }
-        total = total
-            .checked_add(4)
-            .ok_or_else(|| Error::InvalidInput("vault contents are too large".into()))?;
+        total = total.checked_add(4).ok_or_else(contents_too_large)?;
         for tag in credential.tags() {
             total = total
                 .checked_add(4 + tag.len())
-                .ok_or_else(|| Error::InvalidInput("vault contents are too large".into()))?;
+                .ok_or_else(contents_too_large)?;
         }
+    }
+    for grant in grants {
+        total = total
+            .checked_add(grant_byte_len(grant))
+            .ok_or_else(contents_too_large)?;
     }
     Ok(total)
 }
 
-/// Serialize credentials for encryption.
-pub fn encode(credentials: &[Credential]) -> Result<Zeroizing<Vec<u8>>> {
+/// Encoded size of one grant record. Every part is already bounded
+/// (`MAX_*` counts and byte lengths), so this cannot overflow on a supported
+/// target; the caller still checks the total against the payload cap.
+fn grant_byte_len(grant: &Grant) -> usize {
+    let scope = grant.scope();
+    let mut total = GRANT_ID_BYTES
+        + TOKEN_HASH_BYTES
+        + 1 // capabilities
+        + 1 // optional-field flags
+        + 8 // created
+        + 8 // expires_at
+        + 4 // uses
+        + 4
+        + grant.label().len()
+        + 4
+        + ENTRY_ID_BYTES * scope.refs().len()
+        + 4;
+    for tag in scope.tags() {
+        total += 4 + tag.len();
+    }
+    total += 1;
+    if let Some(fields) = scope.fields() {
+        total += 4;
+        for field in fields {
+            total += 4 + field.len();
+        }
+    }
+    total += 4;
+    for command in grant.commands() {
+        total += 4 + command.as_os_str().len();
+    }
+    if grant.revoked_at_unix().is_some() {
+        total += 8;
+    }
+    if grant.last_used_unix().is_some() {
+        total += 8;
+    }
+    if grant.max_uses().is_some() {
+        total += 4;
+    }
+    total
+}
+
+fn write_string(out: &mut Vec<u8>, value: &str) {
+    out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    out.extend_from_slice(value.as_bytes());
+}
+
+/// Serialize credentials and grants for encryption.
+pub fn encode(credentials: &[Credential], grants: &[Grant]) -> Result<Zeroizing<Vec<u8>>> {
     if credentials.len() > MAX_CREDENTIALS {
         return Err(Error::InvalidInput(format!(
             "too many credentials ({}, maximum is {MAX_CREDENTIALS})",
             credentials.len()
         )));
     }
-    let total = byte_len(credentials)?;
+    if grants.len() > MAX_GRANTS {
+        return Err(Error::InvalidInput(format!(
+            "too many grants ({}, maximum is {MAX_GRANTS})",
+            grants.len()
+        )));
+    }
+    let total = byte_len(credentials, grants)?;
     if total > MAX_PLAINTEXT_BYTES {
         return Err(Error::InvalidInput(format!(
             "vault contents are too large ({total} bytes; maximum is {MAX_PLAINTEXT_BYTES})"
@@ -476,6 +566,15 @@ pub fn encode(credentials: &[Credential]) -> Result<Zeroizing<Vec<u8>>> {
 
     for credential in credentials {
         validate_timestamps(credential.timestamps)?;
+    }
+    let mut seen_grants = HashSet::with_capacity(grants.len());
+    for grant in grants {
+        if !seen_grants.insert(grant.id()) {
+            return Err(Error::InvalidInput(format!(
+                "duplicate grant id {}",
+                grant.id()
+            )));
+        }
     }
 
     let mut out = Zeroizing::new(Vec::with_capacity(total));
@@ -490,17 +589,95 @@ pub fn encode(credentials: &[Credential]) -> Result<Zeroizing<Vec<u8>>> {
             credential.username(),
             credential.password(),
         ] {
-            out.extend_from_slice(&(field.len() as u32).to_le_bytes());
-            out.extend_from_slice(field.as_bytes());
+            write_string(&mut out, field);
         }
         out.extend_from_slice(&(credential.tags().len() as u32).to_le_bytes());
         for tag in credential.tags() {
-            out.extend_from_slice(&(tag.len() as u32).to_le_bytes());
-            out.extend_from_slice(tag.as_bytes());
+            write_string(&mut out, tag);
         }
+    }
+    out.extend_from_slice(&(grants.len() as u32).to_le_bytes());
+    for grant in grants {
+        encode_grant(&mut out, grant);
     }
     debug_assert_eq!(out.len(), total);
     Ok(out)
+}
+
+/// Append one grant record.
+///
+/// ```text
+/// byte[16]   grant id
+/// byte[32]   token hash (SHA-256; the token itself is never stored)
+/// u8         capability bits (list = 1, run = 2)
+/// u8         presence flags (bit0 revoked_at, bit1 last_used, bit2 max_uses)
+/// u64        created
+/// u64        expires_at
+/// [u64]      revoked_at   when bit0 is set
+/// [u64]      last_used    when bit1 is set
+/// [u32]      max_uses     when bit2 is set
+/// u32        uses
+/// u32 + bytes  label (UTF-8)
+/// u32        ref count; each byte[16] entry id
+/// u32        tag count; each u32 + bytes
+/// u8         field mode (0 = all fields, 1 = listed)
+///            when 1: u32 field count; each u32 + bytes
+/// u32        command count; each u32 + bytes absolute path (UTF-8)
+/// ```
+fn encode_grant(out: &mut Vec<u8>, grant: &Grant) {
+    out.extend_from_slice(grant.id().as_bytes());
+    out.extend_from_slice(grant.token_hash().as_bytes());
+    out.push(grant.capabilities().bits());
+    let mut flags = 0u8;
+    if grant.revoked_at_unix().is_some() {
+        flags |= GRANT_FLAG_REVOKED;
+    }
+    if grant.last_used_unix().is_some() {
+        flags |= GRANT_FLAG_LAST_USED;
+    }
+    if grant.max_uses().is_some() {
+        flags |= GRANT_FLAG_MAX_USES;
+    }
+    out.push(flags);
+    out.extend_from_slice(&grant.created_unix().to_le_bytes());
+    out.extend_from_slice(&grant.expires_at_unix().to_le_bytes());
+    if let Some(revoked_at) = grant.revoked_at_unix() {
+        out.extend_from_slice(&revoked_at.to_le_bytes());
+    }
+    if let Some(last_used) = grant.last_used_unix() {
+        out.extend_from_slice(&last_used.to_le_bytes());
+    }
+    if let Some(max_uses) = grant.max_uses() {
+        out.extend_from_slice(&max_uses.to_le_bytes());
+    }
+    out.extend_from_slice(&grant.uses().to_le_bytes());
+    write_string(out, grant.label());
+    let scope = grant.scope();
+    out.extend_from_slice(&(scope.refs().len() as u32).to_le_bytes());
+    for entry in scope.refs() {
+        out.extend_from_slice(entry.as_bytes());
+    }
+    out.extend_from_slice(&(scope.tags().len() as u32).to_le_bytes());
+    for tag in scope.tags() {
+        write_string(out, tag);
+    }
+    match scope.fields() {
+        None => out.push(FIELD_SCOPE_ALL),
+        Some(fields) => {
+            out.push(FIELD_SCOPE_LISTED);
+            out.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+            for field in fields {
+                write_string(out, field);
+            }
+        }
+    }
+    out.extend_from_slice(&(grant.commands().len() as u32).to_le_bytes());
+    for command in grant.commands() {
+        let text = command
+            .to_str()
+            .expect("grant commands were validated as UTF-8");
+        write_string(out, text);
+    }
 }
 
 fn validate_timestamps(timestamps: Timestamps) -> Result<()> {
@@ -586,10 +763,15 @@ impl<'a> Cursor<'a> {
     }
 
     fn read_string(&mut self, field: &str) -> Result<String> {
+        self.read_string_capped(field, MAX_FIELD_BYTES)
+    }
+
+    /// Read a length-prefixed UTF-8 string that must fit in `max` bytes.
+    fn read_string_capped(&mut self, field: &str, max: usize) -> Result<String> {
         let len = self.read_u32()? as usize;
-        if len > MAX_FIELD_BYTES {
+        if len > max {
             return Err(Error::MalformedVault(format!(
-                "{field} length {len} exceeds the maximum of {MAX_FIELD_BYTES} bytes"
+                "{field} length {len} exceeds the maximum of {max} bytes"
             )));
         }
         let bytes = self.read_bytes(len)?;
@@ -598,23 +780,50 @@ impl<'a> Cursor<'a> {
         Ok(text.to_owned())
     }
 
+    fn read_grant_id(&mut self) -> Result<GrantId> {
+        let bytes: [u8; GRANT_ID_BYTES] = self
+            .read_bytes(GRANT_ID_BYTES)?
+            .try_into()
+            .expect("read_bytes returned the requested length");
+        Ok(GrantId::from_bytes(bytes))
+    }
+
+    fn read_token_hash(&mut self) -> Result<TokenHash> {
+        let bytes: [u8; TOKEN_HASH_BYTES] = self
+            .read_bytes(TOKEN_HASH_BYTES)?
+            .try_into()
+            .expect("read_bytes returned the requested length");
+        Ok(TokenHash::from_bytes(bytes))
+    }
+
     fn is_at_end(&self) -> bool {
         self.position == self.data.len()
     }
 }
 
+/// The decrypted vault payload: credentials and grants.
+///
+/// `Debug` is derived only so tests can call `unwrap_err`; both fields already
+/// redact their secrets in their own `Debug` implementations.
+#[derive(Debug)]
+pub struct Payload {
+    pub credentials: Vec<Credential>,
+    pub grants: Vec<Grant>,
+}
+
 /// Parse decrypted vault contents.
-pub fn decode(data: &[u8]) -> Result<Vec<Credential>> {
+pub fn decode(data: &[u8]) -> Result<Payload> {
     if data.len() > MAX_PLAINTEXT_BYTES {
         return Err(Error::MalformedVault("credential data is too large".into()));
     }
     let mut cursor = Cursor::new(data);
     let version = cursor.read_u8()?;
-    let (has_ids, has_tags, has_timestamps) = match version {
-        STORE_VERSION => (true, true, true),
-        STORE_VERSION_WITHOUT_TIMESTAMPS => (true, true, false),
-        STORE_VERSION_WITHOUT_TAGS => (true, false, false),
-        STORE_VERSION_WITHOUT_IDS => (false, false, false),
+    let (has_ids, has_tags, has_timestamps, has_grants) = match version {
+        STORE_VERSION => (true, true, true, true),
+        STORE_VERSION_WITHOUT_GRANTS => (true, true, true, false),
+        STORE_VERSION_WITHOUT_TIMESTAMPS => (true, true, false, false),
+        STORE_VERSION_WITHOUT_TAGS => (true, false, false, false),
+        STORE_VERSION_WITHOUT_IDS => (false, false, false, false),
         other => {
             return Err(Error::MalformedVault(format!(
                 "unsupported credential store version {other}"
@@ -686,17 +895,203 @@ pub fn decode(data: &[u8]) -> Result<Vec<Credential>> {
             .map_err(|err| Error::MalformedVault(err.to_string()))?;
         credentials.push(credential);
     }
+    let grants = if has_grants {
+        decode_grants(&mut cursor)?
+    } else {
+        Vec::new()
+    };
     if !cursor.is_at_end() {
         return Err(Error::MalformedVault(
             "trailing bytes after credential data".into(),
         ));
     }
-    Ok(credentials)
+    Ok(Payload {
+        credentials,
+        grants,
+    })
+}
+
+fn decode_grants(cursor: &mut Cursor<'_>) -> Result<Vec<Grant>> {
+    let count = cursor.read_u32()? as usize;
+    if count > MAX_GRANTS {
+        return Err(Error::MalformedVault(format!(
+            "grant count {count} exceeds the maximum of {MAX_GRANTS}"
+        )));
+    }
+    let mut grants = Vec::with_capacity(count);
+    let mut seen_ids = HashSet::with_capacity(count);
+    for _ in 0..count {
+        let grant = decode_grant(cursor)?;
+        if !seen_ids.insert(grant.id()) {
+            return Err(Error::MalformedVault(format!(
+                "duplicate grant id {}",
+                grant.id()
+            )));
+        }
+        grants.push(grant);
+    }
+    Ok(grants)
+}
+
+fn decode_grant(cursor: &mut Cursor<'_>) -> Result<Grant> {
+    let id = cursor.read_grant_id()?;
+    let token_hash = cursor.read_token_hash()?;
+    let capabilities = Capabilities::from_bits(cursor.read_u8()?)
+        .map_err(|err| Error::MalformedVault(err.to_string()))?;
+    let flags = cursor.read_u8()?;
+    let unknown = flags & !GRANT_FLAG_KNOWN;
+    if unknown != 0 {
+        return Err(Error::MalformedVault(format!(
+            "unknown grant flag bits {unknown:#04b}"
+        )));
+    }
+    let created = cursor.read_u64()?;
+    let expires_at = cursor.read_u64()?;
+    let revoked_at = if flags & GRANT_FLAG_REVOKED != 0 {
+        Some(cursor.read_u64()?)
+    } else {
+        None
+    };
+    let last_used = if flags & GRANT_FLAG_LAST_USED != 0 {
+        Some(cursor.read_u64()?)
+    } else {
+        None
+    };
+    let max_uses = if flags & GRANT_FLAG_MAX_USES != 0 {
+        Some(cursor.read_u32()?)
+    } else {
+        None
+    };
+    let uses = cursor.read_u32()?;
+    let label = cursor.read_string_capped("grant label", MAX_LABEL_BYTES)?;
+
+    let refs = read_grant_refs(cursor)?;
+    let tags = read_grant_tags(cursor)?;
+    let fields = match cursor.read_u8()? {
+        FIELD_SCOPE_ALL => None,
+        FIELD_SCOPE_LISTED => Some(read_grant_fields(cursor)?),
+        other => {
+            return Err(Error::MalformedVault(format!(
+                "unknown grant field scope mode {other}"
+            )));
+        }
+    };
+    let scope =
+        Scope::new(refs, tags, fields).map_err(|err| Error::MalformedVault(err.to_string()))?;
+    let commands = read_grant_commands(cursor)?;
+
+    Grant::from_stored(StoredGrant {
+        id,
+        token_hash,
+        label,
+        scope,
+        commands,
+        capabilities,
+        created,
+        expires_at,
+        max_uses,
+        uses,
+        revoked_at,
+        last_used,
+    })
+    .map_err(|err| Error::MalformedVault(err.to_string()))
+}
+
+fn read_grant_refs(cursor: &mut Cursor<'_>) -> Result<Vec<EntryId>> {
+    let count = cursor.read_u32()? as usize;
+    if count > MAX_SCOPE_REFS {
+        return Err(Error::MalformedVault(format!(
+            "grant ref count {count} exceeds the maximum of {MAX_SCOPE_REFS}"
+        )));
+    }
+    let mut refs = Vec::with_capacity(count);
+    let mut seen = HashSet::with_capacity(count);
+    for _ in 0..count {
+        let id = cursor.read_id()?;
+        if !seen.insert(id) {
+            return Err(Error::MalformedVault(format!(
+                "duplicate ref {} in one grant",
+                id.to_ref()
+            )));
+        }
+        refs.push(id);
+    }
+    Ok(refs)
+}
+
+fn read_grant_tags(cursor: &mut Cursor<'_>) -> Result<Vec<String>> {
+    let count = cursor.read_u32()? as usize;
+    if count > MAX_TAGS_PER_CREDENTIAL {
+        return Err(Error::MalformedVault(format!(
+            "grant tag count {count} exceeds the maximum of {MAX_TAGS_PER_CREDENTIAL}"
+        )));
+    }
+    let mut tags = Vec::with_capacity(count);
+    let mut seen = HashSet::with_capacity(count);
+    for _ in 0..count {
+        let tag = cursor.read_string_capped("tag", MAX_TAG_BYTES)?;
+        if !seen.insert(tag.clone()) {
+            return Err(Error::MalformedVault(format!(
+                "duplicate tag '{tag}' in one grant"
+            )));
+        }
+        tags.push(tag);
+    }
+    Ok(tags)
+}
+
+fn read_grant_fields(cursor: &mut Cursor<'_>) -> Result<Vec<String>> {
+    let count = cursor.read_u32()? as usize;
+    if count > MAX_SCOPE_FIELDS {
+        return Err(Error::MalformedVault(format!(
+            "grant field count {count} exceeds the maximum of {MAX_SCOPE_FIELDS}"
+        )));
+    }
+    if count == 0 {
+        return Err(Error::MalformedVault(
+            "grant lists an empty field scope".into(),
+        ));
+    }
+    let mut fields = Vec::with_capacity(count);
+    let mut seen = HashSet::with_capacity(count);
+    for _ in 0..count {
+        let name = cursor.read_string_capped("field name", MAX_FIELD_NAME_BYTES)?;
+        if !seen.insert(name.clone()) {
+            return Err(Error::MalformedVault(format!(
+                "duplicate field '{name}' in one grant"
+            )));
+        }
+        fields.push(name);
+    }
+    Ok(fields)
+}
+
+fn read_grant_commands(cursor: &mut Cursor<'_>) -> Result<Vec<std::path::PathBuf>> {
+    let count = cursor.read_u32()? as usize;
+    if count > MAX_COMMANDS {
+        return Err(Error::MalformedVault(format!(
+            "grant command count {count} exceeds the maximum of {MAX_COMMANDS}"
+        )));
+    }
+    let mut commands = Vec::with_capacity(count);
+    let mut seen = HashSet::with_capacity(count);
+    for _ in 0..count {
+        let text = cursor.read_string_capped("command", MAX_PATH_BYTES)?;
+        if !seen.insert(text.clone()) {
+            return Err(Error::MalformedVault(format!(
+                "duplicate command '{text}' in one grant"
+            )));
+        }
+        commands.push(std::path::PathBuf::from(text));
+    }
+    Ok(commands)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::grant::GrantSpec;
 
     fn credential(service: &str, username: &str, password: &str) -> Credential {
         Credential::new(
@@ -705,6 +1100,48 @@ mod tests {
             Zeroizing::new(password.to_owned()),
         )
         .unwrap()
+    }
+
+    /// Credential-only convenience over the full payload codec, so the
+    /// credential tests do not repeat `&[]` everywhere.
+    fn encode_credentials(credentials: &[Credential]) -> Result<Zeroizing<Vec<u8>>> {
+        encode(credentials, &[])
+    }
+
+    fn decode_credentials(data: &[u8]) -> Result<Vec<Credential>> {
+        decode(data).map(|payload| payload.credentials)
+    }
+
+    /// A grant with one ref, one allowed command and the given capabilities.
+    fn test_grant(label: &str, capabilities: Capabilities) -> Grant {
+        Grant::create(
+            GrantSpec {
+                label: label.to_owned(),
+                scope: Scope::new(vec![EntryId::generate().unwrap()], Vec::new(), None).unwrap(),
+                commands: vec![std::path::PathBuf::from("/usr/bin/env")],
+                capabilities,
+                expires_at: 1_700_003_600,
+                max_uses: None,
+            },
+            TokenHash::of(b"canary-grant-token"),
+            1_700_000_000,
+        )
+        .unwrap()
+    }
+
+    fn assert_grants_equal(actual: &Grant, expected: &Grant) {
+        assert_eq!(actual.id(), expected.id());
+        assert!(actual.matches_token(expected.token_hash()));
+        assert_eq!(actual.label(), expected.label());
+        assert_eq!(actual.scope(), expected.scope());
+        assert_eq!(actual.commands(), expected.commands());
+        assert_eq!(actual.capabilities(), expected.capabilities());
+        assert_eq!(actual.created_unix(), expected.created_unix());
+        assert_eq!(actual.expires_at_unix(), expected.expires_at_unix());
+        assert_eq!(actual.max_uses(), expected.max_uses());
+        assert_eq!(actual.uses(), expected.uses());
+        assert_eq!(actual.revoked_at_unix(), expected.revoked_at_unix());
+        assert_eq!(actual.last_used_unix(), expected.last_used_unix());
     }
 
     /// Build a store version 1 payload (no entry ids) by hand, the way the
@@ -728,9 +1165,9 @@ mod tests {
             credential("emoji.example", "üser", "🔐 secret"),
             credential("no-username.example", "", "x"),
         ];
-        let encoded = encode(&credentials).unwrap();
+        let encoded = encode_credentials(&credentials).unwrap();
         assert_eq!(encoded[0], STORE_VERSION);
-        let decoded = decode(&encoded).unwrap();
+        let decoded = decode_credentials(&encoded).unwrap();
         assert_eq!(decoded.len(), credentials.len());
         for (actual, expected) in decoded.iter().zip(&credentials) {
             assert_eq!(actual.id(), expected.id());
@@ -777,11 +1214,45 @@ mod tests {
         out
     }
 
+    /// Build a store version 4 payload (credentials with ids, tags and
+    /// timestamps, but no grant list) by hand, the way the previous release
+    /// wrote it.
+    fn encode_v4(
+        credentials: &[(&str, &str, &str, &[&str])],
+        created: u64,
+        last_rotated: u64,
+    ) -> Vec<u8> {
+        let mut out = vec![STORE_VERSION_WITHOUT_GRANTS];
+        out.extend_from_slice(&(credentials.len() as u32).to_le_bytes());
+        for (service, username, password, tags) in credentials {
+            out.extend_from_slice(&[0x22; ENTRY_ID_BYTES]);
+            out.extend_from_slice(&created.to_le_bytes());
+            out.extend_from_slice(&last_rotated.to_le_bytes());
+            for field in [*service, *username, *password] {
+                out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+                out.extend_from_slice(field.as_bytes());
+            }
+            out.extend_from_slice(&(tags.len() as u32).to_le_bytes());
+            for tag in *tags {
+                out.extend_from_slice(&(tag.len() as u32).to_le_bytes());
+                out.extend_from_slice(tag.as_bytes());
+            }
+        }
+        out
+    }
+
     #[test]
     fn empty_vault_roundtrips() {
-        let encoded = encode(&[]).unwrap();
-        assert_eq!(&*encoded, &[4, 0, 0, 0, 0]);
-        assert!(decode(&encoded).unwrap().is_empty());
+        let encoded = encode_credentials(&[]).unwrap();
+        assert_eq!(&*encoded, &[5, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let decoded = decode(&encoded).unwrap();
+        assert!(decoded.credentials.is_empty());
+        assert!(decoded.grants.is_empty());
+
+        // A version 4 empty payload (no grant count) still decodes.
+        let migrated = decode(&[4, 0, 0, 0, 0]).unwrap();
+        assert!(migrated.credentials.is_empty());
+        assert!(migrated.grants.is_empty());
     }
 
     #[test]
@@ -799,7 +1270,7 @@ mod tests {
         assert!(credential.has_all_tags(&["prod".to_owned(), "work".to_owned()]));
         assert!(!credential.has_all_tags(&["prod".to_owned(), "dev".to_owned()]));
 
-        let decoded = decode(&encode(&[credential]).unwrap()).unwrap();
+        let decoded = decode_credentials(&encode_credentials(&[credential]).unwrap()).unwrap();
         assert_eq!(decoded[0].tags(), ["prod", "work"]);
         assert_eq!(decoded[0].service(), "tagged.example");
     }
@@ -807,18 +1278,18 @@ mod tests {
     #[test]
     fn version_3_payload_is_migrated_with_timestamps_unknown() {
         let payload = encode_v3(&[("v3.example", "alice", "secret", &["prod", "work"])]);
-        let migrated = decode(&payload).unwrap();
+        let migrated = decode_credentials(&payload).unwrap();
         assert_eq!(migrated.len(), 1);
         assert_eq!(migrated[0].service(), "v3.example");
         assert_eq!(migrated[0].tags(), ["prod", "work"]);
         assert_eq!(migrated[0].created_unix(), 0);
         assert_eq!(migrated[0].last_rotated_unix(), 0);
 
-        // Saving upgrades to store version 4 and preserves id, tags and the
+        // Saving upgrades to store version 5 and preserves id, tags and the
         // "unknown" timestamps instead of inventing a creation date.
-        let upgraded = encode(&migrated).unwrap();
+        let upgraded = encode_credentials(&migrated).unwrap();
         assert_eq!(upgraded[0], STORE_VERSION);
-        let reopened = decode(&upgraded).unwrap();
+        let reopened = decode_credentials(&upgraded).unwrap();
         assert_eq!(reopened[0].id(), migrated[0].id());
         assert_eq!(reopened[0].tags(), ["prod", "work"]);
         assert_eq!(reopened[0].created_unix(), 0);
@@ -828,7 +1299,7 @@ mod tests {
     #[test]
     fn version_2_payload_is_migrated_without_data_loss() {
         let payload = encode_v2(&[("old.example", "alice", "secret-one")]);
-        let migrated = decode(&payload).unwrap();
+        let migrated = decode_credentials(&payload).unwrap();
         assert_eq!(migrated.len(), 1);
         assert_eq!(migrated[0].service(), "old.example");
         assert_eq!(migrated[0].username(), "alice");
@@ -837,10 +1308,10 @@ mod tests {
         assert_eq!(migrated[0].created_unix(), 0);
         assert_eq!(migrated[0].last_rotated_unix(), 0);
 
-        // Saving writes store version 4 and preserves the id.
-        let upgraded = encode(&migrated).unwrap();
+        // Saving writes store version 5 and preserves the id.
+        let upgraded = encode_credentials(&migrated).unwrap();
         assert_eq!(upgraded[0], STORE_VERSION);
-        let reopened = decode(&upgraded).unwrap();
+        let reopened = decode_credentials(&upgraded).unwrap();
         assert_eq!(reopened[0].id(), migrated[0].id());
     }
 
@@ -889,23 +1360,26 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_or_excessive_tags_in_payload() {
-        let encoded = encode(&[credential("svc", "u", "p")
+        let encoded = encode_credentials(&[credential("svc", "u", "p")
             .with_tags(vec!["a".to_owned()])
             .unwrap()])
         .unwrap()
         .to_vec();
+        // Drop the trailing grant count, then edit the credential record.
+        let mut record = encoded[..encoded.len() - 4].to_vec();
         // The tag count is the last four bytes before the single tag entry.
-        let tag_count_offset = encoded.len() - (4 + 4 + 1);
-        let mut duplicated = encoded.clone();
-        duplicated[tag_count_offset..tag_count_offset + 4].copy_from_slice(&2u32.to_le_bytes());
+        let tag_count_offset = record.len() - (4 + 4 + 1);
+        record[tag_count_offset..tag_count_offset + 4].copy_from_slice(&2u32.to_le_bytes());
+        let mut duplicated = record.clone();
         duplicated.extend_from_slice(&(1u32.to_le_bytes()));
         duplicated.extend_from_slice(b"a");
+        duplicated.extend_from_slice(&0u32.to_le_bytes());
         assert!(matches!(
             decode(&duplicated).unwrap_err(),
             Error::MalformedVault(message) if message.contains("duplicate tag")
         ));
 
-        let mut excessive = encoded;
+        let mut excessive = record;
         excessive[tag_count_offset..tag_count_offset + 4]
             .copy_from_slice(&((MAX_TAGS_PER_CREDENTIAL + 1) as u32).to_le_bytes());
         assert!(matches!(
@@ -922,8 +1396,8 @@ mod tests {
         ];
         assert_ne!(credentials[0].id(), credentials[1].id());
 
-        let first = decode(&encode(&credentials).unwrap()).unwrap();
-        let second = decode(&encode(&first).unwrap()).unwrap();
+        let first = decode_credentials(&encode_credentials(&credentials).unwrap()).unwrap();
+        let second = decode_credentials(&encode_credentials(&first).unwrap()).unwrap();
         for (original, reencoded) in credentials.iter().zip(&second) {
             assert_eq!(original.id(), reencoded.id());
         }
@@ -937,7 +1411,7 @@ mod tests {
             ("old.example", "alice", "secret-one"),
             ("other.example", "bob", "secret-two"),
         ]);
-        let migrated = decode(&payload).unwrap();
+        let migrated = decode_credentials(&payload).unwrap();
         assert_eq!(migrated.len(), 2);
         assert_eq!(migrated[0].service(), "old.example");
         assert_eq!(migrated[0].username(), "alice");
@@ -950,9 +1424,9 @@ mod tests {
         assert_ne!(migrated[0].id(), migrated[1].id());
 
         // Saving writes the new store version, and the migrated ids stick.
-        let upgraded = encode(&migrated).unwrap();
+        let upgraded = encode_credentials(&migrated).unwrap();
         assert_eq!(upgraded[0], STORE_VERSION);
-        let reopened = decode(&upgraded).unwrap();
+        let reopened = decode_credentials(&upgraded).unwrap();
         assert_eq!(reopened[0].id(), migrated[0].id());
         assert_eq!(reopened[1].id(), migrated[1].id());
     }
@@ -996,13 +1470,20 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_entry_ids() {
-        let encoded = encode(&[credential("one", "u", "p")]).unwrap().to_vec();
-        // Repeat the single credential's body with the same id.
-        let mut duplicated = encoded.clone();
+        let encoded = encode_credentials(&[credential("one", "u", "p")])
+            .unwrap()
+            .to_vec();
+        // Repeat the single credential's body with the same id, before the
+        // trailing grant count.
+        let record_start = 1 + 4;
+        let record_end = encoded.len() - 4;
+        let mut duplicated = encoded[..record_start].to_vec();
         duplicated[1..5].copy_from_slice(&2u32.to_le_bytes());
-        duplicated.extend_from_slice(&encoded[5..]);
+        duplicated.extend_from_slice(&encoded[record_start..record_end]);
+        duplicated.extend_from_slice(&encoded[record_start..record_end]);
+        duplicated.extend_from_slice(&0u32.to_le_bytes());
         assert!(matches!(
-            decode(&duplicated).unwrap_err(),
+            decode_credentials(&duplicated).unwrap_err(),
             Error::MalformedVault(message) if message.contains("duplicate entry id")
         ));
     }
@@ -1023,10 +1504,10 @@ mod tests {
 
     #[test]
     fn rejects_truncated_data() {
-        let encoded = encode(&[credential("service", "user", "password")]).unwrap();
+        let encoded = encode_credentials(&[credential("service", "user", "password")]).unwrap();
         for len in 0..encoded.len() {
             assert!(
-                decode(&encoded[..len]).is_err(),
+                decode_credentials(&encoded[..len]).is_err(),
                 "length {len} was accepted"
             );
         }
@@ -1034,10 +1515,10 @@ mod tests {
 
     #[test]
     fn rejects_trailing_bytes() {
-        let mut encoded = encode(&[]).unwrap().to_vec();
+        let mut encoded = encode_credentials(&[]).unwrap().to_vec();
         encoded.push(0);
         assert!(matches!(
-            decode(&encoded).unwrap_err(),
+            decode_credentials(&encoded).unwrap_err(),
             Error::MalformedVault(_)
         ));
     }
@@ -1095,14 +1576,14 @@ mod tests {
         );
         assert_eq!(credential.last_rotated_unix(), before);
 
-        let decoded = decode(&encode(&[credential]).unwrap()).unwrap();
+        let decoded = decode_credentials(&encode_credentials(&[credential]).unwrap()).unwrap();
         assert_eq!(decoded[0].created_unix(), created);
         assert!(decoded[0].last_rotated_unix() >= before);
     }
 
     #[test]
     fn rejects_out_of_range_timestamps_in_payload() {
-        let encoded = encode(&[credential("timed.example", "u", "p")])
+        let encoded = encode_credentials(&[credential("timed.example", "u", "p")])
             .unwrap()
             .to_vec();
         // Layout: version(1) + count(4) + id(16) + created(8).
@@ -1111,7 +1592,7 @@ mod tests {
         payload[created_offset..created_offset + 8]
             .copy_from_slice(&(MAX_TIMESTAMP_UNIX + 1).to_le_bytes());
         assert!(matches!(
-            decode(&payload).unwrap_err(),
+            decode_credentials(&payload).unwrap_err(),
             Error::MalformedVault(message) if message.contains("created timestamp")
         ));
 
@@ -1120,15 +1601,215 @@ mod tests {
         let mut credential = credential("timed.example", "u", "p");
         credential.timestamps.created = MAX_TIMESTAMP_UNIX + 1;
         assert!(matches!(
-            encode(&[credential]).unwrap_err(),
+            encode_credentials(&[credential]).unwrap_err(),
             Error::InvalidInput(message) if message.contains("created timestamp")
         ));
     }
 
     #[test]
+    fn version_4_payload_is_migrated_with_no_grants() {
+        let payload = encode_v4(
+            &[("v4.example", "alice", "secret", &["prod"])],
+            1_700_000_000,
+            1_700_000_000,
+        );
+        let decoded = decode(&payload).unwrap();
+        assert!(decoded.grants.is_empty());
+        assert_eq!(decoded.credentials.len(), 1);
+        assert_eq!(decoded.credentials[0].service(), "v4.example");
+        assert_eq!(decoded.credentials[0].created_unix(), 1_700_000_000);
+        assert_eq!(decoded.credentials[0].tags(), ["prod"]);
+
+        // Saving upgrades to store version 5 and keeps the credentials and
+        // the (still empty) grant list intact.
+        let upgraded = encode(&decoded.credentials, &decoded.grants).unwrap();
+        assert_eq!(upgraded[0], STORE_VERSION);
+        let reopened = decode(&upgraded).unwrap();
+        assert!(reopened.grants.is_empty());
+        assert_eq!(reopened.credentials[0].id(), decoded.credentials[0].id());
+        assert_eq!(reopened.credentials[0].tags(), ["prod"]);
+    }
+
+    #[test]
+    fn every_older_version_decodes_with_no_grants() {
+        for payload in [
+            encode_v1(&[("v1.example", "u", "p")]),
+            encode_v2(&[("v2.example", "u", "p")]),
+            encode_v3(&[("v3.example", "u", "p", &["prod"])]),
+            encode_v4(&[("v4.example", "u", "p", &["prod"])], 1, 1),
+        ] {
+            let decoded = decode(&payload).unwrap();
+            assert!(decoded.grants.is_empty(), "an old payload grew a grant");
+            assert_eq!(decoded.credentials.len(), 1);
+            assert_eq!(decoded.credentials[0].username(), "u");
+        }
+    }
+
+    #[test]
+    fn grants_roundtrip_with_every_optional_field() {
+        let mut run = Grant::create(
+            GrantSpec {
+                label: "deploy prod".to_owned(),
+                scope: Scope::new(
+                    vec![EntryId::generate().unwrap()],
+                    vec!["prod".to_owned()],
+                    Some(vec!["password".to_owned()]),
+                )
+                .unwrap(),
+                commands: vec![
+                    std::path::PathBuf::from("/usr/bin/gh"),
+                    std::path::PathBuf::from("/usr/bin/env"),
+                ],
+                capabilities: Capabilities::LIST.union(Capabilities::RUN),
+                expires_at: 1_700_003_600,
+                max_uses: Some(3),
+            },
+            TokenHash::of(b"canary-run-token"),
+            1_700_000_000,
+        )
+        .unwrap();
+        run.mark_used(1_700_000_100).unwrap();
+        run.revoke(1_700_000_200);
+        let list = test_grant("read only", Capabilities::LIST);
+
+        let encoded = encode(&[credential("svc", "u", "p")], &[run.clone(), list.clone()]).unwrap();
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded.credentials[0].password(), "p");
+        assert_eq!(decoded.grants.len(), 2);
+        assert_grants_equal(&decoded.grants[0], &run);
+        assert_grants_equal(&decoded.grants[1], &list);
+    }
+
+    #[test]
+    fn encode_refuses_duplicate_and_excessive_grants() {
+        let grant = test_grant("dup", Capabilities::LIST);
+        assert!(matches!(
+            encode(&[], &[grant.clone(), grant]).unwrap_err(),
+            Error::InvalidInput(message) if message.contains("duplicate grant id")
+        ));
+
+        let grants: Vec<Grant> = (0..=MAX_GRANTS)
+            .map(|index| test_grant(&format!("g{index}"), Capabilities::LIST))
+            .collect();
+        assert!(matches!(
+            encode(&[], &grants).unwrap_err(),
+            Error::InvalidInput(message) if message.contains("too many grants")
+        ));
+    }
+
+    #[test]
+    fn rejects_duplicate_grant_ids_in_payload() {
+        let encoded = encode(&[], &[test_grant("dup", Capabilities::LIST)])
+            .unwrap()
+            .to_vec();
+        // version(1) + credential count(4) + grant count(4)
+        let record_start = 9;
+        let mut duplicated = encoded[..record_start].to_vec();
+        duplicated[5..9].copy_from_slice(&2u32.to_le_bytes());
+        duplicated.extend_from_slice(&encoded[record_start..]);
+        duplicated.extend_from_slice(&encoded[record_start..]);
+        assert!(matches!(
+            decode(&duplicated).unwrap_err(),
+            Error::MalformedVault(message) if message.contains("duplicate grant id")
+        ));
+    }
+
+    #[test]
+    fn rejects_truncated_grant_records() {
+        let encoded = encode(&[], &[test_grant("truncated", Capabilities::LIST)]).unwrap();
+        let record_start = 9;
+        assert!(encoded.len() > record_start);
+        for len in record_start..encoded.len() {
+            assert!(
+                decode(&encoded[..len]).is_err(),
+                "truncated grant length {len} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_grant_bits_and_field_modes() {
+        let encoded = encode(&[], &[test_grant("bits", Capabilities::LIST)])
+            .unwrap()
+            .to_vec();
+        // version(1) + credential count(4) + grant count(4) + id(16) + hash(32)
+        let capabilities_offset = 9 + GRANT_ID_BYTES + TOKEN_HASH_BYTES;
+
+        let mut unknown_capability = encoded.clone();
+        unknown_capability[capabilities_offset] = 0b1000_0000;
+        assert!(matches!(
+            decode(&unknown_capability).unwrap_err(),
+            Error::MalformedVault(message) if message.contains("capability bits")
+        ));
+
+        let mut zero_capability = encoded.clone();
+        zero_capability[capabilities_offset] = 0;
+        assert!(matches!(
+            decode(&zero_capability).unwrap_err(),
+            Error::MalformedVault(message) if message.contains("capability")
+        ));
+
+        let mut unknown_flag = encoded.clone();
+        unknown_flag[capabilities_offset + 1] = 0b1000_0000;
+        assert!(matches!(
+            decode(&unknown_flag).unwrap_err(),
+            Error::MalformedVault(message) if message.contains("grant flag bits")
+        ));
+
+        // The field-scope mode byte sits after the label, refs and tags, and
+        // before the command list: 4-byte count + 4-byte length + path.
+        let mut unknown_field_mode = encoded.clone();
+        let mode_offset = unknown_field_mode.len() - (4 + 4 + "/usr/bin/env".len() + 1);
+        unknown_field_mode[mode_offset] = 7;
+        assert!(matches!(
+            decode(&unknown_field_mode).unwrap_err(),
+            Error::MalformedVault(message) if message.contains("field scope mode")
+        ));
+    }
+
+    #[test]
+    fn rejects_oversized_grant_label() {
+        let encoded = encode(&[], &[test_grant("label", Capabilities::LIST)])
+            .unwrap()
+            .to_vec();
+        // version(1) + credential count(4) + grant count(4) + id(16) +
+        // hash(32) + capabilities(1) + flags(1) + created(8) + expires(8) +
+        // uses(4)
+        let label_len_offset = 9 + 16 + 32 + 1 + 1 + 8 + 8 + 4;
+        let mut oversized = encoded;
+        oversized[label_len_offset..label_len_offset + 4]
+            .copy_from_slice(&((MAX_LABEL_BYTES + 1) as u32).to_le_bytes());
+        assert!(matches!(
+            decode(&oversized).unwrap_err(),
+            Error::MalformedVault(message) if message.contains("grant label length")
+        ));
+    }
+
+    #[test]
+    fn payload_debug_redacts_passwords_and_token_hashes() {
+        let encoded = encode(
+            &[credential("svc", "u", "canary-payload-password")],
+            &[test_grant("debug", Capabilities::LIST)],
+        )
+        .unwrap();
+        let payload = decode(&encoded).unwrap();
+        let debug = format!("{payload:?}");
+        assert!(!debug.contains("canary-payload-password"), "{debug}");
+        let hash = payload.grants[0].token_hash();
+        let hex: String = hash
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert!(!debug.contains(&hex), "token hash reached Debug: {debug}");
+        assert!(debug.contains("svc"), "{debug}");
+        assert!(debug.contains("debug"), "{debug}");
+    }
+
+    #[test]
     fn rejects_bad_store_version() {
         assert!(matches!(
-            decode(&[5, 0, 0, 0, 0]).unwrap_err(),
+            decode_credentials(&[6, 0, 0, 0, 0]).unwrap_err(),
             Error::MalformedVault(_)
         ));
     }
@@ -1139,7 +1820,7 @@ mod tests {
         encoded.extend_from_slice(&[0u8; ENTRY_ID_BYTES]);
         encoded.extend_from_slice(&((MAX_FIELD_BYTES + 1) as u32).to_le_bytes());
         assert!(matches!(
-            decode(&encoded).unwrap_err(),
+            decode_credentials(&encoded).unwrap_err(),
             Error::MalformedVault(_)
         ));
     }

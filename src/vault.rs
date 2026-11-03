@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::crypto::{self, KdfParams};
 use crate::error::{Error, Result};
+use crate::grant::{Grant, GrantId};
 use crate::store::{self, Credential, EntryId};
 
 /// Suffix of the sidecar file whose `flock` serializes vault writers.
@@ -36,6 +37,9 @@ const WRITE_LOCK_RETRY: Duration = Duration::from_millis(10);
 pub struct Vault {
     path: PathBuf,
     credentials: Vec<Credential>,
+    /// Grants live inside the encrypted payload, next to the credentials, so
+    /// they are covered by the same encryption, lock and atomic write.
+    grants: Vec<Grant>,
     /// `Some` when the vault may be saved. Held for the vault's lifetime.
     write_lock: Option<File>,
     /// The exact container bytes this state was decrypted from, or `None` when
@@ -61,10 +65,11 @@ impl Vault {
         let path = path.as_ref().to_path_buf();
         let container = read_container(&path)?;
         let plaintext = crypto::decrypt(&container, master_password)?;
-        let credentials = store::decode(&plaintext)?;
+        let payload = store::decode(&plaintext)?;
         Ok(Self {
             path,
-            credentials,
+            credentials: payload.credentials,
+            grants: payload.grants,
             write_lock: None,
             source: Some(container),
         })
@@ -93,10 +98,11 @@ impl Vault {
         let path = path.as_ref().to_path_buf();
         let container = read_container(&path)?;
         let plaintext = crypto::decrypt_with_key(&container, key)?;
-        let credentials = store::decode(&plaintext)?;
+        let payload = store::decode(&plaintext)?;
         Ok(Self {
             path,
-            credentials,
+            credentials: payload.credentials,
+            grants: payload.grants,
             write_lock: None,
             source: Some(container),
         })
@@ -116,6 +122,7 @@ impl Vault {
             Err(Error::VaultNotFound(_)) => Self {
                 path,
                 credentials: Vec::new(),
+                grants: Vec::new(),
                 write_lock: None,
                 source: None,
             },
@@ -136,6 +143,7 @@ impl Vault {
         Self {
             path: path.as_ref().to_path_buf(),
             credentials: Vec::new(),
+            grants: Vec::new(),
             write_lock: None,
             source: None,
         }
@@ -181,7 +189,7 @@ impl Vault {
         if self.write_lock.is_none() {
             return Err(Error::ReadOnlyVault(self.path.clone()));
         }
-        let plaintext = store::encode(&self.credentials)?;
+        let plaintext = store::encode(&self.credentials, &self.grants)?;
         let container = crypto::encrypt(&plaintext, master_password, KdfParams::default())?;
         write_container(&self.path, &container)
     }
@@ -251,6 +259,33 @@ impl Vault {
         self.credentials
             .iter()
             .filter(move |credential| credential.has_all_tags(tags))
+    }
+
+    /// Every grant in the vault, in vault order.
+    pub fn grants(&self) -> &[Grant] {
+        &self.grants
+    }
+
+    pub fn grant(&self, id: GrantId) -> Option<&Grant> {
+        self.grants.iter().find(|grant| grant.id() == id)
+    }
+
+    pub fn grant_mut(&mut self, id: GrantId) -> Option<&mut Grant> {
+        self.grants.iter_mut().find(|grant| grant.id() == id)
+    }
+
+    /// Store a new grant. Grant ids are the agent-facing identity, so a
+    /// duplicate would make revocation ambiguous and is refused, just like a
+    /// duplicate service name.
+    pub fn add_grant(&mut self, grant: Grant) -> Result<()> {
+        if self.grant(grant.id()).is_some() {
+            return Err(Error::InvalidInput(format!(
+                "duplicate grant id {}",
+                grant.id()
+            )));
+        }
+        self.grants.push(grant);
+        Ok(())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -420,6 +455,8 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use zeroize::Zeroizing;
+
+    use crate::grant::{Capabilities, Grant, GrantSpec, Scope, TokenHash};
 
     fn credential(service: &str, username: &str, password: &str) -> Credential {
         Credential::new(
@@ -1034,5 +1071,75 @@ mod tests {
         assert_eq!(insecure_permissions(&path), Some(0o644));
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(insecure_permissions(&path), None);
+    }
+
+    fn test_grant(entry: EntryId, label: &str, now: u64) -> Grant {
+        Grant::create(
+            GrantSpec {
+                label: label.to_owned(),
+                scope: Scope::new(vec![entry], Vec::new(), None).unwrap(),
+                commands: vec![PathBuf::from("/usr/bin/env")],
+                capabilities: Capabilities::LIST.union(Capabilities::RUN),
+                expires_at: now + 3_600,
+                max_uses: Some(2),
+            },
+            TokenHash::of(b"canary-vault-grant-token"),
+            now,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn refuses_a_duplicate_grant_id() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut vault = Vault::empty(directory.path().join("vault.dat"));
+        assert!(vault.grants().is_empty());
+
+        let grant = test_grant(EntryId::generate().unwrap(), "duplicate", 1_700_000_000);
+        let copy = grant.clone();
+        vault.add_grant(grant).unwrap();
+        assert!(matches!(
+            vault.add_grant(copy),
+            Err(Error::InvalidInput(message)) if message.contains("duplicate grant id")
+        ));
+        assert_eq!(vault.grants().len(), 1);
+    }
+
+    #[test]
+    fn grants_are_saved_and_reloaded() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vault.dat");
+        let master = "test master password";
+
+        let mut vault = Vault::open_for_add(&path, master).unwrap();
+        let credential = credential("example.com", "user", "secret");
+        let entry = credential.id();
+        vault.add(credential).unwrap();
+        let mut grant = test_grant(entry, "deploy", 1_700_000_000);
+        grant.mark_used(1_700_000_100).unwrap();
+        let id = grant.id();
+        let copy = grant.clone();
+        vault.add_grant(grant).unwrap();
+        assert!(vault.add_grant(copy).is_err());
+        vault.save(master).unwrap();
+        drop(vault);
+
+        let mut vault = Vault::open_for_update(&path, master).unwrap();
+        let loaded = vault.grant(id).expect("saved grant");
+        assert_eq!(loaded.label(), "deploy");
+        assert_eq!(loaded.uses(), 1);
+        assert_eq!(loaded.last_used_unix(), Some(1_700_000_100));
+        assert_eq!(loaded.max_uses(), Some(2));
+        assert_eq!(loaded.scope().refs(), [entry]);
+        assert!(loaded.matches_token(&TokenHash::of(b"canary-vault-grant-token")));
+        vault.grant_mut(id).unwrap().revoke(1_700_000_200);
+        vault.save(master).unwrap();
+        drop(vault);
+
+        let vault = Vault::open(&path, master).unwrap();
+        assert_eq!(vault.grants().len(), 1);
+        assert!(vault.grant(id).unwrap().is_revoked());
+        assert_eq!(vault.len(), 1);
+        assert_eq!(vault.get("example.com").unwrap().password(), "secret");
     }
 }

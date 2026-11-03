@@ -50,7 +50,7 @@ impl Fixture {
         )
         .expect("credential");
         let reference = credential.reference();
-        let plaintext = store::encode(&[credential]).expect("encode store");
+        let plaintext = store::encode(&[credential], &[]).expect("encode store");
         let container = crypto::encrypt(&plaintext, MASTER, KdfParams::new(8 * 1024, 1, 1))
             .expect("encrypt vault");
         fs::write(&vault, &container).expect("write vault");

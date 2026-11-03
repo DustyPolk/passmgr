@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 use passmgr::grant::{
     AccessRequest, Capabilities, Capability, Denied, Grant, GrantId, GrantSpec,
-    MAX_GRANT_LIFETIME_SECS, Scope, Target, TokenHash, validate_field_name,
+    MAX_GRANT_LIFETIME_SECS, MAX_LABEL_BYTES, Scope, StoredGrant, Target, TokenHash,
+    validate_field_name,
 };
-use passmgr::store::EntryId;
+use passmgr::store::{EntryId, MAX_TIMESTAMP_UNIX};
 
 const NOW: u64 = 1_700_000_000;
 const TOKEN: &[u8] = b"0123456789abcdef0123456789abcdef";
@@ -626,4 +627,90 @@ fn target_is_built_from_a_credential_without_its_secret() {
     let target = Target::from(&credential);
     assert_eq!(target.entry, credential.id());
     assert_eq!(target.tags, ["prod"]);
+}
+
+/// A stored record that satisfies every invariant, for mutation in the tests
+/// below.
+fn stored_grant() -> StoredGrant {
+    StoredGrant {
+        id: GrantId::from_hex("000102030405060708090a0b0c0d0e0f").expect("id"),
+        token_hash: TokenHash::of(TOKEN),
+        label: "test grant".into(),
+        scope: Scope::new(vec![ref_id(1)], Vec::new(), None).expect("scope"),
+        commands: vec![PathBuf::from("/usr/bin/gh")],
+        capabilities: Capabilities::RUN,
+        created: NOW,
+        expires_at: NOW + 3600,
+        max_uses: Some(2),
+        uses: 1,
+        revoked_at: None,
+        last_used: Some(NOW + 60),
+    }
+}
+
+#[test]
+fn stored_grants_are_rebuilt_with_their_metadata() {
+    let stored = stored_grant();
+    let grant = Grant::from_stored(stored).expect("stored grant");
+    assert_eq!(grant.label(), "test grant");
+    assert_eq!(grant.created_unix(), NOW);
+    assert_eq!(grant.expires_at_unix(), NOW + 3600);
+    assert_eq!(grant.max_uses(), Some(2));
+    assert_eq!(grant.uses(), 1);
+    assert_eq!(grant.last_used_unix(), Some(NOW + 60));
+    assert!(grant.matches_token(&TokenHash::of(TOKEN)));
+}
+
+#[test]
+fn stored_grants_are_revalidated() {
+    assert!(Grant::from_stored(stored_grant()).is_ok());
+
+    let mut expiry_before_creation = stored_grant();
+    expiry_before_creation.expires_at = NOW;
+    assert!(Grant::from_stored(expiry_before_creation).is_err());
+
+    let mut too_long = stored_grant();
+    too_long.expires_at = NOW + MAX_GRANT_LIFETIME_SECS + 1;
+    assert!(Grant::from_stored(too_long).is_err());
+
+    let mut hidden_label = stored_grant();
+    hidden_label.label = "deploy\u{202e}prod".into();
+    assert!(Grant::from_stored(hidden_label).is_err());
+
+    let mut oversized_label = stored_grant();
+    oversized_label.label = "x".repeat(MAX_LABEL_BYTES + 1);
+    assert!(Grant::from_stored(oversized_label).is_err());
+
+    let mut no_capabilities = stored_grant();
+    no_capabilities.capabilities = Capabilities::NONE;
+    assert!(Grant::from_stored(no_capabilities).is_err());
+
+    let mut run_without_command = stored_grant();
+    run_without_command.commands.clear();
+    assert!(Grant::from_stored(run_without_command).is_err());
+
+    let mut zero_max_uses = stored_grant();
+    zero_max_uses.max_uses = Some(0);
+    assert!(Grant::from_stored(zero_max_uses).is_err());
+
+    let mut over_used = stored_grant();
+    over_used.uses = 3;
+    assert!(Grant::from_stored(over_used).is_err());
+
+    let mut duplicate_command = stored_grant();
+    duplicate_command.commands = vec![PathBuf::from("/usr/bin/gh"), PathBuf::from("/usr/bin/gh")];
+    assert!(Grant::from_stored(duplicate_command).is_err());
+
+    let mut created_in_the_future = stored_grant();
+    created_in_the_future.created = MAX_TIMESTAMP_UNIX + 1;
+    created_in_the_future.expires_at = MAX_TIMESTAMP_UNIX;
+    assert!(Grant::from_stored(created_in_the_future).is_err());
+
+    let mut absurd_last_used = stored_grant();
+    absurd_last_used.last_used = Some(MAX_TIMESTAMP_UNIX + 1);
+    assert!(Grant::from_stored(absurd_last_used).is_err());
+
+    let mut absurd_revoked = stored_grant();
+    absurd_revoked.revoked_at = Some(MAX_TIMESTAMP_UNIX + 1);
+    assert!(Grant::from_stored(absurd_revoked).is_err());
 }

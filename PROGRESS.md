@@ -1,3 +1,43 @@
+## 2026-11-03 — Persist grants in store version 5 (TODO 3.2b)
+
+- `src/store.rs`: store version 5 = the v4 credential records, byte for byte,
+  followed by `u32 grant count` and one record per grant (id, token SHA-256,
+  capability bits, flags, timestamps, uses, label, refs, tags, field scope,
+  commands). `encode(credentials, grants)` / `decode -> Payload` now carry
+  both lists; `decode` keeps versions 1-4 readable and gives them no grants.
+- `src/grant.rs`: `StoredGrant` (public fields, payload-decoder only) and
+  `Grant::from_stored`, which re-checks every `create` invariant plus
+  `uses <= max_uses` and absurd timestamps. The vault reader therefore cannot
+  accept a grant that `pm grant create` would refuse.
+- `src/vault.rs`: `grants` field loaded/saved with the credentials;
+  `grants()`, `grant()`, `grant_mut()`, `add_grant()` (duplicate id refused).
+- Decisions: optional grant fields use a flags byte, because a magic `0`
+  timestamp would make `None` and 1970 indistinguishable; unknown capability
+  or flag bits are malformed, not ignored. The codec stays in `store.rs`
+  (sole owner of the format) and `grant.rs` stays a pure model, joined by
+  `StoredGrant`. A duplicate grant id on `add_grant` is `InvalidInput`, not a
+  new variant: nothing yet needs to distinguish it, and the error text names
+  the id (never the token).
+- Tests: store round trip with every optional field (used, revoked,
+  max_uses, field scope, tag scope); v4 -> v5 migration keeps ids/tags and
+  adds no grants; v1-v4 all decode grantless; empty vault is
+  `05 00 …` while `04 00 00 00 00` still opens; duplicate grant ids,
+  truncated grant records, unknown capability/flag bits, unknown field mode,
+  oversize label, and encode refusing a duplicate or >1024 grants are all
+  refused as `MalformedVault`/`InvalidInput`; `Payload`'s derived `Debug`
+  keeps the password and the token hash out of the output. Vault: grants
+  survive
+  save/reopen/revoke; duplicate id refused. `tests/grant.rs`:
+  `from_stored` rebuilds metadata and rejects each tampered field.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` green (189 lib tests).
+  `cargo audit` not installed; skipped.
+- **Next iteration must know:** nothing can create a grant yet; 3.3 (human
+  presence proof) is the next item. `src/store.rs` is now 1,806 lines (roughly
+  half tests) and `src/vault.rs` 1,145: splitting the codec out of the tests
+  is worthwhile but was out of scope here. `Scope::new` sorts/dedups, so the
+  decoder rejects duplicate refs/tags/fields/commands *before* calling it;
+  keep that order if you refactor.
+
 ## 2026-11-03 — Reject bidi and zero-width characters in grant labels (TODO R.14)
 
 - `src/grant.rs`: `validate_label` now rejects Cc controls plus the Unicode

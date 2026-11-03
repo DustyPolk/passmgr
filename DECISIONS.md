@@ -64,15 +64,25 @@ code does not implement yet.
 ## Vault format and versions
 
 - Container version (header offset 4) and store version (first payload byte)
-  are independent counters; today they are 2 and 4.
+  are independent counters; today they are 2 and 5.
 - Container version 1 is the legacy C format (PBKDF2, line-oriented). It is
   detected and rejected as `LegacyVault` (exit 6), never read or written.
 - Every format change needs a reader for **every** older store version, a
   `FORMAT.md` update, and a migration test.
 - Store history: v1 (no ids) -> v2 (ids) -> v3 (tags) -> v4
-  (`created`/`last_rotated`). Migration generates ids in memory, decodes
-  missing tags as empty and missing timestamps as `0`; the next save writes
-  v4.
+  (`created`/`last_rotated`) -> v5 (grant list). Migration generates ids in
+  memory, decodes missing tags as empty, missing timestamps as `0` and a
+  missing grant list as empty; the next save writes v5.
+- A v5 payload keeps the credential records byte-identical to v4 and appends
+  `u32 grant count` plus one record per grant after them, so the credential
+  codec did not change for the grant work. Optional grant fields are encoded
+  behind a flags byte instead of a magic timestamp, because `None` and a real
+  timestamp must stay distinguishable; unknown capability or flag bits are
+  malformed rather than ignored.
+- The grant codec lives in `src/store.rs` (the single owner of the payload
+  format); `src/grant.rs` stays a pure model. Decoding builds `StoredGrant`
+  and re-enters `Grant::from_stored`, which re-checks every `Grant::create`
+  invariant, so the vault reader and the grant creator cannot drift apart.
 - Entry id: 16 random bytes, rendered `pm://<32 lowercase hex>`. Full ids
   only: no prefixes, no service-based refs. Upper-case input is accepted and
   lower-cased; anything else is `InvalidInput` (exit 2).
@@ -360,8 +370,9 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - `sha2` (RustCrypto, `0.10`, sharing `digest` 0.10 with the existing
   `blake2`/Argon2 tree) is the only dependency added by 3.2a. `hmac` moves to
   TODO 3.3, its first use; adding an unused crate now would hide that.
-- Grant persistence (grant list in the store payload, next store version) is
-  TODO 3.2b; until then nothing in the vault or CLI can create a grant.
+- Grant persistence is done (TODO 3.2b): grants are stored in the v5 payload
+  and reachable through `Vault::grants`/`grant`/`grant_mut`/`add_grant`. The
+  CLI still cannot create a grant; that is the approval flow (TODO 3.3+).
 - Agents get access only through grants stored in the encrypted vault: scope
   (refs, tags, optional field names), a command allowlist of canonical
   absolute paths, capabilities, `expires_at` (max 30 days), optional

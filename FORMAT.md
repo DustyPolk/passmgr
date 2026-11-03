@@ -1,7 +1,7 @@
 # passmgr vault format
 
 This document specifies on-disk vault format version 2 (container) with
-credential store version 4. All multi-byte integers
+credential store version 5. All multi-byte integers
 are **little-endian**. A vault is a single file containing a header, a
 ciphertext, and a 16-byte GCM authentication tag.
 
@@ -71,7 +71,7 @@ ignored.
 After successful decryption, the plaintext is versioned binary data:
 
 ```text
-u8          store version = 4
+u8          store version = 5
 u32         credential count
 repeat count times:
     byte[16]    entry id (random, stable per credential)
@@ -87,6 +87,30 @@ repeat count times:
     repeat tag count times:
         u32     tag length in bytes
         byte[]  tag, UTF-8
+u32         grant count
+repeat grant count times:
+    byte[16]    grant id (random, stable per grant)
+    byte[32]    SHA-256 of the grant token
+    u8          capability bits: 1 = list, 2 = run
+    u8          flags: bit 0 revoked_at present, bit 1 last_used present,
+                bit 2 max_uses present; any other bit is malformed
+    u64         created, Unix seconds UTC
+    u64         expires_at, Unix seconds UTC
+    u64         revoked_at (present only with flag bit 0)
+    u64         last_used (present only with flag bit 1)
+    u32         max_uses (present only with flag bit 2)
+    u32         uses
+    u32         label length in bytes
+    byte[]      label, UTF-8
+    u32         ref count
+    repeat:     byte[16] entry id
+    u32         tag count
+    repeat:     u32 tag length in bytes, byte[] tag, UTF-8
+    u8          field scope mode: 0 = every field, 1 = listed fields
+    if mode 1:  u32 field count
+                repeat: u32 name length in bytes, byte[] field name, UTF-8
+    u32         command count
+    repeat:     u32 path length in bytes, byte[] absolute path, UTF-8
 ```
 
 The entry id is 16 random bytes from the operating system RNG. It is rendered
@@ -96,12 +120,14 @@ within a payload; a duplicate is rejected as malformed. Ids are metadata, not
 secrets, but they live inside the encrypted payload so the vault file does not
 leak how many entries exist.
 
-Store version 2 has the same layout without the tag fields. Store version 1
-has no ids and no tags. Store version 3 has ids and tags but no timestamps.
-Versions 1-3 are read for migration: missing ids are generated in memory,
-missing tags decode as an empty list, missing timestamps decode as `0`, and
-the next save writes store version 4. Credential fields are preserved
-unchanged.
+Store version 4 has the same layout up to the end of the credential list and
+no grant list. Store version 2 has the same credential layout without the tag
+fields. Store version 1 has no ids and no tags. Store version 3 has ids and
+tags but no timestamps. Versions 1-4 are read for migration: missing ids are
+generated in memory, missing tags decode as an empty list, missing timestamps
+decode as `0`, a missing grant list decodes as empty, and the next save writes
+store version 5. Credential fields are preserved unchanged, and the encoded
+credential records of a v5 payload are byte-identical to v4.
 
 Timestamps are unsigned 64-bit Unix seconds (UTC) and are metadata, not
 secrets. `created` is set when the credential is added and never changes.
@@ -112,6 +138,21 @@ value of `0` means "unknown": it is what payloads migrated from store version
 invalid on write, so date rendering cannot overflow. Second precision means a
 rotation within the same second as the previous one leaves `last_rotated`
 unchanged; it never moves backwards under a normal clock.
+
+Grants carry only the SHA-256 of the grant token, never the token itself, so a
+stolen vault cannot be replayed against the daemon. Grant ids must be unique
+within a payload and duplicates are rejected as malformed. Optional fields use
+flags rather than a magic `0` timestamp, so "no last use" stays distinct from
+a real timestamp. Every rule `Grant::create` enforces is checked again on
+read, so a hand-edited payload cannot produce a grant this build would never
+have created: at most 1,024 grants; label 1-64 bytes without control, bidi or
+zero-width characters; capability bits and flag bits limited to the known
+set; `created` and `expires_at` at most 253402300799 and at most 30 days
+apart; at most 256 refs, 32 tags, 32 field names (each 1-32 bytes matching
+`[a-z0-9_-]+`) and 32 commands (absolute UTF-8 paths of at most 4096 bytes);
+no duplicate refs, tags, field names or commands inside one grant; a `run`
+grant needs at least one command; `max_uses`, when present, is at least 1 and
+not below `uses`.
 
 Tags are lowercase metadata labels used for scoped agent access. On disk each
 credential stores a sorted, duplicate-free list: each tag must be 1-32 bytes,
@@ -130,12 +171,14 @@ implementation applies additional validation when reading and writing:
   newlines and NUL are allowed in passwords, but not in service names or
   usernames);
 - each service/username/password field is at most 4096 bytes;
-- at most 10,000 credentials;
-- the decoded payload is at most 10 MiB.
+- at most 10,000 credentials and at most 1,024 grants;
+- the decoded payload is at most 10 MiB, credentials and grants together.
 
-An empty vault encodes as `04 00 00 00 00`: store version 4 and a count of zero.
-Version 3 (`03 00 00 00 00`), version 2 (`02 00 00 00 00`) and version 1
-(`01 00 00 00 00`) empty payloads are also accepted and upgraded on save.
+An empty vault encodes as `05 00 00 00 00 00 00 00 00`: store version 5, a
+credential count of zero and a grant count of zero. Version 4
+(`04 00 00 00 00`), version 3 (`03 00 00 00 00`), version 2 (`02 00 00 00 00`)
+and version 1 (`01 00 00 00 00`) empty payloads are also accepted and upgraded
+on save.
 
 ## Versioning
 
@@ -143,9 +186,9 @@ Version 3 (`03 00 00 00 00`), version 2 (`02 00 00 00 00`) and version 1
   algorithms.
 - The KDF and AEAD ids provide algorithm agility inside a container version.
 - The plaintext store version at the start of the decrypted payload controls
-  the credential encoding. Versions 1 (no entry ids), 2 (no tags) and 3 (no
-  timestamps) are accepted for migration and rewritten as version 4 on save;
-  unknown versions are rejected.
+  the credential and grant encoding. Versions 1 (no entry ids), 2 (no tags),
+  3 (no timestamps) and 4 (no grants) are accepted for migration and rewritten
+  as version 5 on save; unknown versions are rejected.
 
 A reader must reject unknown versions rather than guessing. Version 1 is
 reserved for the legacy C vault:
