@@ -1,3 +1,33 @@
+## 2026-11-03 — Split the store codec and add a layout guard (TODO R.20a)
+
+- Split R.20 (four files over the ~1,000-line rule) into R.20a-R.20d, one file
+  per iteration, and did R.20a. `src/store.rs` 1,868 -> 461 lines (model,
+  validation, format constants only); the payload codec moved unchanged to
+  `src/store/payload.rs` (659) and the inline test module to
+  `src/store/tests.rs` (771), using the `src/grant.rs` + `src/grant/` layout
+  rather than converting to `mod.rs`. `store.rs` still declares
+  `encode`/`decode`/`Payload`, so no caller changed.
+- New `tests/layout.rs` walks every `src/**/*.rs` and `tests/**/*.rs` and fails
+  a file over 1,000 lines. `PENDING_SPLITS` names the three files R.20b-R.20d
+  still have to split; a second test fails if a listed file is no longer
+  oversized, so the list can only shrink. Verified the guard detects the three
+  remaining offenders by temporarily emptying the allowlist.
+- No behavior or format change; the split is mechanical. `store::tests` now
+  imports the `crate::grant` types it used to get through `store.rs`'s glob
+  (`Capabilities`, `Grant`, `GrantSpec`, `Scope`, `TokenHash`, and the
+  `MAX_*`/`TOKEN_HASH_BYTES` constants).
+- Tests: both `tests/layout.rs` tests (guarded by the temporary-allowlist
+  probe above), and the whole existing suite, green.
+- Gate: `fmt --check`, `clippy --all-targets -D warnings`, full `cargo test`
+  (lib 223, cli 30, daemon 20, docs 11, grant 23, layout 2, run 13, unlock 8,
+  main 34, concurrency/shutdown/other 1+6+1+1). `cargo audit` not installed;
+  skipped per instructions.
+- **Next iteration must know:** start R.20b (`src/vault.rs`, 1,271). Move the
+  lock/atomic-write helpers to `src/vault/lock.rs`, keep `lock_path` and
+  `lock_for_update`'s public path stable, and remove `src/vault.rs` from
+  `PENDING_SPLITS`. Do not raise `MAX_LINES` or add to the allowlist; if a file
+  grows past 1,000, split it in the same commit.
+
 ## 2026-11-03 — Keep the challenge pool in issue order (TODO R.19)
 
 - `src/presence.rs:348`: `Challenges::verify_and_consume` spent the nonce with

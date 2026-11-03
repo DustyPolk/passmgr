@@ -172,26 +172,47 @@ Rules that apply to every item:
       by running them against it). `MCP.md`, `DECISIONS.md` and the
       `MAX_PENDING_CHALLENGES` doc now say that spending keeps issue order.
 
-- [ ] **R.20 Four files are far over the ~1,000-line limit, and this range
-      grew two of them.**
-      `src/store.rs` is 1,868 lines, `src/vault.rs` 1,271,
-      `src/protocol/mod.rs` 1,317 and `tests/cli.rs` 1,463, against the
-      "keep files under ~1,000 lines" rule in `PROMPT.md`. R.14 split
-      `src/grant.rs` at 1,087 for exactly this reason, but the rule was not
-      applied again: this range added +83 lines to `src/store.rs` (grant
-      records in the codec and their tests) and +128 to `src/vault.rs`
-      (lock reuse, `save_with_key`).
-      Failure: the payload codec and the vault lifecycle -- the two places
-      where a future grant or key change is most security-relevant -- are
-      the hardest files to review, and their tests already live in a second
-      inline module.
-      Fix: split by concern, e.g. `src/store/payload.rs` (encode/decode and
-      the grant record codec) out of `store.rs`, and `src/vault/lock.rs`
-      (`lock_for_update`, `acquire_write_lock_with_timeout`,
-      `write_container`) out of `vault.rs`.
-      Test: a layout test that walks `src/**/*.rs` and `tests/*.rs` and
-      asserts each file stays under 1,000 lines, so the next growth is
-      caught in CI rather than by the next review.
+- [x] **R.20a Split `src/store.rs` and add the layout guard.**
+      Split from R.20 (four files are over the ~1,000-line rule; each file is
+      one iteration). `src/store.rs` (1,868 lines) now holds the credential
+      model and validation only (461 lines); the payload codec moved to
+      `src/store/payload.rs` (659) and its tests to `src/store/tests.rs` (771),
+      with `store.rs` re-exporting `encode`/`decode`/`Payload` so every caller
+      is unchanged. New `tests/layout.rs` walks `src/**/*.rs` and `tests/**/*.rs`
+      and fails any file over 1,000 lines; `PENDING_SPLITS` names the three
+      files the remaining sub-items still have to split, and a second test
+      fails if a listed file is no longer oversized (the list only shrinks).
+      Test: the layout guard fails (`src/vault.rs` 1,271, `src/protocol/mod.rs`
+      1,317, `tests/cli.rs` 1,463) when `PENDING_SPLITS` is emptied, passes
+      with the post-split tree, and the lib suite (223) is unchanged.
+- [ ] **R.20b Split `src/vault.rs` (1,271 lines) by concern.**
+      Move the write-lock and atomic-write machinery (`acquire_write_lock`,
+      `acquire_write_lock_with_timeout`, `write_container`, `with_path`) into
+      `src/vault/lock.rs` (or a similarly named module), leaving the vault
+      lifecycle in `src/vault.rs`. Keep the public items (`lock_for_update`,
+      `lock_path`, errors) where callers expect them. Remove `src/vault.rs`
+      from `PENDING_SPLITS` in `tests/layout.rs`.
+      Test: the layout guard passes without that entry and the existing lock /
+      atomic-write unit tests plus `tests/unlock.rs` still pass; the split is
+      behavior-preserving.
+- [ ] **R.20c Split `src/protocol/mod.rs` (1,317 lines).**
+      Move the frame and body codec (`encode`, `decode`, `FrameDecoder`,
+      `read_length`, `check_length`, `encode_body`, `decode_body`) into
+      `src/protocol/codec.rs`, keep the request types and validation in
+      `mod.rs`, and move the ~590-line test module to `src/protocol/tests.rs`
+      (as R.20a did for `store`). Remove `src/protocol/mod.rs` from
+      `PENDING_SPLITS`.
+      Test: the layout guard passes without that entry; the protocol unit
+      tests and `tests/daemon.rs` still pass unchanged.
+- [ ] **R.20d Split `tests/cli.rs` (1,463 lines).**
+      Move the PTY/reveal/agent-marker tests and their helpers (`run_on_pty`,
+      `read_pty`, the serial guard where needed) into a second test binary
+      (e.g. `tests/cli_reveal.rs`), keeping the shared helpers in one place
+      (e.g. `tests/cli_support/mod.rs`) so both binaries use the same vault
+      setup. Remove `tests/cli.rs` from `PENDING_SPLITS`.
+      Test: the layout guard passes without that entry and every moved test
+      keeps its behavior (same assertions, same canaries); total test count is
+      unchanged.
 
 ## Phase 3 — grants and audit log
 
