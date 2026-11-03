@@ -602,13 +602,24 @@ Rules that apply to every item:
       daemon refused the run", while `pm://C` (nonexistent) exits 3 with
       "no credential found for reference 'pm://C'". The agent learns that B
       exists even though the grant forbids using it.
-      Fix: answer `not_found` for a scope denial in `record_use` (keep
-      `denied` for a bad/expired/revoked/exhausted/capability-denied grant),
-      or change `DECISIONS.md` and the CLI mapping if the oracle is accepted;
-      keep one contract.
-      Test: extend `tests/daemon_run.rs` with a grant for ref A and runs for
-      an existing out-of-scope ref B and a nonexistent ref C; assert the same
-      `RunFrame::Error`/exit status. It must fail against the current order.
+      **Corrected by the 2026-11-03 human-requested review:** the fix
+      above is not enough. `record_use` finds the grant by token hash
+      whatever its status (`matches_token`, `src/grant.rs:830`), then looks
+      the credential up (`NotFound`), and only then calls `authorizes`
+      (`Denied`). So a revoked, expired or exhausted grant's token is also an
+      existence oracle, and for every ref in the vault (reproduced: revoked
+      grant, existing ref -> `Error(Denied)`, absent ref ->
+      `Error(NotFound)`). Answering `not_found` only for scope denials leaves
+      that open.
+      Fix: check the grant's state (active, not expired, uses left, RUN
+      capability, command allowed) before the credential lookup, and make an
+      out-of-scope ref answer exactly like a nonexistent one; or change
+      `DECISIONS.md` and the CLI mapping if the oracle is accepted. Keep one
+      contract.
+      Test: in `tests/daemon_run.rs`, for each denied grant state (revoked,
+      expired, exhausted, out of scope), an existing ref and a nonexistent
+      ref get the same `RunFrame::Error` and the same CLI exit status. It
+      must fail against the current order.
 
 - [ ] **R.32 Security and protocol docs still describe the pre-3.6 state.**
       `SECURITY.md:14-16` says grant authorization is "not implemented yet"
@@ -644,8 +655,10 @@ Rules that apply to every item:
       `approvals.take(&request.digest(), ...)`; `tests/grant_create.rs:27`
       proves the identical request is refused the second time and the vault
       is untouched; `src/presence.rs:767` proves a different digest does not
-      consume the approval. The only gap is that no e2e test submits digest B
-      to `grant_create` (the unit test covers `Approvals::take`).
+      consume the approval. An A-then-B `grant_create` test already exists
+      over a real socket pair through the daemon's connection handler
+      (`src/daemon/tests.rs:242`, via `exchange_frame`); only a CLI-level e2e
+      is missing.
       Failure: the next iteration sees an open blocked item, assumes the
       write path is still unprotected, and either reimplements it or treats
       the approval as replayable in a new caller.
@@ -653,6 +666,383 @@ Rules that apply to every item:
       A-then-B `grant_create` case to `tests/grant_create.rs`.
       Test: none beyond the existing tests; the checklist must stop saying
       blocked.
+
+- [ ] **R.34 `pmd` checks the canonical program path but execs the raw
+      request path, so a symlink swap runs an unlisted program with the
+      secret.**
+      `src/daemon/run.rs:81` canonicalizes `command[0]` and uses the result
+      only for the grant check (`record_use`, `:92`); `:114-115` then hands
+      the original `request.command` to `runner::execute`, and
+      `src/runner.rs:177` calls `Command::new(argv[0])` on the client's
+      path. The comment at `:79-80` and `MCP.md:151-158`/`DECISIONS.md:535-538`
+      say the canonical path is executed; it is not. `src/cli/run.rs:207-213`
+      deliberately keeps the symlinked path.
+      Failure (reproduced three ways): grant allows `/bin/true`; the agent
+      makes `dir/tool -> /bin/true`, holds `flock` on `<vault>.lock` (a
+      same-user file) so `record_use` waits after the check passed, repoints
+      `dir/tool` at a script that writes `$API_KEY` to a file, releases the
+      lock: `Exit(Code(0))` and the file holds the secret. A plain rename
+      loop wins the race on the first attempt too. Second effect without any
+      race: argv[0] is the agent's chosen name, so a multi-call binary
+      (busybox, rustup's `cargo`/`rustfmt` links) runs whichever applet the
+      link is named after while matching the same canonical allowlist entry.
+      Fix: execute exactly the canonical path that was authorized, and set
+      argv[0] to that canonical path (not the caller's name, which
+      re-opens the multi-call problem); record the choice in
+      `DECISIONS.md`. Consider opening the binary once and `fexecve`-ing the
+      checked fd so a swap of the target file itself is also closed.
+      Test: in `tests/daemon_run.rs`, (a) the lock-held swap above must leave
+      no loot file and answer `Denied` or run `/bin/true`; (b) a symlink to an
+      allowlisted `/bin/sh` run with `-c 'echo "$0"'` must print the
+      canonical path, not the link name.
+
+- [ ] **R.35 No test proves `pmd` enforces the grant's command allowlist,
+      scope or capability on `run`.**
+      Every daemon and CLI `run` test sends an allowlisted command
+      (`tests/support/mod.rs:96`, `tests/run.rs` `Daemon`), every fixture
+      vault holds exactly one in-scope credential, and no test sends a grant
+      without RUN, an expired grant, or concurrent runs against `max_uses`.
+      `tests/grant.rs` covers only the pure `Grant::authorizes`.
+      Failure (mutation-tested): changing `src/daemon/run.rs:165-171` to
+      authorize `grant.commands()[0]` instead of the requested program keeps
+      the whole suite green, so a refactor could let a grant for
+      `/usr/bin/printenv` run `/bin/sh` with the secret unnoticed. TODO 3.6's
+      done note and `DECISIONS.md:276-279` describe guarantees nothing guards.
+      Test: e2e cases in `tests/daemon_run.rs`, each of which must fail
+      against the mutation above: a non-allowlisted command (`/usr/bin/env`)
+      answers `Denied` and creates no marker file; a symlink to a
+      non-allowlisted program under an innocent name answers `Denied`; a
+      grant without RUN answers `Denied`; an expired grant answers `Denied`;
+      16 parallel runs on `max_uses=3` give exactly 3 exits; a second,
+      existing, out-of-scope credential gets the R.31 answer.
+
+- [ ] **R.36 Redaction holdback timing reveals the secret one byte at a
+      time.**
+      `src/redact.rs:111-114` holds output back only when the buffered tail
+      is a proper prefix of the secret; any other tail is emitted at once.
+      Whether output is delayed therefore depends on the secret.
+      Failure (reproduced e2e): an agent that controls bytes a granted
+      program relays (a FIFO, `tail -f`, a local server fetched by curl or a
+      cloud CLI with `--endpoint-url`) sends `known+c`, pauses, then more
+      output. Wrong guesses arrive in <100 ms; a correct prefix is held for
+      the whole pause. The scratch test recovered `s3cret` byte by byte. This
+      is a channel passmgr creates; `SECURITY.md` limit 3 does not cover it.
+      Fix: make the holdback independent of the secret, e.g. always hold the
+      last `secret_len - 1` bytes until more output or EOF (bounded latency),
+      or flush the held bytes on a fixed timer regardless of content. If a
+      residual channel remains, document it in `SECURITY.md` limit 3.
+      Test: a `Redactor` unit test pushes a correct prefix and a wrong prefix
+      of the same length; `push` must return the same number of bytes for
+      both. Plus an e2e latency test like the scratch one.
+
+- [ ] **R.37 A run whose client disconnects keeps running and holds the key
+      past the idle timeout.**
+      `src/runner.rs:291-323` (`relay`) and the `Finished` wait loop
+      (`:240-252`) never check the client socket; a dead client is noticed
+      only when a frame write fails. `src/daemon.rs:462` suspends the idle
+      timeout while any run is registered.
+      Failure (reproduced): `--idle-timeout 2`, child `exec sleep 20`, client
+      socket dropped; 6 s later `pmd` and the child are alive, the child's
+      environment holds the secret, and `ping` answers. Agent hosts kill
+      timed-out tool calls routinely, so each leaves a live child with the
+      secret, a used run slot, and an unlocked key until `lock`.
+      Fix: poll the client stream for HUP/RDHUP/EOF in both loops and cancel
+      the run (process-group kill) when the client is gone.
+      Test: start that run, drop the client, assert the child is gone within
+      2 s and `pmd` exits within ~4 s under `--idle-timeout 2`.
+
+- [ ] **R.38 A detached grandchild keeps the secret after the run ends,
+      after `lock`, and after `pmd` exits.**
+      `src/runner.rs:234-245`: after a normal finish (both pipes at EOF,
+      leader reaped) the process group is never signalled.
+      `src/daemon.rs:56-58` claims "no copy of the injected secret outlives
+      the key"; `SECURITY.md` limit 1 only discusses exposure "while the child
+      is running". A grandchild that calls `setsid` escapes even the
+      cancel-path group kill; that is noted only in a `runner.rs` comment.
+      Failure (reproduced): `sh -c 'sleep 60 </dev/null >/dev/null 2>&1 &'`
+      exits 0; after `lock` answers `Locked` and `pmd` exits, the `sleep` is
+      alive with the secret in `/proc/<pid>/environ`. Real tools do this
+      (gradle daemon, ssh ControlPersist, credential-cache daemons).
+      Fix: signal the group on normal completion too without reusing a
+      reaped pgid (`waitid(WNOWAIT)`, `kill(-pgid)`, then reap), and document
+      the `setsid` escape and post-run survivors in `SECURITY.md`; correct
+      the `daemon.rs` comment.
+      Test: the scenario above leaves no live grandchild after the run
+      returns; a `tests/docs.rs` contract for the documented `setsid` limit.
+
+- [ ] **R.39 `grant revoke` (and `grant create`) fails with `internal`
+      whenever a concurrent `run` writes the vault.**
+      `src/daemon.rs` `revoke_grants` (~`:723-768`) opens the vault without
+      the lock, then `lock_for_update()` maps `VaultChanged` to
+      `ResponseError::Internal` with no retry, while `record_use` retries 8
+      times (`src/daemon/run.rs:33,152`). Every run writes the vault to
+      record its use. `src/cli/grant.rs` (~`:192` vs `:234`) has the same
+      race: the vault is read before `challenge`, the approval is spent, and
+      a run's write in between makes the create fail after the human
+      approved.
+      Failure (reproduced twice): 4-8 threads looping runs while revoke is
+      sent; revoke failed 1-2 times before succeeding, answering
+      "the unlock daemon refused the revocation (internal)". The kill switch
+      is flaky exactly when an agent is busy using the grant.
+      Fix: take the write lock before reading (a key-based
+      `open_for_update`) in `revoke_grants`, and in `record_use`; in
+      `grant create`, re-open under the lock and add the grant to the fresh
+      vault instead of byte-comparing the stale one.
+      Test: concurrent runs plus one `grant_revoke`; the first revoke must
+      return `Ok(1)` and the grant must be revoked on disk, in each of ~20
+      trials. Same shape for `grant create` against concurrent runs.
+
+- [ ] **R.40 `Vault::save(master)` re-salts and resets the KDF parameters,
+      stranding a running `pmd` and silently downgrading stronger
+      parameters.**
+      `src/vault.rs:176` calls `crypto::encrypt(&plaintext, master_password,
+      KdfParams::default())`, so every `add`/`edit`/`delete`
+      (`src/cli/commands.rs:61,188,203`) writes a new salt and default
+      parameters. None of those commands checks for a running daemon;
+      `DECISIONS.md:510` assumes none is running.
+      Failure (reproduced): (a) with `pmd` unlocked, `pm add` makes the
+      daemon's key useless; every `run` and `grant revoke` then answers
+      `internal` until `lock`+`unlock`, so revocation silently stops working.
+      (b) a vault written with (128 MiB, t=4, p=2) is rewritten with
+      (64 MiB, t=3, p=1) on the next add, undoing the upgrade `FORMAT.md`
+      stores the parameters for (and the future TODO 8.2).
+      Fix: keep the existing salt and parameters on save (derive with the
+      header's parameters), or refuse `add`/`edit`/`delete` while a daemon is
+      unlocked as 8.1 does for `passwd`; update `DECISIONS.md:510`.
+      Test: a vault with non-default parameters keeps them after `save`; after
+      add/edit/delete, the key from the pre-existing file still opens the
+      vault (or the commands exit with a clear refusal while `pmd` runs).
+
+- [ ] **R.41 The grant approval prompt shows refs only as opaque
+      `pm://<hex>` ids, and refs are never checked against the vault.**
+      `src/cli/grant.rs:167` prints the approval summary via
+      `describe_scope` (~`:517`), which prints `id.to_ref()` only. The CLI has
+      already decrypted the vault (`open_with_key`, ~`:190`) but neither shows
+      the service/username behind each ref (or what each tag matches) nor
+      refuses a nonexistent ref. `MCP.md` says the human sees the whole
+      request first.
+      Failure: an agent suggests `pm grant create --label "github ci token"
+      --ref pm://<bank-password-id> --command /usr/bin/curl ...`; the human
+      sees a friendly agent-written label and an unreadable id and approves
+      the wrong credential.
+      Fix: print service and username (escaped) for every ref and the matched
+      entries for every tag before the confirmation; refuse an unknown ref
+      before `challenge`.
+      Test: in `tests/grant_cli.rs`, a ref's service name appears in the
+      transcript before the confirmation prompt; a nonexistent ref exits
+      with a usage/not-found error before any socket contact.
+
+- [ ] **R.42 Grants are never removed, so a vault stops accepting new grants
+      after 1,024 creates in its lifetime.**
+      `src/store/payload.rs:118-123` refuses `grants.len() > MAX_GRANTS`
+      counting revoked and expired grants; `src/vault.rs:277-302` has no
+      remove/prune, and no TODO item plans one. Grants live at most 30 days.
+      Failure: at ~3 short grants a day a vault hits the cap within a year;
+      from then on every `pm grant create` fails in `check_grant_writable`
+      ("too many grants") with no CLI recovery. The existing full-vault test
+      uses only active grants, hiding this.
+      Fix: prune grants that are expired or revoked (and past a short
+      retention window, so `grant list` can still show recent history) when
+      writing, or add `pm grant purge`; never prune an active grant. Record
+      the retention rule in `DECISIONS.md` and `FORMAT.md`.
+      Test: a vault with `MAX_GRANTS` expired/revoked grants accepts a new
+      grant; active grants are never removed.
+
+- [ ] **R.43 The README's main `run` example is refused with exit 5.**
+      `README.md:170-173` creates a grant with `--command /usr/bin/gh` and no
+      `--allow-interpreter`, but R.25 made `gh` a program runner
+      (`src/grant/validate.rs:146`). R.25 fixed only the example under
+      "### Create a grant"; `tests/docs.rs:158` checks only that block.
+      Failure (reproduced): the first quickstart a user or agent copies exits
+      5 with "refusing to allow a shell, interpreter or program runner" and
+      writes no token file.
+      Fix: use a non-runner in the quickstart or add `--allow-interpreter`
+      with a sentence on why.
+      Test: a docs test that checks every fenced block containing
+      `grant create` in `README.md` and `--help`: any `--command` whose
+      basename `is_program_runner` must carry `--allow-interpreter`.
+
+- [ ] **R.44 Copying an older `vault.dat` back undoes revocation and resets
+      `max_uses`.**
+      `pmd` re-reads the vault file on every request
+      (`src/daemon/run.rs:153-154`, `revoke_grants` in `src/daemon.rs`) and
+      remembers no grant state; `save_with_key` keeps the salt, so any older
+      copy (backup, leftover temp file, a copy the agent made) still opens
+      with the daemon's key. `SECURITY.md:76-78` promises revocation and use
+      limits with no rollback caveat.
+      Failure (reproduced): snapshot the vault, use a `max_uses=1` grant
+      (`Exit(0)`), second run `Denied`, write the snapshot back, run again:
+      `Exit(Code(0))`. The same works for `revoked_at`.
+      Fix: either `pmd` keeps a monotonic in-memory high-water mark per grant
+      id for its lifetime (uses never decrease, `revoked_at` never clears) and
+      refuses a vault that regresses, or `SECURITY.md` and `FORMAT.md`
+      document rollback as an accepted same-user limit (limit 1/7). Record
+      which in `DECISIONS.md`.
+      Test: the sequence above ends in `Denied` (mitigated), or a
+      `tests/docs.rs` contract pins the documented limit.
+
+- [ ] **R.45 Grant expiry is checked with a `now` read before the vault-lock
+      wait.**
+      `src/daemon/run.rs:87` reads the clock once; `record_use`
+      (`:152-187`) then authorizes and `mark_used(now)` after
+      `lock_for_update`, which can block up to 30 s per attempt, 8 attempts.
+      Failure (reproduced): a grant expiring in 3 s; the agent holds
+      `flock` on `vault.dat.lock`, sends a run, releases after 8 s: the run
+      is authorized ~5 s after expiry. Up to 16 runs can be queued this way,
+      with an overrun of minutes.
+      Fix: read the clock again after the lock is acquired and authorize
+      with that.
+      Test: the scenario above answers `Denied`.
+
+- [ ] **R.46 At the payload size limit a revocation cannot be saved.**
+      Revoking or recording a use adds 8 bytes to a grant record
+      (`src/store/payload.rs:93-101`); `check_grant_writable`
+      (`src/vault.rs:319-323`) admits a grant right up to
+      `MAX_PLAINTEXT_BYTES`. The daemon maps the save error to `internal`.
+      Failure (reproduced): a 10,485,756-byte payload plus `revoke` fails to
+      encode; `grant revoke` always answers `internal`. `run` fails closed,
+      but the kill switch fails too.
+      Fix: reserve the growth (e.g. 16 bytes per grant) in the pre-check and
+      `byte_len`, or exempt revocation growth from the cap.
+      Test: in that state `revoke_grants` succeeds.
+
+- [ ] **R.47 `passmgr run` exits 0 when its stdout pipe closes, hiding the
+      child's status.**
+      `src/cli/mod.rs:46-48` maps any `Error::Io(BrokenPipe)` to `EXIT_OK`;
+      the stdout relay in `src/cli/run.rs:122-127` returns exactly that. Help
+      (`src/cli/help.rs:76-77`) and `README.md:199` say `run` exits with the
+      child's status. The child also keeps running after the CLI exits (see
+      R.37).
+      Failure (reproduced): `set -o pipefail; passmgr run ... -- deploy |
+      head -1` reports success when `deploy` exits 7.
+      Fix: for `run`, a broken stdout pipe exits non-zero (141, or the
+      child's status if it is known) and cancels the run.
+      Test: CLI e2e with a child that prints, sleeps and exits 7 while the
+      reader is dropped: status is non-zero, never 0.
+
+- [ ] **R.48 Service names and usernames accept bidi and zero-width
+      characters and are printed raw.**
+      `src/store.rs:377-394` (`validate_service`, `validate_username`) refuse
+      only `char::is_control`, not the shared hidden/reordering table in
+      `src/text.rs`. The values are printed unescaped in the add prompt
+      (`src/cli/commands.rs:322`), success lines (`:66,193,195`), `list`
+      (`:229-235`), `get` (`:96-103`) and `show` (`:278-284`).
+      Failure (reproduced with the binary): `pm add $'git‮moc.buh' alice`
+      prompts and lists as "github.com", and the unclosed RLO also reverses
+      the rest of the `list` line, including the `pm://` ref the human copies
+      into a grant. Contradicts the PROMPT rule to sanitize bidi characters.
+      Fix: reject hidden/reordering characters in both validators; escape
+      stored legacy values on display.
+      Test: validators reject U+202E, U+200B and U+FE0F; `add` with a bidi
+      service exits 2 before any prompt; `list` escapes a legacy stored value.
+
+- [ ] **R.49 A client that stops reading for 5 s gets its run killed without
+      a terminal frame, and `lock` waits behind the stalled write.**
+      `src/daemon.rs:470` sets a 5 s write timeout on the stream handed to
+      the run worker; `relay` (`src/runner.rs:304`) cannot see `cancel` while
+      blocked in `emit`.
+      Failure (reproduced): a 4 MB child with the client paused 7 s delivers
+      ~106 KB then EOF, no `Exit` frame (`passmgr run ... | less` with nobody
+      paging, Ctrl-S, a slow MCP host). With a stalled run client, `lock`
+      answered after 4.55 s, near the CLI's 5 s `REQUEST_TIMEOUT`, so `lock`
+      can report failure although it succeeded.
+      Fix: apply backpressure to the child (stop reading its pipes) instead
+      of timing out the client; make the blocked write observe `cancel`
+      (poll with a short timeout and retry).
+      Test: pausing the reader for 7 s still yields all bytes plus
+      `Exit(Code(0))`; with a stalled run client, `lock` answers within 2 s.
+
+- [ ] **R.50 The secret and grant tokens are left in freed memory without
+      being zeroized.**
+      (a) `src/runner.rs:184-187` says the process keeps the value only in
+      `secret` and the redactors, but `Command::env` stores an `OsString`
+      copy, `spawn` clones it into its env map and builds a `NAME=value`
+      CString; a global-allocator scan found 3 freed blocks containing the
+      secret after one run of `/usr/bin/true`. The reader's stack buffer
+      (`:400`) and `Redactor.pending` reallocations (`src/redact.rs:74`) hold
+      more copies. (b) Grant-token hex is copied into plain `String`/`Vec`
+      buffers on both sides: `src/protocol/codec.rs:192,228,41-44`,
+      `src/client.rs:147-148`, the `FrameDecoder` buffer (`codec.rs:93,125`,
+      `drain` does not wipe), the `serde_json::Value` (`:232`) and the owned
+      `grant` string (`:276`). `pmd` is long-lived and these are not locked.
+      (c) `src/crypto.rs:377-392` returns early on an oversized plaintext
+      without wrapping the decrypted `Vec` in `Zeroizing`.
+      Fix: (c) wrap in `Zeroizing` before the length check. (a)/(b) build the
+      child envp in zeroizing buffers (e.g. `posix_spawn`), make `encode`
+      return `Zeroizing<Vec<u8>>` and wipe the decoder buffer on drain/drop;
+      or, where that is impractical, correct the comment and list the
+      residual copies in `SECURITY.md` limit 6. Split if too big.
+      Test: the allocator-scan test as its own integration binary reports 0
+      (or documents the accepted residue); a `FrameDecoder` unit test sees a
+      zeroed buffer after `next_frame`; an oversized-plaintext test returns
+      `MalformedVault`.
+
+- [ ] **R.51 More docs drift beyond R.32.**
+      `DECISIONS.md:420-421` says the daemon's only vault write is
+      `revoked_at` (since 3.6 `record_use` writes `uses`/`last_used` on every
+      run); `FORMAT.md:217-220` describes key-reuse re-encryption as a CLI
+      exception, but `pmd` does it on every run and revoke.
+      `SECURITY.md:23` and `DECISIONS.md:276` say the session token
+      authorizes `ping`, `lock`, `status` and `revoke`: no `status` request
+      exists and the wire name is `grant_revoke`.
+      `src/client.rs:27-35` still says grants are "TODO 3.1";
+      `src/protocol/mod.rs:14-16` omits `grant_revoke` and `:69-70` omits
+      `denied`/`busy`/`internal`/`unauthorized`; `src/protocol/response.rs:69-70`
+      describes a `Busy` case R.16 removed.
+      `src/cli/help.rs:188` says every command but generate/help/version
+      needs the master password (`lock`, `run`, `grant revoke` do not);
+      `help.rs:146-147` says only `run` refuses `--db` (so does
+      `grant revoke`); `help.rs:81-84` and `README.md:183` say `run` exits 5
+      without an in-scope grant (a nonexistent ref exits 3).
+      `README.md:522-534` exit-code table: code 3 omits unknown reference and
+      unknown grant id; code 5 lists only reveal, though run denial, a
+      missing/insecure grant file, `grant create` in agent context, the
+      program-runner refusal and a refused env name also exit 5.
+      `tests/docs.rs:189` searches the whole of `SECURITY.md`, so it passes
+      while `:14-16` says the opposite (the R.5 failure mode).
+      Fix: correct each; fold into R.32 if done together.
+      Test: `tests/docs.rs` derives the session-token request list from the
+      `Request` wire names (minus `run`) and scopes the check to its section;
+      the README exit-code table is checked against `Error::exit_code`; the
+      protocol module doc lists every `Request` variant.
+
+- [ ] **R.52 Unit tests depend on the caller's agent environment markers.**
+      `agent::tests::the_agent_flag_refuses_even_with_two_terminals` and
+      `the_agent_flag_cannot_weaken_the_check` fail when `CLAUDECODE=1` or
+      `AI_AGENT` is set (any Claude Code shell), and pass otherwise. The
+      loop's gate is unaffected only because pi does not set them.
+      Failure: a human or another agent runs `cargo test` from Claude Code
+      and sees two failures unrelated to their change.
+      Fix: make the detection take its environment as a parameter in tests,
+      or clear the markers in the test setup.
+      Test: `CLAUDECODE=1 AI_AGENT=1 cargo test --lib agent` passes.
+
+- [ ] **R.53 `a_run_in_flight_is_not_killed_by_the_idle_timeout` has a 0.5 s
+      timing margin.**
+      `tests/daemon_shutdown.rs:142-149` (added in R.7) starts `pmd` with
+      `--idle-timeout 3`, sleeps a fixed 2.5 s, then must connect before the
+      next idle poll. A 0.5 s stall makes the connect fail, which says
+      nothing about the property. Not reproduced under CPU contention, but
+      this machine has already rolled back an iteration for a timing flake.
+      Fix: start the run first, then assert the daemon outlives
+      `idle + margin` while it is in flight; or use a larger timeout and
+      margin. No fixed sleeps for synchronization.
+      Test: the rewritten test passes with the suite pinned to 2 busy cores.
+
+- [ ] **R.54 Seven files sit just under the 1,000-line guard, and three test
+      fixtures duplicate vault+grant setup.**
+      `src/socket.rs` 987, `src/grant.rs` 985, `src/cli/grant.rs` 972,
+      `tests/cli.rs` 972, `src/runner.rs` 918, `src/protocol/response.rs`
+      912, `src/client.rs` 905. TODO 4.9 lands in `src/cli/grant.rs` and will
+      have to split it mid-item, as R.26 did. `tests/support/mod.rs`
+      `Fixture`, `tests/run.rs` `Daemon` and `tests/grant_support/mod.rs`
+      `Fixture` each build their own vault, grant and grant file with their
+      own constants.
+      Fix: split the files by concern before the next feature touches them
+      (start with `src/cli/grant.rs` and `src/grant.rs`); one shared
+      vault+grant builder used by all three fixtures.
+      Test: `tests/layout.rs` stays green with every file under ~800 lines;
+      test counts unchanged.
 
 ## Phase 3 — grants and audit log
 

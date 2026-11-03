@@ -1,3 +1,34 @@
+## 2026-11-03 — Review of 49d9915..03b7a31 (human-requested, outside the loop)
+
+- Full review of the overnight run (iterations 21–78) by five parallel
+  reviewers split by area (run/daemon, grants/authz, vault/crypto,
+  protocol/CLI, tests/docs). Every finding was reproduced with a scratch test,
+  the built binary, or a mutation, and the key ones were re-checked by hand.
+- 21 new items, R.34–R.54, most severe first: authorization 5 (R.34 symlink
+  swap runs an unlisted program with the secret — high; R.39, R.41, R.44,
+  R.45), secret exposure 3 (R.36 redaction timing oracle, R.37, R.38), weak
+  tests 3 (R.35 no e2e test of allowlist/scope enforcement — high; R.52,
+  R.53), crypto/zeroize 2 (R.40, R.50), capacity/unsafe input 3 (R.42, R.46,
+  R.48), correctness 2 (R.47, R.49), drift 2 (R.43, R.51), maintainability 1
+  (R.54).
+- Corrected R.31 (its proposed fix leaves the oracle open through revoked,
+  expired and exhausted grants) and R.33 (the A-then-B daemon test exists).
+- **Do R.34 and R.35 before any Phase 3/4 feature work.** R.34 is the first
+  finding that lets an agent hand a secret to a program the human did not
+  allow; R.35's tests are what would have caught it.
+- Looked at and judged fine (do not redo): token storage as SHA-256 with
+  constant-time compare and redacted Debug; `max_uses` under concurrency (16
+  parallel runs on `max_uses=3` gave exactly 3); presence challenge/prove
+  (single-use nonces, digest-bound one-shot approvals, eviction order); the
+  canonical request digest; nonces/AAD on every save including
+  `encrypt_with_key`; payload decode bounds; v1–v4 migration; sidecar lock
+  and atomic write; frame codec and run-frame decoding bounds; grant-token
+  file reading (`O_NOFOLLOW`, owner/mode, size cap) and `--out` creation;
+  the reveal gate; R.29/R.30 escaping; accept loop, worker cap, process-group
+  setup and signal handling; the R.20 test moves and R.21–R.28 tests.
+- Note: `cargo test` from a Claude Code shell fails two `agent::tests`
+  (R.52); the loop's gate under pi is unaffected.
+
 ## 2026-11-03 — Escape untrusted argv in every CLI error (TODO R.30)
 
 - New `src/text.rs` owns the hidden-character table and three renderers:
