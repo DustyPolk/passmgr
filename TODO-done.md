@@ -74,3 +74,26 @@ come first.
       `last_rotated` because 1.2b needs both and two store-version bumps would
       be wasted work. JSON output added them in 1.2b.
 
+## Phase H — housekeeping before the next feature wave
+
+- [x] **H.1 Create `DECISIONS.md`.** Go through `PROGRESS.md` and
+      `PROGRESS-archive.md` and extract every standing decision and
+      constraint into a short, grouped list with one line each. Groups:
+      crypto, vault format and versions, CLI conventions, exit codes,
+      daemon/protocol, testing conventions. Example entries: AES-256-GCM +
+      Argon2id chosen; the store version history; refs are full
+      `pm://<32 hex>` with no prefixes; tag charset; `Error::Daemon` exits 1;
+      unlock refuses when a daemon is already running. No code changes.
+      (Also covers dependencies and the planned grant/MCP design from
+      `MCP.md`, plus an "Open questions" section that is explicitly *not* a
+      decision list.)
+- [x] **H.2 Split `src/main.rs` (≈1,600 lines) into `src/cli/` modules**
+      (argument parsing, one module per command group, output formatting). No
+      behavior change: every existing test passes unmodified, and `--help`
+      output is byte-identical (assert this with a test that runs before and
+      after). This makes room for the ~20 commands still to come.
+      (`src/cli/{mod,args,commands,unlock,help}.rs`; `main.rs` is 7 lines.
+      `--help` is pinned by `tests/fixtures/help.txt`, captured from the
+      pre-split binary. Also fixed a `BrokenPipe` panic in the daemon test
+      helper, not a behavior change.)
+
