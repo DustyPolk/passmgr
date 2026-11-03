@@ -1,3 +1,31 @@
+## 2026-11-03 — Review of 533b68d..92448ed
+
+- 4 findings, all in `TODO.md` Phase R: 1 authorization (R.11), 1 unsafe
+  process control (R.12), 1 crypto/API (R.13), 1 input/UI (R.14). 0
+  secret-exposure, 0 test-quality, 0 drift, 0 maintainability findings.
+- R.11: `Grant::authorizes` returns `Ok(())` for a List request without
+  checking its target/field (`src/grant.rs:635`); latent until 4.4, but the
+  "single decision point" cannot enforce list/describe scope and no test
+  covers it.
+- R.12: the relay timeout branch reaps the group leader
+  (`src/runner.rs:316-318`), so a later `terminate` can signal a recycled
+  pgid; contradicts its own comment at `src/runner.rs:347-348`.
+- R.13: `TokenHash` derives `PartialEq`/`Eq` (`src/grant.rs:127`) against the
+  `SessionToken` convention (`src/token.rs:27-31`) and the constant-time
+  claim in `DECISIONS.md:341`.
+- R.14: `validate_label` rejects only Unicode Cc (`src/grant.rs:708`);
+  U+202E and U+200B pass (verified), so grant labels can spoof `pm grant
+  list`/`show`.
+- Looked at and judged fine: R.6 process-group kill/reap and lock-ack
+  ordering (`tests/daemon_shutdown.rs`); R.7 idle suspension (a same-user
+  client can already keep the daemon alive with pings, documented as not a
+  boundary, bounded by lock/signals and TODO 4.5); R.8 16-run cap and
+  Busy-before-decrypt (`tests/daemon_concurrency.rs`); R.9 prompt-before-lock
+  and byte-for-byte `VaultChanged` (`tests/cli.rs`); R.10 MCP.md honesty and
+  docs tests; grant scope/check-order/limits and redacting `Debug`;
+  README/SECURITY/help drift; no new secret-exposing print or serialize call
+  in the range. Full `cargo test` green.
+
 ## 2026-11-02 — Grant model and authorization check (TODO 3.2a)
 
 - New pure module `src/grant.rs` (no I/O, no clock): `GrantId` (16 random
