@@ -1,3 +1,39 @@
+## 2026-11-02 — Bound concurrent runs and worker creation (TODO R.8)
+
+- `src/daemon.rs`: new `pub const MAX_CONCURRENT_RUNS: usize = 16`. An
+  authenticated `run` arriving while 16 workers exist is answered with the
+  terminal error `busy` before `Vault::open_with_key`, so nothing is
+  decrypted, no child starts and no reader thread is created; a refused run
+  does not refresh `last_activity`. Workers are created with
+  `thread::Builder::name("passmgr-run").spawn_scoped`, whose `io::Result` is
+  handled; a `try_clone` of the socket answers `busy` on failure. Previously
+  `scope.spawn` panicked on OS thread exhaustion, unwinding out of the scope
+  and skipping the worker join, `session::remove_if_matches`, the socket
+  unlink and the key wipe.
+- `src/protocol/response.rs`: added `ResponseError::Busy` / wire code `busy`.
+  An error code is additive, so `PROTOCOL_VERSION` stays 3: an old daemon
+  never sends it and an old client treats an unknown code as a closed decode
+  failure. `src/cli/run.rs` maps it to exit 1 with a "wait for one to finish"
+  message.
+- Chose 16 over serializing runs: `lock`/signals already cancel, and 16 keeps
+  realistic parallel work (build + tests + tools) working while bounding
+  children, reader threads and `/proc/<pid>/environ` exposure.
+- Tests: new `tests/daemon_concurrency.rs` fills the cap with 16 children that
+  record their pid and sleep, sends 64 more runs, and asserts each gets one
+  `busy` terminal frame, that no refused child ran (marker file absent), that
+  exactly 16 pids started, that `ping` and `lock` answer within 2 s, and that
+  `lock` reaps every child. Verified it fails at HEAD with the cap check
+  disabled (`left: RunFrame::Exit(Code(0))`); ran 5× for flake.
+- Docs: README `run` section, SECURITY "Daemon hardening", DECISIONS daemon
+  section (cap, busy, no version bump). TODO R.8 checked off.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` green
+  (173/34/28/16/1/6/8/13/8; CLI suite ~143 s). `cargo audit` not installed.
+- **Next iteration must know:** R.9 (lock held across prompts) is next. The
+  cap counts workers that have finished but not yet been joined (joined at the
+  top of each accept-loop iteration), so a burst right after a run finishes
+  can still see `busy` for at most one 200 ms poll; nothing depends on that
+  slack. Slowloris and total connection count are still unbounded (9.4).
+
 ## 2026-11-02 — An in-flight run suspends the idle timeout (TODO R.7)
 
 - `src/daemon.rs`: `Handled::Run` now sets `last_activity = Instant::now()`,

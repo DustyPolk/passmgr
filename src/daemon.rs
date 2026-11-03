@@ -30,7 +30,10 @@
 //! again when the last run finishes.
 //! Each `run` is served on its own worker thread so the accept loop stays
 //! responsive: `lock`, `ping` and a signal are observed even while a child is
-//! still running. Every in-flight child is killed and reaped -- together with
+//! still running. At most [`MAX_CONCURRENT_RUNS`] workers exist at once; a
+//! further request is answered `busy` before anything is decrypted or spawned,
+//! so a client cannot multiply workers, threads and injected environments
+//! without bound. Every in-flight child is killed and reaped -- together with
 //! its process group, so pipe-holding grandchildren die too -- before the
 //! daemon returns, so no copy of the injected secret outlives the key. A
 //! `lock` is only acknowledged after that join, the socket unlink, the
@@ -75,6 +78,17 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// The default idle timeout: how long the daemon keeps the key without a
 /// successfully handled request.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// Most `run` requests served at once.
+///
+/// Each worker owns a child, a process group and two pipe-reader threads, and
+/// the child's environment holds the injected value where `/proc` can expose
+/// it. The cap bounds all of that, so one client opening many connections
+/// cannot exhaust pids or memory or widen the exposure window arbitrarily.
+/// It is generous for real parallel work (a build plus a test run plus a few
+/// tools). A request over the cap is answered `busy` before the vault is
+/// opened: nothing is decrypted and no child starts.
+pub const MAX_CONCURRENT_RUNS: usize = 16;
 
 /// How long a single client gets to send a complete request.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -442,11 +456,42 @@ pub fn run(
                         // `lock`, `ping` and a shutdown signal. Accepting a run
                         // is activity, and the idle timeout stays suspended
                         // until the last run finishes.
-                        Handled::Run(stream, request) => {
-                            last_activity = Instant::now();
-                            runs.push(scope.spawn(move || {
-                                serve_run(stream, &request, vault_path, key, cancel_ref);
-                            }));
+                        Handled::Run(mut stream, request) => {
+                            // Refuse before decrypting anything. A refused
+                            // request is not activity: it did no work and must
+                            // not extend the key's lifetime.
+                            if runs.len() >= MAX_CONCURRENT_RUNS {
+                                let _ = write_run_frame(
+                                    &mut stream,
+                                    &RunFrame::Error(ResponseError::Busy),
+                                );
+                                continue;
+                            }
+                            // A spawn failure must not panic out of the scope
+                            // (that would skip the join, the socket unlink and
+                            // the key wipe). Keep a spare fd so the client
+                            // still gets a terminal answer if no thread
+                            // starts.
+                            let fallback = stream.try_clone().ok();
+                            let spawned = std::thread::Builder::new()
+                                .name("passmgr-run".into())
+                                .spawn_scoped(scope, move || {
+                                    serve_run(stream, &request, vault_path, key, cancel_ref);
+                                });
+                            match spawned {
+                                Ok(handle) => {
+                                    last_activity = Instant::now();
+                                    runs.push(handle);
+                                }
+                                Err(_) => {
+                                    if let Some(mut stream) = fallback {
+                                        let _ = write_run_frame(
+                                            &mut stream,
+                                            &RunFrame::Error(ResponseError::Busy),
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }

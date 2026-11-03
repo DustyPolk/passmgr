@@ -230,6 +230,11 @@ fn refusal(error: ResponseError, reference: &str) -> Error {
         ResponseError::Internal => {
             Error::Daemon("the unlock daemon could not read its vault (internal)".into())
         }
+        ResponseError::Busy => Error::Daemon(
+            "the unlock daemon is already running the maximum number of commands; \
+             wait for one to finish and try again (busy)"
+                .into(),
+        ),
     }
 }
 
@@ -354,6 +359,7 @@ mod tests {
             ResponseError::Internal,
             ResponseError::Unauthorized,
             ResponseError::Unsupported,
+            ResponseError::Busy,
         ] {
             assert_eq!(refusal(error, "pm://x").exit_code(), 1, "{error:?}");
         }

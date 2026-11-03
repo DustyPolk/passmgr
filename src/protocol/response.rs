@@ -48,6 +48,10 @@ pub enum ResponseError {
     /// Deliberately fixed: the underlying error may name paths but never a
     /// value, and clients have nothing useful to do with it.
     Internal,
+    /// The daemon is already serving its maximum number of concurrent `run`
+    /// requests (or could not create a worker). Nothing was decrypted or
+    /// spawned; the caller may retry once an earlier run finishes.
+    Busy,
 }
 
 impl ResponseError {
@@ -60,6 +64,7 @@ impl ResponseError {
             Self::NotFound => "not_found",
             Self::SpawnFailed => "spawn_failed",
             Self::Internal => "internal",
+            Self::Busy => "busy",
         }
     }
 
@@ -71,6 +76,7 @@ impl ResponseError {
             "not_found" => Ok(Self::NotFound),
             "spawn_failed" => Ok(Self::SpawnFailed),
             "internal" => Ok(Self::Internal),
+            "busy" => Ok(Self::Busy),
             other => Err(ProtocolError::UnknownResponse(
                 other.chars().take(MAX_TYPE_CHARS).collect(),
             )),
@@ -700,6 +706,7 @@ mod tests {
             (ResponseError::NotFound, "not_found"),
             (ResponseError::SpawnFailed, "spawn_failed"),
             (ResponseError::Internal, "internal"),
+            (ResponseError::Busy, "busy"),
         ];
         for (error, code) in expected {
             assert_eq!(error.code(), code);

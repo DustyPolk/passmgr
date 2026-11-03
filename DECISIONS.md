@@ -212,8 +212,8 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   the socket, so client-side checks protect nothing; every authorization
   decision is made in `pmd`.
 - Responses: one-shot `pong`, `locked`, or a fixed error code (`bad_request`,
-  `unsupported`, `unauthorized`, `not_found`, `spawn_failed`, `internal`), and
-  for `run` a
+  `unsupported`, `unauthorized`, `not_found`, `spawn_failed`, `internal`,
+  `busy`), and for `run` a
   stream of `RunFrame`s: zero or more `stdout`/`stderr` chunks (lowercase hex
   of at most 16 KiB raw bytes each), then exactly one terminal `exit` or
   `error`. Errors never echo field values or the token.
@@ -272,6 +272,13 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   remaining budget finishes instead of being killed mid-work. Such a run is
   bounded by `lock`/signals (and, from TODO 4.5, the run timeout). When the
   last run finishes, the timer starts again.
+- At most `MAX_CONCURRENT_RUNS` (16) `run` workers exist at once. A request
+  over the cap is answered with the terminal error `busy` before the vault is
+  opened: nothing is decrypted or spawned and no worker is created. A worker
+  thread that cannot be spawned is answered `busy` too, and cannot panic out
+  of the scope (which would skip the join, the socket unlink and the key
+  wipe). Adding an error code is additive and keeps the protocol at version 3:
+  an older client treats an unknown code as a closed decode failure.
 - `lock`, `SIGTERM` and `SIGINT` wipe the key, remove
   the socket, and remove the session file only if it still holds this
   daemon's token. A `run` is served on a worker thread so the accept loop

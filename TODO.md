@@ -73,7 +73,7 @@ come before Phase 3.
       no-run test that also proves the socket, session file and reconnect are
       gone. Until TODO 4.5 lands, an in-flight run is bounded only by
       `lock`/signals; see PROGRESS.md.
-- [ ] **R.8 No bound on concurrent runs, worker threads or children.**
+- [x] **R.8 No bound on concurrent runs, worker threads or children.**
       `src/daemon.rs:421` spawns one worker per accepted `Run` (plus two
       reader threads and one child with the secret in its env) with no cap.
       A client can open many connections and start unbounded children,
@@ -84,6 +84,12 @@ come before Phase 3.
       regression. Test: 64 concurrent runs with a short idle timeout; the
       daemon must still answer `ping`/`lock`, and runs past a documented cap
       must be refused with a stable error.
+      Done: `MAX_CONCURRENT_RUNS` is 16; over-cap runs are answered with the
+      new terminal error `busy` before the vault is opened (nothing decrypted
+      or spawned), and worker creation uses `Builder::spawn_scoped` so an OS
+      failure is answered `busy` instead of panicking out of the scope (see
+      PROGRESS.md 2026-11-02 R.8). Protocol stays version 3: a new error code
+      is additive, and an older client fails closed on an unknown code.
 - [ ] **R.9 The vault write lock is held across interactive prompts.**
       `src/cli/commands.rs:34` (`open_for_add`) takes the lock before
       `prompt_credential_password` (`src/cli/commands.rs:42`); `edit` takes it

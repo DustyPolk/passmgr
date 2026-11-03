@@ -201,6 +201,11 @@ zeroized the key. The idle timeout does not interrupt a run that is still in
 flight (a build or test suite must not die at the deadline); it wipes the key
 once no command is running, with the timer restarting after the last run.
 
+At most 16 commands run at once. A `run` beyond that is refused with exit
+code 1 and the terminal `busy` error before the vault is opened, so a caller
+that opens many connections cannot spawn unbounded children, reader threads or
+copies of an injected value; retry once an earlier command finishes.
+
 `run` is the supported way to give an agent a credential. The agent supplies
 the reference (from `list --json`) and a command, never the value.
 
