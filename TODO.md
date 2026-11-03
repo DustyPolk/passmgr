@@ -106,8 +106,11 @@ Rules that apply to every item:
       Audit-log assertions belong to 3.3, when the log exists.
       (Exactly one `--env` per run because the protocol injects one value;
       signal N renders as 128+N. Reader is `client::run`; e2e in `tests/run.rs`.)
-- [ ] **2.7 `SECURITY.md` limit note**: same-user process can read
-      `/proc/<pid>/environ` while the child runs. Not optional.
+- [x] **2.7 `SECURITY.md` limit note**: same-user process can read
+      `/proc/<pid>/environ` while the child runs. Not optional. (Created
+      `SECURITY.md` with the accepted limits, interpreter exfiltration,
+      output-only redaction, and the transitional session-token disclosure;
+      pinned by `tests/docs.rs`.)
 
 ## Phase 3 — grants and audit log
 

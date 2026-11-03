@@ -10,7 +10,7 @@
 //! owner's runtime directory" — the same processes the socket's peer-uid check
 //! already admits. Grants (TODO 3.1) add the scoped, revocable authorization
 //! that separates an agent from its owner; the limit is recorded in
-//! `PROGRESS.md` and, once TODO 2.7 lands, in `SECURITY.md`.
+//! `PROGRESS.md` and `SECURITY.md`.
 //!
 //! The bytes live in [`Zeroizing`] storage, `Debug` is redacted, there is no
 //! `Display`, and no error message contains token bytes.

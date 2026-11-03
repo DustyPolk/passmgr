@@ -327,6 +327,12 @@ A local password manager cannot protect against a compromised machine,
 keyloggers, or an attacker who can read process memory. Use a strong, unique
 master password and keep backups of the vault file.
 
+The accepted limits are documented in [`SECURITY.md`](SECURITY.md). In
+particular, a same-user process can read an injected value from a running
+child's `/proc/<pid>/environ`, so passmgr prevents accidents and makes
+deliberate misuse require a human grant; it does not defend against malware
+already running as you.
+
 ## Vault format
 
 The binary format is documented in [`FORMAT.md`](FORMAT.md). Version 2 uses:

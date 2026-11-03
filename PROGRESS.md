@@ -1,3 +1,40 @@
+## 2026-11-02 — Document the accepted limits in `SECURITY.md` (TODO 2.7)
+
+- New `SECURITY.md` (the file already referenced by `src/daemon.rs`,
+  `src/redact.rs`, `src/runner.rs` and `src/token.rs` but never written):
+  what passmgr protects, then seven accepted limits — (1) a same-user process
+  can read an injected value from the running child's `/proc/<pid>/environ`
+  (daemon hardening does not apply to the child), (2) an allowlisted
+  interpreter or shell is equivalent to handing the agent the secret, (3)
+  redaction is output-only and best-effort (no encodings, no other channels),
+  (4) plaintext at a terminal/clipboard/rendered file leaves our control, (5)
+  vault permission violations are warned about, not yet refused (8.10), (6)
+  swap/hibernation and best-effort `mlock`, (7) out of scope: root,
+  keyloggers, malicious same-user processes, compromised agent hosts.
+- `SECURITY.md` also carries an honest **Current status** section: grants are
+  not implemented yet and the session token is not an agent/human boundary
+  (TODO 3.6 closes that). `README.md`'s security section now links to it, and
+  `src/token.rs` no longer says "once TODO 2.7 lands".
+- Decision (also in `DECISIONS.md`): `SECURITY.md` is the canonical limit
+  list; a change that alters a limit updates it in the same commit.
+- Tests: new `tests/docs.rs`, 5 compile-time doc contracts (`include_str!`,
+  instant): `/proc/<pid>/environ` + "same user", interpreter exfiltration +
+  `--allow-interpreter`, redaction is not a sandbox, the transitional
+  session-token gap names TODO 3.6, and README links to SECURITY.md.
+- Gate: fmt clean, clippy `-D warnings` clean, full `cargo test` passes.
+  `cargo audit` is not installed; skipped, not installed.
+- **Next iteration must know:** next unchecked item is **3.1** (vault write
+  lock). When 3.6 lands, rewrite `SECURITY.md`'s "Current status" and update
+  `tests/docs.rs::security_discloses_the_transitional_session_token_gap` in
+  the same commit — that test exists to force the disclosure to be revisited,
+  not to be deleted silently. TODO 9.7 later expands `SECURITY.md` into a full
+  threat model; keep the README's crypto details there rather than duplicating
+  them.
+- **NEEDS HUMAN REVIEW:** the macOS sentence ("no `PR_SET_DUMPABLE` equivalent
+  set by passmgr, so same-user ptrace/memory inspection of `pmd` is not closed
+  here") is intentionally conservative and untested on this Linux machine; the
+  exposure is admitted rather than claimed safe.
+
 ## 2026-11-02 — CLI `run` streams through the daemon (TODO 2.6d)
 
 - New `src/cli/run.rs`: `command_run` validates the env name against the

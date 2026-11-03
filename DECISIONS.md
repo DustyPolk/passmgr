@@ -24,6 +24,9 @@ code does not implement yet.
   process can read a child's `/proc/<pid>/environ`, and an allowlisted
   interpreter can exfiltrate. passmgr prevents accidents and makes deliberate
   misuse require an explicit human grant.
+- `SECURITY.md` is the canonical list of accepted limits and out-of-scope
+  threats. A behavior change that alters one updates it in the same commit;
+  `tests/docs.rs` pins the load-bearing statements.
 
 ## Crypto
 
