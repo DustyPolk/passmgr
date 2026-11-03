@@ -1,3 +1,45 @@
+## 2026-11-03 — Keep the vault header on save (TODO R.40)
+
+- `src/crypto.rs`: new `encrypt_with_template(plaintext, master_password,
+  template)`. It decodes the template header, derives the key from that
+  header's salt and KDF parameters, then delegates to `encrypt_with_key`,
+  which authenticates the template and seals with the same header and a fresh
+  nonce. A wrong password therefore returns `AuthenticationFailed` and writes
+  nothing.
+- `src/vault.rs::save`: an existing vault (`source.is_some()`) now saves
+  through `encrypt_with_template`; only a brand-new file keeps
+  `crypto::encrypt` with a random salt and the current defaults. This fixes
+  both R.40 failures: `pm add`/`edit`/`delete` no longer invalidate a running
+  `pmd`'s key, and KDF parameters a human raised are no longer reset to the
+  defaults on the next write.
+- Decision (also in `DECISIONS.md` and `FORMAT.md`): reusing the header is
+  safe because every save has a fresh 96-bit nonce, and reuse is gated on
+  authenticating the container it came from. Upgrading parameters stays a
+  separate explicit action (TODO 8.2), never a side effect of a normal write.
+  Chose "keep the header" over "refuse while `pmd` runs" because the latter
+  would break `pm add` for every user with an unlocked daemon.
+- Docs: `DECISIONS.md` (Crypto section, and the grant-write rationale that
+  claimed `pm add` re-salts), `FORMAT.md` (saves keep the header), `README.md`
+  (features and security design).
+- Tests: `crypto::tests::reencrypting_with_the_password_keeps_the_header`,
+  `a_non_default_header_survives_a_reencryption`,
+  `encrypt_with_template_authenticates_before_reusing_the_header`;
+  `vault::tests::saving_with_the_password_keeps_the_header_and_a_running_daemons_key`
+  (a raised-parameter vault plus a key derived before the save still opens it)
+  and `saving_with_a_wrong_password_changes_nothing`. The first and the
+  vault one fail on the old code (params reset, salt changed, old key
+  rejects); the wrong-password one fails because the old `save` happily
+  re-encrypted under a password that never opened the vault.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  the full `cargo test` suite pass (`cargo audit` not installed, skipped).
+- **Next iteration must know:** `Vault::save` now does a full decrypt of the
+  source container before every save (authentication), so a save costs one
+  extra AES-GCM pass over the file; irrelevant next to Argon2, which now runs
+  once per save instead of once with the file's own parameters. A vault opened
+  with `Vault::empty` (the file did not exist) still creates fresh
+  defaults, so a concurrently-created file is caught by `lock_for_update`,
+  not by the header. R.41 is next.
+
 ## 2026-11-03 — Open the vault under the lock for daemon writes (TODO R.39)
 
 - `src/vault.rs`: new `Vault::open_with_key_for_update(path, key)` — takes the

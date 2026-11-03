@@ -85,6 +85,80 @@ fn opens_with_a_derived_key_instead_of_the_password() {
 }
 
 #[test]
+fn saving_with_the_password_keeps_the_header_and_a_running_daemons_key() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("vault.dat");
+    let master = "test master password";
+
+    // A vault written with parameters a human raised above the defaults.
+    let raised = crypto::KdfParams::new(16 * 1024, 2, 1);
+    let entry = credential("example.com", "user", "secret");
+    let plaintext = store::encode(std::slice::from_ref(&entry), &[]).unwrap();
+    let before = crypto::encrypt(&plaintext, master, raised).unwrap();
+    fs::write(&path, &before).unwrap();
+
+    // The key a running `pmd` would hold after unlocking this file.
+    let daemon_key = crypto::unlock_key(&before, master).unwrap();
+
+    let mut vault = Vault::open_for_update(&path, master).unwrap();
+    vault
+        .add(credential("other.example", "user2", "secret2"))
+        .unwrap();
+    vault.save(master).unwrap();
+    drop(vault);
+
+    let after = fs::read(&path).unwrap();
+    assert_eq!(
+        &after[8..20],
+        &before[8..20],
+        "KDF parameters are kept, not reset to the defaults"
+    );
+    assert_eq!(&after[20..36], &before[20..36], "the salt is kept");
+    assert_ne!(&after[36..48], &before[36..48], "the nonce is fresh");
+
+    // The daemon's key still opens the rewritten vault, so `pm add` no longer
+    // strands a running `pmd` until lock+unlock (TODO R.40).
+    let daemon_view = Vault::open_with_key(&path, daemon_key.as_slice()).unwrap();
+    assert_eq!(daemon_view.len(), 2);
+    assert!(daemon_view.get("other.example").is_some());
+
+    // And so does the master password.
+    let human_view = Vault::open(&path, master).unwrap();
+    assert_eq!(human_view.len(), 2);
+}
+
+#[test]
+fn saving_with_a_wrong_password_changes_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("vault.dat");
+    let master = "test master password";
+
+    {
+        let mut vault = Vault::open_for_add(&path, master).unwrap();
+        vault
+            .add(credential("example.com", "user", "secret"))
+            .unwrap();
+        vault.save(master).unwrap();
+    }
+    let before = fs::read(&path).unwrap();
+
+    let mut vault = Vault::open_for_update(&path, master).unwrap();
+    vault
+        .add(credential("other.example", "user2", "secret2"))
+        .unwrap();
+    // Reusing the header authenticates it first, so the wrong password fails
+    // instead of replacing a readable vault with an unopenable one.
+    assert!(matches!(
+        vault.save("not the master password"),
+        Err(Error::AuthenticationFailed)
+    ));
+    drop(vault);
+
+    assert_eq!(fs::read(&path).unwrap(), before, "the vault is unchanged");
+    assert_eq!(Vault::open(&path, master).unwrap().len(), 1);
+}
+
+#[test]
 fn saving_with_the_key_keeps_the_key_and_the_password_working() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("vault.dat");

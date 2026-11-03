@@ -322,6 +322,44 @@ pub fn encrypt_with_key(plaintext: &[u8], key: &[u8], template: &[u8]) -> Result
     seal(plaintext, key, &header)
 }
 
+/// Re-encrypt `plaintext` under `master_password`, keeping the salt and KDF
+/// parameters of `template`.
+///
+/// [`encrypt`] takes a fresh salt and the current default parameters, which is
+/// right for a brand-new file and wrong for an existing one: a fresh salt
+/// invalidates every already-derived key (notably a running `pmd`'s), and
+/// writing the defaults would silently undo KDF parameters a human raised
+/// (TODO R.40). The key is derived from the template header and the template
+/// is authenticated before its header is reused, so a wrong password can never
+/// replace a readable vault with an unopenable one. Only the nonce and
+/// ciphertext change; the file still opens with the same password and with a
+/// key derived from the old container.
+///
+/// The caller must already hold the write lock and must have verified that
+/// `template` is the container currently on disk.
+pub fn encrypt_with_template(
+    plaintext: &[u8],
+    master_password: &str,
+    template: &[u8],
+) -> Result<Vec<u8>> {
+    check_plaintext_len(plaintext)?;
+    if template.len() > MAX_VAULT_BYTES {
+        return Err(Error::MalformedVault("vault file is too large".into()));
+    }
+    let template_header = Header::decode(template)?;
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    derive_key(
+        master_password,
+        &template_header.salt,
+        template_header.params,
+        &mut key,
+    )?;
+    // `encrypt_with_key` decodes and authenticates the template again and
+    // seals with a fresh nonce, so this path and the key-based one cannot
+    // drift apart.
+    encrypt_with_key(plaintext, key.as_slice(), template)
+}
+
 /// Decrypt a complete vault container. The returned plaintext is wiped when
 /// dropped.
 pub fn decrypt(container: &[u8], master_password: &str) -> Result<Zeroizing<Vec<u8>>> {
@@ -478,6 +516,59 @@ mod tests {
         );
         // The original container is untouched.
         assert_eq!(&*decrypt(&original, "password").unwrap(), b"first");
+    }
+
+    #[test]
+    fn reencrypting_with_the_password_keeps_the_header() {
+        let original = encrypt(b"first", "password", fast_params()).unwrap();
+
+        let rewritten = encrypt_with_template(b"second", "password", &original).unwrap();
+
+        assert_eq!(
+            &rewritten[0..20],
+            &original[0..20],
+            "format and KDF params are kept"
+        );
+        assert_eq!(&rewritten[20..36], &original[20..36], "the salt is kept");
+        assert_ne!(&rewritten[36..48], &original[36..48], "the nonce is fresh");
+
+        assert_eq!(&*decrypt(&rewritten, "password").unwrap(), b"second");
+        // A key derived from the old container still opens the rewrite, which
+        // is what keeps a running daemon usable after a CLI save (TODO R.40).
+        let key = unlock_key(&original, "password").unwrap();
+        assert_eq!(
+            &*decrypt_with_key(&rewritten, key.as_slice()).unwrap(),
+            b"second"
+        );
+        assert_eq!(&*decrypt(&original, "password").unwrap(), b"first");
+    }
+
+    #[test]
+    fn a_non_default_header_survives_a_reencryption() {
+        let raised = KdfParams::new(16 * 1024, 2, 1);
+        let original = encrypt(b"first", "password", raised).unwrap();
+
+        let rewritten = encrypt_with_template(b"second", "password", &original).unwrap();
+
+        assert_eq!(
+            &rewritten[8..20],
+            &original[8..20],
+            "raised KDF parameters are not reset to the defaults"
+        );
+        assert_eq!(&*decrypt(&rewritten, "password").unwrap(), b"second");
+    }
+
+    #[test]
+    fn encrypt_with_template_authenticates_before_reusing_the_header() {
+        let original = encrypt(b"first", "password", fast_params()).unwrap();
+        assert!(matches!(
+            encrypt_with_template(b"second", "wrong password", &original).unwrap_err(),
+            Error::AuthenticationFailed
+        ));
+        assert!(matches!(
+            encrypt_with_template(b"second", "password", b"not a vault").unwrap_err(),
+            Error::NotAVault
+        ));
     }
 
     #[test]

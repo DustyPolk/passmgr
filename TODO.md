@@ -884,7 +884,7 @@ Rules that apply to every item:
       (20 trials), `src/daemon/tests.rs::revocation_does_not_lose_to_a_concurrent_vault_write`
       and `tests/grant_cli.rs::grant_create_keeps_a_concurrent_vault_write_and_still_succeeds`.
 
-- [ ] **R.40 `Vault::save(master)` re-salts and resets the KDF parameters,
+- [x] **R.40 `Vault::save(master)` re-salts and resets the KDF parameters,
       stranding a running `pmd` and silently downgrading stronger
       parameters.**
       `src/vault.rs:176` calls `crypto::encrypt(&plaintext, master_password,
@@ -904,6 +904,19 @@ Rules that apply to every item:
       Test: a vault with non-default parameters keeps them after `save`; after
       add/edit/delete, the key from the pre-existing file still opens the
       vault (or the commands exit with a clear refusal while `pmd` runs).
+      Done: chose "keep the header" over refusing while `pmd` runs, so `pm add`
+      keeps working with a live daemon. New
+      `crypto::encrypt_with_template(plaintext, master_password, template)`
+      derives the key from the template header, authenticates the template,
+      then delegates to `encrypt_with_key`; `Vault::save` uses it whenever it
+      has a `source` container and `crypto::encrypt` (fresh salt, current
+      defaults) only for a brand-new file. A wrong master password now
+      `AuthenticationFailed` and writes nothing. Tests:
+      `crypto::tests::reencrypting_with_the_password_keeps_the_header`,
+      `crypto::tests::a_non_default_header_survives_a_reencryption`,
+      `crypto::tests::encrypt_with_template_authenticates_before_reusing_the_header`,
+      `vault::tests::saving_with_the_password_keeps_the_header_and_a_running_daemons_key`
+      and `vault::tests::saving_with_a_wrong_password_changes_nothing`.
 
 - [ ] **R.41 The grant approval prompt shows refs only as opaque
       `pm://<hex>` ids, and refs are never checked against the vault.**

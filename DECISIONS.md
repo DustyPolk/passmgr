@@ -55,9 +55,17 @@ code does not implement yet.
 - Vault encryption: AES-256-GCM, 12-byte random nonce per save, 16-byte tag,
   and the 56-byte header supplied as associated data (`src/crypto.rs`,
   `FORMAT.md`).
-- KDF: Argon2id, version 0x13, 32-byte output key, 16-byte random salt per
-  save; parameters are stored in the header and validated against strict
-  bounds.
+- KDF: Argon2id, version 0x13, 32-byte output key; a **new** vault takes a
+  16-byte random salt, and every later save reuses the salt and parameters in
+  the file it was read from. Parameters are stored in the header and
+  validated against strict bounds. Re-salting on save was rejected (TODO
+  R.40): it invalidates a running `pmd`'s key on the next `run` or
+  `grant revoke`, and writing the defaults would silently downgrade
+  parameters a human raised. Every save still takes a fresh nonce. Reusing
+  a header is only allowed after authenticating the container it came from
+  (`crypto::encrypt_with_template`, `crypto::encrypt_with_key`), so a wrong
+  password or key writes nothing. Upgrading parameters is a separate,
+  explicit action (TODO 8.2).
 - Default parameters written by this build: `m_cost` 65536 KiB, `t_cost` 3,
   `p_cost` 1. Do not change them without a migration note and `FORMAT.md`.
 - Accepted bounds: m 8192..=1048576 KiB, t 1..=16, p 1..=8, and m >= 8 * p.
@@ -535,8 +543,8 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   grant; the CLI, which has the password, opens the vault, takes the write
   lock and saves. The approval still binds the exact request (TODO 3.4a), and
   the CLI cannot be driven by an agent (TTY + password + no agent context).
-  The CLI must **not** use `Vault::save(master_password)`: a fresh salt would
-  invalidate the running daemon's key on its next request. It saves with
+  The CLI must **not** derive a second key for this write when it already
+  holds one. It saves with
   `crypto::encrypt_with_key(plaintext, key, template_container)`, which first
   authenticates the template with the key (a wrong key never writes an
   unopenable vault) and then reuses the header's salt and KDF parameters with
@@ -544,9 +552,9 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   because the nonce is fresh; the GCM random-nonce birthday bound (~2^32
   writes for one key) is far beyond a local vault's lifetime. The file stays
   readable by the master password, the daemon's key stays valid, and `pm add`
-  (which does take a new salt, and is run while no daemon is unlocked) still
-  works. `lock_for_update` byte-compares the container the CLI read before
-  saving, so a concurrent human write becomes `VaultChanged`, not a lost
+  keeps the same header too (see the next bullet). `lock_for_update`
+  byte-compares the container the CLI read before saving, so a concurrent
+  human write becomes `VaultChanged`, not a lost
   update; that compare-and-lock is for commands with an unattended wait
   (a human typing) and stays local to them. A writer with no such wait in
   front of it — the daemon's `record_use` and `grant_revoke`, and

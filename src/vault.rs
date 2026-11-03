@@ -195,12 +195,24 @@ impl Vault {
     /// Only a vault opened for update (which holds the write lock) may be
     /// saved. This keeps "read, change, write" under one lock even if a
     /// future caller forgets to use [`Vault::open_for_update`].
+    ///
+    /// An existing vault keeps its header: the salt and KDF parameters it was
+    /// read with are reused, so a running `pmd`'s key stays valid and stronger
+    /// parameters are not reset to today's defaults (TODO R.40). Only a
+    /// brand-new file (no source container) takes a fresh salt and the current
+    /// defaults. Either way the nonce is fresh, and the template is
+    /// authenticated with `master_password` before it is reused, so a wrong
+    /// password writes nothing rather than replacing a readable vault with an
+    /// unopenable one.
     pub fn save(&self, master_password: &str) -> Result<()> {
         if self.write_lock.is_none() {
             return Err(Error::ReadOnlyVault(self.path.clone()));
         }
         let plaintext = store::encode(&self.credentials, &self.grants)?;
-        let container = crypto::encrypt(&plaintext, master_password, KdfParams::default())?;
+        let container = match self.source.as_deref() {
+            Some(template) => crypto::encrypt_with_template(&plaintext, master_password, template)?,
+            None => crypto::encrypt(&plaintext, master_password, KdfParams::default())?,
+        };
         write_container(&self.path, &container)
     }
 

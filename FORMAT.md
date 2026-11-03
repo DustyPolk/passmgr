@@ -213,13 +213,16 @@ version and returns `LegacyVault`; it never writes to a legacy file.
 - Decryption is attempted only after the header has been structurally validated.
 - AES-GCM authentication failure is reported as a wrong master password or a
   corrupted vault; the two cases are indistinguishable by design.
-- Saves use a fresh salt and nonce, so identical credentials produce different
-  ciphertext each time. The one exception is deliberate: a writer that holds
-  the vault key but not the master password (the CLI writing a grant while
-  `pmd` is unlocked) re-encrypts with `crypto::encrypt_with_key`, which first
-  authenticates the current container and then reuses its salt and KDF
-  parameters with a fresh nonce. Re-salting would invalidate the daemon's key;
-  the nonce still changes, so the ciphertext does too.
+- Every save uses a fresh random 96-bit nonce, so identical credentials
+  produce different ciphertext each time. An existing vault also keeps its
+  header: its 16-byte salt and KDF parameters are reused, so a running `pmd`'s
+  derived key stays valid and KDF parameters a human raised are not reset to
+  the current defaults. Only a brand-new file takes a fresh salt and the
+  current defaults. Reusing the header is safe because the nonce is fresh, and
+  it is authenticated before reuse: `crypto::encrypt_with_template` (the
+  password path) and `crypto::encrypt_with_key` (a writer holding the key, such
+  as the CLI writing a grant while `pmd` is unlocked) both decrypt the current
+  container first, so a wrong password or key writes nothing.
 - The format does not compress, deduplicate, or encrypt field lengths. Length
   metadata is visible only after decryption; the outer container leaks only its
   total size and the KDF parameters needed to unlock it.
