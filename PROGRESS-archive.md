@@ -1,5 +1,469 @@
 # Progress archive (older entries, newest first)
 
+## 2026-11-02 — loop note: gate failed (iteration 21)
+
+- Commits from this work iteration (TODO H.1) failed the gate and were rolled back.
+- The work is kept on branch failed/iter-21-20261102-202146; you may cherry-pick from it and fix it.
+- gate: `unauthorized_requests_do_not_refresh_the_idle_timeout --- FAILED`
+- gate: `thread 'unauthorized_requests_do_not_refresh_the_idle_timeout' (414411) panicked at tests/daemon.rs:127:36:`
+- gate: `test result: FAILED. 11 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.15s`
+- gate: `error: test failed, to rerun pass `--test daemon``
+
+## 2026-11-02 — Streaming output redactor (TODO 2.6a)
+
+- New `src/redact.rs`, exported from `src/lib.rs`. No new dependency
+  (`zeroize` was already present).
+- `Redactor::push(&[u8]) -> Vec<u8>` streams child output. It scans a pending
+  buffer and appends safe bytes to the output; on a complete occurrence it
+  appends `[REDACTED]`. The longest suffix that is still a proper prefix of the
+  value is held back (at most `secret.len() - 1` bytes) until the next push, so
+  a value split across two reads is caught. `finish()` flushes a trailing
+  partial prefix: a prefix is not the value, and holding it forever would
+  truncate legitimate output.
+- Matching is greedy left-to-right and operates on bytes, so binary output
+  works (no UTF-8 assumption). Overlapping occurrences are consumed in order;
+  the replacement marker cannot recreate the value at a boundary because it is
+  itself scanned only as normal output.
+- Marker: `[REDACTED]` unless that literal contains the value (e.g. the value
+  is `[REDACTED]`, `REDACTED`, `D]`, `ACT`). In that case a run of a byte that
+  does not occur in the value is used, so the marker cannot contain it and no
+  occurrence can span the marker boundary. `finish()` is safe to call once;
+  callers must not reuse a redactor afterwards.
+- Secret lifetime: the value lives in a private `Vec`, is never exposed via
+  `Debug`/`Display` (Debug prints only `secret_len`/`pending_len`), and the
+  value plus the pending overlap are zeroized on drop. `discard_prefix` uses
+  `copy_within`, then zeroizes the stale duplicate of the retained tail before
+  truncating, so no fragment stays in the spare capacity.
+- Documented limit (also for `SECURITY.md`, TODO 2.7): redaction protects the
+  agent's context from accidental output. It is not a sandbox — the child has
+  the value in its environment, so a hostile child can exfiltrate it through
+  files, the network, or `/proc/<pid>/environ`. Only an exact contiguous
+  occurrence is replaced.
+- Tests (12 in `src/redact.rs`): whole/repeated occurrences, a split at every
+  byte offset of the input, byte-at-a-time input, arbitrary chunk sizes,
+  overlapping values (`aba`/`ababa`, `aa`/`aaaaa`), binary bytes with NUL and
+  `0xff`, empty value passthrough, `finish` flushing a trailing prefix and
+  releasing a disproved one, pending bound strictly below the value length,
+  fallback marker for values that are substrings of `[REDACTED]`, and redacted
+  `Debug` both fresh and half-consumed.
+- Gate: `cargo fmt --check` clean; `cargo clippy --all-targets -- -D warnings`
+  clean; `cargo test` passes (139 lib, 20 bin, 27 CLI, 12 daemon, 8 unlock);
+  `cargo audit` is not installed on this machine.
+- Next: 2.6b adds `stdout`/`stderr`/`exit` frames to the protocol; 2.6c wires
+  `Redactor` into the daemon's `run` handler; 2.6d adds the CLI reader. Audit
+  log assertions for `run` stay in 3.3.
+
+## 2026-11-02 — Session token for the unlock daemon (TODO 2.5)
+
+- New `src/token.rs` (`SessionToken`): 32 OS-random bytes from `getrandom`,
+  rendered as 64 lowercase hex characters on the wire and in the session file.
+  Bytes live in `Zeroizing`, `Debug` is `SessionToken(<redacted>)`, there is no
+  `Display` and deliberately no `PartialEq` (`matches()` uses a branch-free-ish
+  XOR loop), so accidental comparison or printing is hard.
+- New `src/session.rs` (Unix): `store`, `load`, `remove`, `remove_if_matches`
+  for `$XDG_RUNTIME_DIR/passmgr/session`. `store` goes through `ensure_dir`
+  (0700, owner-only) and writes a `tempfile` in that directory with mode 0600,
+  `fsync`s, renames and `fsync`s the directory. `load` is strict: regular file,
+  owned by the current uid, mode **exactly** 0600, opened `O_NOFOLLOW`, bounded
+  read (512 bytes); anything else is an error, never "repaired". This turns a
+  planted symlink or loosened mode into a visible failure.
+- Handover: `pmd` now reads `key(32) || token(32)` from the inherited stdin pipe
+  (`daemon::read_handover`, exactly 64 bytes then EOF; wrong length or trailing
+  data refuses to start). Neither value appears in argv or the environment.
+- Protocol version 2: the envelope is
+  `{"version":2,"token":"<64 hex>","request":{...}}`; the token is required on
+  every request type and parsed *before* the request, so an unauthenticated
+  peer cannot reach request parsing. Malformed/missing token → `bad_request`
+  (no echo); well-formed but wrong token → new `unauthorized` response code.
+  `protocol::decode` returns `AuthenticatedRequest` (redacted `Debug`).
+- Daemon: `run(vault, runtime_dir, key, token, idle)` compares
+  `authenticated.token().matches(token)` first and answers `unauthorized` with
+  `Handled::Rejected`, which does **not** refresh the idle timer — a client
+  with the wrong token cannot keep the key in memory. On any exit path
+  (`lock`, signal, idle) the daemon removes the session file only if it still
+  contains its own token (`remove_if_matches`), so it cannot delete a newer
+  session's token after a fast re-unlock.
+- Client/CLI: `client::request/ping` take a token, `lock` loads it from the
+  session file and removes it after `Locked`. `unlock` clears a stale file,
+  generates and stores the token *before* spawning `pmd`, passes it through the
+  pipe, and removes the file again if the spawn fails. If the session file is
+  missing, `lock` still probes the socket first so "no daemon is running" is
+  reported precisely instead of blaming authentication.
+- Wire compatibility: protocol version 1 frames are now rejected. This is
+  local IPC between `passmgr` and its own `pmd`, both from this build, so no
+  migration path is needed; the version field is what makes the mismatch
+  explicit rather than a confusing parse error.
+- Known limit (recorded in `src/token.rs`/`src/daemon.rs` docs): the token is
+  **not** an agent/human boundary. Any same-user process can read a 0600 file,
+  so it proves only what the socket's peer-uid check already proves. It stops
+  an accidental or stale client and makes an unauthorized request explicit;
+  scoped, revocable authorization arrives with grants (TODO 3.1).
+- Tests (all passing): 10 new lib tests — token hex round-trip, strict
+  lowercase-hex rejection, length check, redacted `Debug`; session store/load
+  0600 with no leftover temp file, refusal of 0644/symlink/directory/missing,
+  scoped removal, insecure runtime dir. Protocol: envelope now carries exactly
+  `["request","token","version"]`; missing/wrong-type/non-64-lowercase-hex
+  tokens rejected on ping/lock without echoing the token; decoded token matches
+  what was encoded; `Debug` of `AuthenticatedRequest` hides it; exact-frame
+  assertions updated to version 2. Daemon e2e: wrong token gets `unauthorized`
+  and cannot `lock` the daemon; token absent from socket bytes, `/proc/cmdline`
+  and daemon stdout/stderr; unauthorized pings every 200 ms for 4 s do not
+  refresh a 2 s idle timeout; a malformed token frame is `bad_request`. CLI e2e:
+  session file is 0600, its token appears in no output, a 0644 session file is
+  refused (daemon untouched) and works again after `chmod 600`, and both `lock`
+  and an idle timeout remove the session file.
+- Gate: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+  clean; `cargo test` passes: 127 lib, 20 bin, 27 CLI, 12 daemon, 8 unlock.
+  `cargo audit` is not installed on this machine.
+
+## 2026-11-02 — Idle timeout for the unlock daemon (TODO 2.4c)
+
+- `src/daemon.rs`: new `DEFAULT_IDLE_TIMEOUT = 15 * 60` s, shared
+  `parse_idle_timeout(&str)` (whole seconds, zero refused, no upper bound) and
+  `run(vault, runtime_dir, key, idle_timeout)`. The accept loop checks
+  `last_activity.elapsed() >= idle_timeout` at the top of every iteration
+  (200 ms poll, so it stops within ~200 ms of the deadline unless a client is
+  mid-request; a stalled request can delay it by at most the 5 s read
+  timeout). Exiting drops `LockedKey` (zeroize + `munlock`) and then
+  `DaemonSocket` (unlink + instance-lock release), and exits 0, exactly like
+  `lock`/SIGTERM.
+- Activity is defined as a **successfully decoded request after the peer
+  check**, not raw bytes or connections. `handle_connection` now returns
+  `Handled::{Served, Rejected, Locked}`: `Ping`/`Run` (well-formed) refresh the
+  timer, a parse failure answers `bad_request` without refreshing, and `Lock`
+  stops the daemon. This stops garbage traffic from keeping the key alive.
+- Config surface: `pmd --idle-timeout SECS` (help updated) and
+  `passmgr unlock --idle-timeout SECS` / `--idle-timeout=SECS`, parsed by the
+  shared `parse_idle_timeout` and passed through `client::spawn_daemon(...)`
+  as an extra argument. `None` means the default, applied in `command_unlock`.
+  Unlock's stdout now reports the effective timeout as a `Duration` (`900s`).
+  `Command::Unlock` carries `idle_timeout: Option<Duration>`; non-Unix builds
+  keep a stub parser that accepts a bare `unlock` and refuses the flag.
+- Security note recorded in the `daemon.rs` module docs: the idle timeout is a
+  second line of defense, **not** an authorization boundary. Until the session
+  token (2.5) and grants (3.1) land, any same-user process can send `ping` and
+  keep the daemon alive. It still guarantees that an untouched session does
+  not hold the key forever.
+- Tests: 1 new lib test (`parse_idle_timeout` accepts positive whole seconds,
+  default is 900 s, rejects `0`/empty/negative/fraction/unit/whitespace), 1 new
+  CLI parse test (default `None`, both flag forms, zero/word/missing value
+  rejected), 3 new `tests/daemon.rs` e2e tests (short timeout exits and removes
+  the socket; pings every 250 ms for 4 s keep it alive past a 2 s timeout, then
+  it expires; rejected frames every 200 ms for up to 4 s do not refresh, with
+  an elapsed-time bound so a refresh bug fails), and 1 new `tests/unlock.rs` pty
+  test proving `unlock --idle-timeout 1` reaches the daemon (prints `after 1s`,
+  process disappears and socket is removed without `lock`).
+- Gate: `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
+  clean; `cargo test` passes: 112 lib, 20 bin, 27 CLI, 9 daemon, 7 unlock. The
+  CLI suite is Argon2-bound (~150 s). `cargo audit` is still not installed
+  here (`no such command: audit`); run it where available.
+- No new dependency, no crypto/vault-format change, no protocol change.
+- Next: **2.5 session token file** — write a random token to
+  `$XDG_RUNTIME_DIR/passmgr/session` (0600) at unlock, have requests carry it,
+  reject mismatches. Keep the token out of argv, the environment and all
+  output. Do not weaken the peer-uid check and do not add a plaintext request.
+
+## 2026-11-02 — `pm unlock` / `pm lock` CLI (TODO 2.4b)
+
+- New `src/client.rs` (`#[cfg(unix)]`): the client half of the daemon protocol
+  — `ping`, `lock`, `spawn_daemon` and a generic `request`. Frame writes and
+  reads are bounded (`MAX_MESSAGE_BYTES` + prefix + 1 byte via `take`), every
+  connection has a 5 s timeout, and readiness polling is bounded at 10 s.
+  `spawn_daemon` finds `pmd` next to the current executable, passes `--vault`
+  and `--runtime-dir` (never the key), writes exactly the 32-byte key into
+  `pmd`'s stdin and then closes it. Its stderr goes to an anonymous,
+  immediately unlinked `tempfile` (0600): the daemon must not inherit the
+  caller's stderr pipe, or `Command::output()` would block forever once the
+  caller exits and later daemon writes would hit `EPIPE`. Startup failures
+  report the exit status plus a bounded (8 KiB) excerpt of that log.
+  After a successful ping the child is re-checked after one poll interval, so
+  a pre-existing daemon answering the ping cannot mask our child dying on the
+  instance lock.
+- `pm unlock`: refuses in agent context with exit 5 **before** prompting (new
+  `agent::check_human`, shared with `get --reveal`; the message is produced by
+  `RevealRefusal::message_for(action)` so both call sites read naturally).
+  Then: pre-check the socket (a live daemon means "run 'passmgr lock' first",
+  exit 1), read the vault container, prompt once, derive + **authenticate**
+  the key with `crypto::unlock_key`, drop the password and the container, then
+  hand the key to `pmd`. A wrong password exits with the existing wrong
+  password code and starts nothing. Prints the pid and a hint to stdout.
+- `pm lock`: needs no TTY (it can only stop the daemon, never reveal
+  anything), sends `lock`, and reports that the key was wiped. Without a
+  daemon it exits 1 with the existing `SocketError::NotRunning` message.
+- Both commands are Unix-only, with non-Unix stubs, matching `pmd`.
+  `parse_command` rejects extra arguments; `--help` documents both.
+- Fixed an intermittent, real single-instance race found while stress-running
+  the new tests: `acquire_lock` could see `EWOULDBLOCK` for a few
+  milliseconds after the previous holder's `DaemonSocket` was dropped on
+  another thread (the final `fput` of a descriptor closed by a non-owning
+  thread is deferred to that thread's task work). The instance lock now
+  retries every 5 ms for up to 250 ms before reporting
+  `SocketError::AlreadyRunning`. The lock is still exclusive — a live daemon
+  holds it for its whole lifetime — so this only stops a just-exiting daemon
+  from being reported as running, which would otherwise also hit `unlock`
+  immediately after `lock`. Two tests pin it down: a live holder is still
+  rejected, and a holder that releases within the grace window is acquired.
+- Tests: 6 new lib tests in `src/client.rs` (round-trip, error passthrough,
+  clear missing-daemon error, non-JSON/empty/oversized-prefix responses
+  rejected without a panic, short key refused before spawning, startup
+  failure reports status and log), 1 new `src/socket.rs` test, and
+  `tests/unlock.rs` (6 e2e tests, Linux pty where a TTY is required): non-TTY
+  refusal (exit 5, no prompt), agent-marker refusal on a pty, unlock → ping →
+  lock round-trip with the secret absent from all output and from
+  `pmd`'s argv and `/proc/<pid>/environ`, duplicate unlock refused without a
+  prompt, wrong password exits 4 and starts no daemon, `lock` without a
+  daemon. The e2e test writes the password to the pty before the child
+  disables echo, so the pty echo can contain the password; that is a harness
+  artifact, not a product leak (nothing else ever writes it).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  `cargo test` pass (111 lib, 19 bin, 27 CLI, 6 daemon, 6 unlock; the CLI
+  suite is Argon2-bound, ~150 s). `cargo audit` is not installed here; run it
+  where available.
+- Decisions recorded: `Error::Daemon(String)` (exit 1) carries only daemon
+  transport failures; unlock deliberately does **not** re-prompt when a
+  daemon is already running (it tells the human to lock first) so a second
+  unlock can never silently replace a running daemon's key.
+- Next: 2.4c idle timeout, then 2.5 session token (the socket is currently
+  authorized by peer uid only, so any same-user process may `ping`/`lock` —
+  acceptable for now: no request returns plaintext and `lock` is a DoS at
+  worst).
+
+## 2026-11-02 — Unlock daemon core and `pmd` (TODO 2.4a)
+
+- Split the original 2.4 into **2.4a** (this entry), **2.4b** (`pm unlock` /
+  `pm lock` CLI) and **2.4c** (idle timeout), so each stays one iteration.
+- New `src/daemon.rs` (`#[cfg(unix)]`, registered in `src/lib.rs`) and
+  `src/bin/pmd.rs`. The daemon holds **only the derived 32-byte key**, never
+  the decrypted vault: `Vault::open_with_key` decrypts on demand when `run`
+  lands (2.6) and the plaintext is dropped immediately. Decided against
+  keeping a decrypted `Vault` in memory for the daemon's whole lifetime.
+- Key handover: `pmd` reads exactly `KEY_LEN` bytes from stdin (the inherited
+  pipe from `unlock`, 2.4b) and then requires EOF; short, long or trailing data
+  is refused. The key is never in argv or the environment. `LockedKey` keeps
+  it in a stable `Zeroizing<Vec<u8>>`, `mlock`s it best-effort, and `munlock`s
+  before zeroizing on drop. `Debug` prints only `mlock` state, no bytes.
+- Hardening: `RLIMIT_CORE` 0 (fail closed) and Linux
+  `prctl(PR_SET_DUMPABLE, 0)` (fail closed); `setsid()` best effort. On macOS
+  there is no `prctl`, so core dumps are disabled but same-user `ptrace`
+  exposure remains — TODO 2.7 must record that limit in `SECURITY.md`.
+- Startup order: harden -> install SIGTERM/SIGINT handlers -> `setsid` ->
+  verify the key against the vault -> bind the socket. A wrong key therefore
+  never creates a socket or makes `pmd` look alive. The `DaemonSocket` is held
+  for the whole loop (instance `flock` stays held) and dropped on lock/signal,
+  removing the socket.
+- Loop: non-blocking `accept_peer()` with a 200 ms sleep, so
+  `SIGTERM`/`SIGINT` (handler only stores an `AtomicBool`) exits/wipes within
+  ~200 ms. One request per connection, 5 s read/write timeout. `ping` ->
+  `pong`; `lock` -> `locked` then wipe/exit; `run` -> `unsupported` (2.6);
+  malformed, truncated, oversized, empty and unknown-type frames ->
+  `bad_request`. `PeerRejected`/`PeerCheckFailed` are ignored and the owner
+  keeps being served. No request can return a secret value.
+- Protocol: added `Response { Pong, Locked, Error(ResponseError) }`,
+  `ResponseError { BadRequest, Unsupported }` with stable codes
+  `bad_request` / `unsupported`, `encode_response` / `decode_response`, and
+  `ProtocolError::UnknownResponse`. The response schema is fixed and has no
+  value field. Unknown response types/codes are rejected; echoed type names
+  are truncated to 32 chars.
+- Crypto reuse for the handover: split `decrypt` into
+  `derive_vault_key(container, password, out)` and
+  `decrypt_with_key(container, key)`, with `unlock_key(...)` deriving and
+  authenticating in one step. `Vault::open_with_key` added. No parameter,
+  format or ciphertext change: existing vaults still open unchanged.
+- Tests: 11 new crypto/vault/protocol unit tests (key derive/decrypt split,
+  wrong key, length checks, no key echo, response round-trip/fixed shape,
+  unknown type/code, malformed frames, arbitrary bytes) and 5 `daemon.rs` unit
+  tests (short/trailing key, length check, no bytes in `Debug`, no echo).
+  New `tests/daemon.rs` (6 e2e tests, fast Argon2 params): ping/lock removes
+  the socket and exits 0; SIGTERM and SIGINT exit cleanly and remove it;
+  empty/oversized/truncated/unknown/`run` requests rejected without a crash
+  and the daemon still serves; wrong key exits non-zero with no socket; a
+  second daemon is refused while the first keeps serving; the generated
+  secret appears in no response bytes, stdout/stderr, cmdline, or readable
+  `/proc/<pid>/environ` (dumpable=0 usually makes the last unreadable).
+- No new dependency (`libc` and `zeroize` already present). No network, store
+  or audit-log change.
+- Gate: `cargo fmt --check` clean; `cargo clippy --all-targets -- -D warnings`
+  clean; `cargo test` 156 passed (104 lib, 19 bin, 27 e2e CLI, 6 daemon e2e;
+  CLI e2e is Argon2id-bound and serialized, ~148 s). `cargo audit` still not
+  installed (`error: no such command: audit`).
+- **Next iteration must know:** next is **2.4b** (`unlock`/`lock` CLI). Spawn
+  `pmd` with the key on a pipe, wait for a `ping`/`pong` readiness check, and
+  refuse `unlock` unless stdin and stdout are TTYs and no agent marker is set.
+  Do not add any request that returns plaintext. Idle timeout is still absent
+  (2.4c), so a daemon stays unlocked until `lock` or a signal. `mlock` failure
+  is intentionally non-fatal and currently silent; if that matters, surface a
+  warning without key material.
+
+## 2026-11-02 — Peer credential check (TODO 2.3)
+
+- `src/socket.rs` now verifies the connecting user before any request byte is
+  read. New `PeerCredentials { uid, gid, pid: Option<i32> }` plus
+  `peer_credentials(&UnixStream)` and `PeerCredentials::verify(expected_uid)`.
+  Linux/Android read `getsockopt(SO_PEERCRED)` into `libc::ucred`; macOS/iOS
+  call `libc::getpeereid` (no pid available, so `pid()` is `None` there). Both
+  syscalls are validated: non-zero return is an error and Linux also requires
+  the kernel to report exactly `size_of::<ucred>()` bytes. Any other Unix
+  target returns `SocketError::PeerCheckUnsupported` and the daemon fails
+  closed — no unchecked accept path exists on an unsupported platform.
+- `DaemonSocket::accept_peer()` is the intended accept path. It calls
+  `listener.accept()`, reads the peer credentials, compares the uid with
+  `geteuid()`, and only then returns `(UnixStream, PeerCredentials)`. On
+  mismatch the stream is dropped immediately (no reply, nothing read) and
+  `SocketError::PeerRejected { expected, actual }` is returned. Documented in
+  the module header that 2.4 must use `accept_peer()`, not `listener()`; the
+  latter is kept public only for tests/explicitly validated callers.
+- The check is **not** an authorization boundary on its own: any process
+  running as the same user passes it. It separates users; the session token
+  (2.5) and grants (3.1) separate agents from their owner. That limit is
+  written in the module docs so it is not mistaken for more. PID is reported
+  but never used for authorization (pids are reused).
+- Error variants added: `PeerRejected`, `PeerCheckFailed(io::Error)`,
+  `PeerCheckUnsupported`; all have `Display` text with uids only, and
+  `source()` exposes the syscall error. `SocketError` remains module-local and
+  is not wired into the CLI exit-code contract (2.4 decides the mapping).
+- Tests: 3 new lib tests. `peer_credentials_report_the_current_user` (uid/gid
+  match, Linux pid is our pid, macOS pid is `None`, free function and accept
+  helper agree, a second connection still accepts);
+  `accept_peer_rejects_a_foreign_uid_and_closes_the_connection` (client writes
+  a request-shaped message, accept is forced to expect `uid+1`, gets
+  `PeerRejected` with both uids, and the client reads EOF/reset with no
+  reply); `verify_rejects_a_different_uid_with_a_clear_message` (unit-level
+  forced-failure check plus message contents). No second user account needed.
+- No new dependency (`libc` already present). No store, protocol, CLI or
+  crypto change. The socket/lock/dir behavior from 2.2 is untouched.
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
+  clean, `cargo test` 134 passed (88 lib + 19 bin + 27 e2e, ~150 s; e2e is
+  Argon2id-bound and serialized). `cargo audit` still not installed
+  (`error: no such command: audit`).
+- **Next iteration must know:** next is **2.4** (`pm unlock` / `pm lock`, idle
+  timeout, SIGTERM/SIGINT wipe, `mlock`, `prctl(PR_SET_DUMPABLE, 0)`). Wire the
+  accept loop to `DaemonSocket::accept_peer()` and keep the `DaemonSocket` (and
+  therefore the `flock`) alive for the daemon's whole lifetime. There is still
+  no request type that returns plaintext. Until 2.5 lands, authorize only the
+  local session written at unlock; do not add a bypass. On Linux, remember
+  that a rejected peer's socket is dropped without a response — do not turn
+  `PeerRejected` into a wire error message.
+
+## 2026-11-02 — Socket setup module (TODO 2.2)
+
+- New `src/socket.rs` (registered in `src/lib.rs` as `#[cfg(unix)] pub mod
+  socket;`). No daemon binary yet; this is the socket-placement layer that
+  TODO 2.4 will bind. No CLI surface change.
+- Paths: `RuntimePaths::resolve()` -> `$XDG_RUNTIME_DIR/passmgr` when that
+  variable is set and non-empty, else `<temp_dir>/passmgr-<euid>` (macOS has
+  no `XDG_RUNTIME_DIR`; `env::temp_dir()` is the per-user `$TMPDIR` there).
+  The uid suffix keeps two users sharing a temp dir from colliding, and the
+  directory checks below fail closed on anything pre-created by someone else.
+  Files inside: `pmd.sock` and `pmd.lock`.
+- `RuntimePaths::ensure_dir`: `create_dir` + `set_permissions(0700)` when it
+  does not exist; when it does, `symlink_metadata` (never follows a symlink)
+  must show a real directory, owned by `geteuid()`, mode exactly 0700.
+  Otherwise `SocketError::InsecurePath` and no socket is created. Chose
+  **refuse, not repair**, for an existing directory: a 0755 dir may already
+  have been observed, so silently fixing it would hide a real exposure.
+  Parents are never created (`create_dir`, not `create_dir_all`): a missing
+  `XDG_RUNTIME_DIR` is a broken environment, not something to paper over.
+- Single instance: `flock(LOCK_EX|LOCK_NB)` on `pmd.lock` (0600, created via
+  `OpenOptionsExt::mode`, then `set_permissions` to narrow an old file).
+  `EWOULDBLOCK` -> `AlreadyRunning`. The lock file is deliberately **not**
+  unlinked on drop (unlinking while holding it lets a second daemon lock a
+  fresh inode); the socket is unlinked on drop only if its inode still matches
+  the one recorded at bind time.
+- Ordering in `DaemonSocket::bind_at`: length-check the path (<= 104 bytes,
+  the macOS `sun_path` limit, so a path that works on Linux also works there),
+  validate/create the dir, take the lock, then probe the socket, then bind,
+  then chmod 0600. Locking before probing means two simultaneous starts cannot
+  both conclude "stale".
+- Stale-socket rule: `symlink_metadata`; symlink or non-socket -> `NotASocket`
+  and the file is left untouched; foreign uid -> refused; then a probe
+  `UnixStream::connect`: success -> `AlreadyRunning` (never steal a live
+  socket, even if the lock file was deleted), `ECONNREFUSED` -> unlink and
+  rebind, `NotFound` -> race, fine. The probe connection is closed immediately;
+  2.4's accept loop must tolerate a peer that connects and disconnects.
+- The socket is chmodded 0600 *after* bind because bind applies the umask.
+  Documented in the module: the 0700 directory already keeps other users out,
+  so the window is not externally reachable; the chmod is defence in depth.
+- `connect()` / `connect_at()` map `NotFound` and `ConnectionRefused` to
+  `SocketError::NotRunning` so 2.6 can tell the user to run `pm unlock`.
+  `SocketError` is a module-local enum (like `ProtocolError`) with `Display`
+  and `std::error::Error`, not wired into the CLI exit-code contract yet; 2.4
+  decides the mapping. No secret values exist anywhere in this module.
+- Tests: 15 lib tests in `src/socket.rs` — XDG vs fallback resolution (empty
+  XDG treated as unset), dir/socket/lock modes 0700/0600/0600 plus a real
+  client-listener byte round-trip, reuse of an existing 0700 dir, second daemon
+  rejected while the first keeps working, stale socket replaced, live socket
+  without a lock not stolen (original listener still accepts), regular file at
+  the socket path preserved, symlinked dir refused, 0750 dir refused with the
+  mode named in the error, overlong path rejected before any I/O (no directory
+  created), drop removes the socket but keeps the lock and releases it, connect
+  with no daemon and with a stale socket both report `NotRunning`, `flock`
+  conflict/release on the same path.
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
+  clean, `cargo test` 131 passed (85 lib + 19 bin + 27 e2e, ~150 s; e2e is
+  Argon2id-bound and serialized). `cargo audit` still not installed
+  (`error: no such command: audit`). No new dependency (`libc`, `tempfile`
+  already present).
+- **Next iteration must know:** next is **2.3** (peer credential check:
+  `SO_PEERCRED` on Linux via `getsockopt`, `getpeereid` on macOS, before any
+  read). Add it to `src/socket.rs` or a small `src/peer.rs`; the accepted
+  stream from `DaemonSocket::listener()` is where to call it. Do not add a
+  request type that returns plaintext. 2.4 will own signal handling, idle
+  timeout and key zeroization; the `flock` guard must stay alive for the whole
+  daemon lifetime (keep the `DaemonSocket` in scope).
+
+## 2026-11-02 — Protocol framing module (TODO 2.1)
+
+- New `src/protocol.rs` (registered in `src/lib.rs`): pure, no-I/O wire
+  protocol for the future daemon. Frame = 4-byte big-endian length + JSON body.
+  Envelope = `{"version":1,"request":{"type":...}}`. `encode(&Request)` and
+  `decode(&[u8])` handle exactly one frame; `FrameDecoder` is the incremental
+  read-loop state machine (`push`, `next_frame`, `next_request`, `buffered`).
+- Request types: `ping`, `lock`, `run { env, ref, command }`. **There is no
+  plaintext request type**, and `src/protocol.rs` documents why (any same-user
+  process can reach the socket, so the daemon must never return a value). The
+  test `requests_have_no_plaintext_field` pins the exact wire keys:
+  `ping`/`lock` have only `type`; `run` has `type`, `env`, `ref`, `command`.
+  `reveal`/`get`/`password`/`export` are rejected as unknown types.
+- Limits: `MAX_MESSAGE_BYTES = 64 KiB` body cap, `MAX_BUFFERED_BYTES` = two
+  max frames for the decoder, `MAX_ENV_NAME_BYTES = 128`,
+  `MAX_REFERENCE_BYTES = 128`, `MAX_ARG_BYTES = 4096`, `MAX_ARGS = 256`.
+  The declared length is validated **before** any slice/allocation is made
+  from it (`check_length`), so a prefix of `u32::MAX` is rejected immediately;
+  `FrameDecoder::push` rejects it as soon as the 4-byte prefix arrives, without
+  waiting for the body. Zero-length bodies are `EmptyMessage`; a frame with
+  bytes after it is `TrailingBytes` (one call decodes one frame).
+- Decisions: unknown envelope **fields** are ignored (so 2.5 can add a session
+  token and 3.x a grant without breaking peers); unknown envelope **versions**
+  and unknown request **types** are hard errors. `run.ref` is validated with
+  the canonical `store::EntryId::parse_ref` (reuse, no duplicated syntax); the
+  daemon still must check existence and scope. `run.env` must be
+  `[A-Za-z_][A-Za-z0-9_]*`. All validation runs on encode *and* decode, so a
+  locally built request cannot bypass the contract. Errors carry lengths and a
+  truncated (32-char) request type only — never field values (test
+  `errors_do_not_echo_request_field_values`).
+- `ProtocolError` is a separate enum with `Display` + `std::error::Error`; it
+  deliberately does **not** reuse the CLI `Error`/exit-code contract, because
+  these are daemon-internal failures. No new dependency (`serde_json` was
+  already present). No store/crypto change.
+- Tests: 16 new lib tests — round-trip of all three requests, exact framing
+  bytes, truncated prefix/body, oversized declared length on `decode` and
+  `FrameDecoder`, empty body, trailing bytes, oversized encode (20×4 KiB
+  args), versions 0/2/99/u64::MAX, missing/mistyped envelope fields, unknown
+  types incl. a 10 000-char type truncated in the error, wire-key pinning,
+  all `run` field bounds, fragmented byte-at-a-time decoding, two frames in
+  one push, buffer flood, and a deterministic xorshift smoke test over ~3 000
+  random buffers (no panics).
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -D warnings`
+  clean, `cargo test` 116 passed (70 lib + 19 bin + 27 e2e, ~149 s; e2e is
+  Argon2id-bound and serialized). `cargo audit` still not installed
+  (`error: no such command: audit`).
+- **Next iteration must know:** next is **2.2** (socket setup in
+  `$XDG_RUNTIME_DIR/passmgr/`, dir 0700, socket 0600, stale-socket detection,
+  single-instance lock). Use `FrameDecoder` for reads and `encode` for writes;
+  do not add a request type that returns plaintext. `run.command` is an argv
+  vector (no shell); 2.6 must spawn it directly.
+
+
 ## 2026-11-02 — Tags and timestamps in JSON (TODO 1.2b)
 
 - TODO 1.2b: `list --json`, `show --json` entries now carry all six keys:
