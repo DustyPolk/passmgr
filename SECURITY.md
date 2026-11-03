@@ -11,17 +11,19 @@ TTY gate or the redactor).
 
 ## Current status
 
-Grant-based authorization is **not implemented yet** (TODO 3.1–3.9). Today the
-daemon's `run` request is authorized by the session token (TODO 2.5), and any
-process running as the same user can read the 0600 session file. Therefore,
-today:
+Grant-based authorization is implemented for `run` (TODO 3.1–3.6): every use
+needs a grant token that matches an active, in-scope grant in the vault, and
+the daemon records the use before it injects. The hash-chained audit log is
+still open (TODO 3.8–3.9), so no audit record is written today. Any process
+running as the same user can read the 0600 session file, so:
 
 - `passmgr run` is the agent-facing way to use a secret, and it prevents
   *accidental* exposure: the value never crosses the socket, and relayed child
   output is redacted before it leaves `pmd`.
 - `run` requires a human-created grant token in addition to the session
-  token. The session token authorizes only `ping`, `lock`, `status`, `revoke`
-  and the approval handshake; it can never inject a secret by itself. A
+  token. The session token authorizes only `ping`, `lock`, `challenge`,
+  `prove`, `grant_create` and `grant_revoke`; it can never inject a secret by
+  itself, and `grant_create` still requires the human-presence proof. A
   same-user process that can read the session file still needs a grant token
   file whose grant covers the credential and command.
 
@@ -71,12 +73,14 @@ inherits every limit below.
 - **No network.** passmgr makes no network calls and links no network-capable
   crate. MCP is stdio only.
 - **Grants, per `MCP.md`:** scoped, expiring, use-limited, revocable grants
-  that a human approves with the master password at a TTY, and a hash-chained
-  audit log that records every allowed and denied credential use without
-  values or tokens. Grants can already be listed and revoked; revocation
-  needs no password or TTY because it only removes access, and the daemon
-  persists it in the vault with the key it already holds. `run` already
-  requires a grant token whose grant covers the credential and command.
+  that a human approves with the master password at a TTY. `pm grant create`
+  mints the token in the human's CLI; the vault stores only its SHA-256, and
+  `run` requires a token whose grant covers the credential and command.
+  Grants can be listed and revoked; revocation needs no password or TTY
+  because it only removes access, and the daemon persists it in the vault
+  with the key it already holds. The hash-chained audit log that records
+  every allowed and denied use without values or tokens is designed in
+  `MCP.md` but still open (TODO 3.8–3.9); today no audit record is written.
 
 ## Known limits
 

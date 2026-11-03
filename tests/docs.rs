@@ -63,6 +63,33 @@ fn markdown_limit(markdown: &str, number: u8) -> Option<String> {
     Some(plain(&body.join("\n")))
 }
 
+/// Body of a `## ` section, normalized with [`plain`]. `None` when the
+/// heading is missing, so a renamed section fails its contract instead of
+/// turning it vacuous.
+fn markdown_section(markdown: &str, heading: &str) -> Option<String> {
+    let mut collecting = false;
+    let mut body = Vec::new();
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("## ") {
+            if collecting {
+                break;
+            }
+            if trimmed == heading {
+                collecting = true;
+                continue;
+            }
+        }
+        if collecting {
+            body.push(trimmed);
+        }
+    }
+    if body.is_empty() {
+        return None;
+    }
+    Some(plain(&body.join("\n")))
+}
+
 /// `markdown_limit` for `SECURITY.md`; missing section is a hard failure so
 /// deleting a limit cannot turn its contract into a vacuous pass.
 fn security_limit(number: u8) -> String {
@@ -181,6 +208,103 @@ fn security_documents_that_redaction_is_not_a_sandbox() {
         security_limit(3).contains("It is not a sandbox."),
         "SECURITY.md limit 3 must state that redaction is not a sandbox"
     );
+}
+
+/// TODO R.32: the "Current status" section described the pre-3.6 state, so a
+/// reviewer could treat `run` as session-token gated (the hole 3.6 closed)
+/// and expect an audit log that does not exist yet. Pin the implemented flow
+/// to the section that makes the claim, not to the whole document.
+#[test]
+fn security_current_status_matches_the_implemented_grant_flow() {
+    let status = markdown_section(SECURITY, "## Current status")
+        .expect("SECURITY.md must keep a Current status section");
+    assert!(
+        !status.contains("not implemented yet"),
+        "SECURITY.md Current status must not say grant authorization is unimplemented"
+    );
+    assert!(
+        !status.contains("authorized by the session token"),
+        "SECURITY.md Current status must not say run is authorized by the session token"
+    );
+    for request in [
+        "ping",
+        "lock",
+        "challenge",
+        "prove",
+        "grant_create",
+        "grant_revoke",
+    ] {
+        assert!(
+            status.contains(request),
+            "SECURITY.md Current status must list {request} as authorized by the session token"
+        );
+    }
+    assert!(
+        status.contains("requires a human-created grant token"),
+        "SECURITY.md Current status must say run needs a grant token"
+    );
+    assert!(
+        status.contains("TODO 3.8") && status.contains("no audit record is written today"),
+        "SECURITY.md Current status must say the audit log is still TODO 3.8"
+    );
+}
+
+/// TODO R.32: `DECISIONS.md` said the CLI could not create a grant after
+/// TODO 3.4d landed, which invites reimplementing the write path (or trusting
+/// the daemon with it). The decision must name the CLI as the writer.
+#[test]
+fn decisions_says_the_cli_creates_grants_and_the_daemon_does_not() {
+    let text = plain(DECISIONS);
+    assert!(
+        text.contains("pm grant create (TODO 3.4d) creates grants in the human's CLI"),
+        "DECISIONS.md must say the CLI creates grants"
+    );
+    assert!(
+        !text.contains("The CLI still cannot create a grant"),
+        "DECISIONS.md must not say the CLI cannot create a grant"
+    );
+}
+
+/// TODO R.32: `MCP.md` described a claim exchange in which the daemon hands
+/// the grant token over. It never has the token: the approving CLI stores
+/// only its SHA-256. An MCP implementation that follows the old sentence
+/// would call a request that cannot exist, so pin token ownership.
+#[test]
+fn mcp_says_the_daemon_never_holds_a_grant_token() {
+    let text = plain(MCP);
+    assert!(
+        text.contains("the daemon never holds a grant token"),
+        "MCP.md must say the daemon never holds a grant token"
+    );
+    assert!(
+        text.contains("sent to the daemon only as its SHA-256"),
+        "MCP.md must say only the token hash reaches the daemon"
+    );
+    assert!(
+        text.contains("request_claim never returns a token"),
+        "MCP.md must say request_claim cannot hand a token back"
+    );
+    assert!(
+        !text.contains("daemon hands the grant token over"),
+        "MCP.md must not say the daemon hands a grant token over"
+    );
+}
+
+/// TODO R.32: the grant token reader accepts 0400 as well as 0600 (and any
+/// mode without group/world bits), but the README and `MCP.md` promised a
+/// 0600 file, so an operator could think a stricter file is refused.
+#[test]
+fn docs_agree_on_the_accepted_grant_token_file_modes() {
+    for (name, text) in [("README.md", plain(README)), ("MCP.md", plain(MCP))] {
+        assert!(
+            text.contains("0600 or 0400"),
+            "{name} must say a grant token file may be 0600 or 0400"
+        );
+        assert!(
+            !text.contains("must be in a 0600 file"),
+            "{name} must not claim only a 0600 token file is accepted"
+        );
+    }
 }
 
 /// The session token is not an agent boundary: `run` needs a grant token too.

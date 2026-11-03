@@ -277,8 +277,8 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   `$XDG_RUNTIME_DIR/passmgr/session`. Loading requires a regular 0600 file
   owned by the user, opened `O_NOFOLLOW`, at most 512 bytes; anything else is
   an error, never repaired.
-- The session token alone authorizes `ping`, `lock`, `status`, `revoke` and
-  the human-presence handshake (`challenge`/`prove`/`grant_create`). It is
+- The session token alone authorizes `ping`, `lock` and the human-presence
+  handshake (`challenge`/`prove`/`grant_create`), plus `grant_revoke`. It is
   **not** a human/agent boundary and is never enough to use a secret.
   `run` requires a second credential: a grant token whose SHA-256 matches an
   active, in-scope, command-allowing grant in the vault (TODO 3.6). `pmd`
@@ -286,7 +286,8 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   child, so a crash cannot exceed `max_uses`, and any vault-write failure
   fails closed. A same-user process that can read the session file still
   cannot use a secret without also obtaining a grant token file.
-  `revoke` over the session token is an accepted DoS-at-worst trade-off.
+  `grant_revoke` over the session token is an accepted DoS-at-worst
+  trade-off.
 - `run` child policy (TODO 2.6c): argv only, never a shell string; stdin is
   `/dev/null`; the environment is built from scratch from `PATH`, `HOME`,
   `USER`, `LOGNAME`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `TERM` plus exactly one
@@ -407,8 +408,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   `blake2`/Argon2 tree) is the only dependency added by 3.2a. `hmac` moves to
   TODO 3.3, its first use; adding an unused crate now would hide that.
 - Grant persistence is done (TODO 3.2b): grants are stored in the v5 payload
-  and reachable through `Vault::grants`/`grant`/`grant_mut`/`add_grant`. The
-  CLI still cannot create a grant; that is the approval flow (TODO 3.3+).
+  and reachable through `Vault::grants`/`grant`/`grant_mut`/`add_grant`.
+  `pm grant create` (TODO 3.4d) creates grants in the human's CLI; `pmd`
+  still has no request type that writes one (see the write-path decision
+  below).
 - Agents get access only through grants stored in the encrypted vault: scope
   (refs, tags, optional field names), a command allowlist of canonical
   absolute paths, capabilities, `expires_at` (max 30 days), optional
@@ -604,8 +607,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - An out-of-scope ref answers exactly like a nonexistent one (no existence
   oracle). Agent-supplied text shown to a human is sanitized (control and
   bidi characters stripped) and labelled untrusted.
-- Grant tokens reach only the MCP server, via a one-time claim exchange, live
-  in memory, and never appear in tool output or the audit log.
+- Grant tokens are minted by the MCP server itself (the claim secret) and
+  sent to the daemon only as a SHA-256; the daemon never holds a token. They
+  live in the MCP server's memory, are zeroized, and never appear in tool
+  output or the audit log.
 - Audit: append-only `$XDG_STATE_HOME/passmgr/audit.jsonl` (fallback
   `~/.local/state`), 0600, one JSON object per line, hash-chained with `prev`
   = SHA-256 of the previous line. No secrets, no tokens; `pm audit verify`

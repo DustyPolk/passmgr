@@ -179,7 +179,8 @@ passmgr run --grant-file /run/user/1000/gh.token \
 
 `run` needs both the unlock session token and a grant token that covers the
 credential and command. The grant token is read from `--grant-file` or
-`PASSMGR_GRANT_FILE`, must be in a 0600 file, and never appears on the
+`PASSMGR_GRANT_FILE`, must be a regular file owned by you with no group or
+world permission bits (0600 or 0400 in practice), and never appears on the
 command line or in output. Without an active, in-scope grant, `run` exits 5
 without starting anything.
 

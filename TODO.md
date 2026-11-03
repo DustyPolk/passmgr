@@ -625,7 +625,7 @@ Rules that apply to every item:
       `NotFound`. A dead grant answers `Denied` for every ref, so its token is
       no longer an oracle either.
 
-- [ ] **R.32 Security and protocol docs still describe the pre-3.6 state.**
+- [x] **R.32 Security and protocol docs still describe the pre-3.6 state.**
       `SECURITY.md:14-16` says grant authorization is "not implemented yet"
       and that `run` is authorized by the session token, contradicting
       `:21-23` and the code; `:23` omits `grant_create` from the operations
@@ -650,6 +650,12 @@ Rules that apply to every item:
       session-token list contains `grant_create`, that `DECISIONS.md` says
       the CLI creates the grant, and that `MCP.md`'s token-ownership sentence
       matches the daemon-stores-only-the-hash contract.
+      Done: the four documents now describe the implemented flow. `MCP.md`
+      says the MCP server mints the token (the claim secret) and
+      `request_claim` can only confirm approval, never return a token. Also
+      corrected the same stale session-token list in `DECISIONS.md`
+      (`status`/`revoke` are not request types) and the 0600-only token-file
+      claim in `MCP.md`.
 
 - [ ] **R.33 TODO R.15b is stale: the property it guards is implemented and
       tested.**

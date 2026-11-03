@@ -1,3 +1,35 @@
+## 2026-11-03 — Align security and protocol docs with the implemented flow (TODO R.32)
+
+- `SECURITY.md` "Current status" now says grant authorization for `run` is
+  implemented (3.1–3.6), that the audit log is still open (TODO 3.8–3.9), and
+  lists the real session-token requests: `ping`, `lock`, `challenge`, `prove`,
+  `grant_create`, `grant_revoke`. The stale `status`/`revoke` names are gone
+  from `SECURITY.md` and `DECISIONS.md` (`status` never existed; `revoke` is
+  `grant_revoke`). The grants bullet no longer presents the audit log as
+  current.
+- `DECISIONS.md` now says `pm grant create` (TODO 3.4d) creates grants in the
+  human's CLI and `pmd` still has no write request, replacing "The CLI still
+  cannot create a grant".
+- `MCP.md`: the claim bullet said the daemon hands the grant token over, but
+  the daemon never sees a token. It now says the MCP server mints the token
+  (the former claim secret), sends only its SHA-256 exactly like
+  `pm grant create`, and `request_claim` can only confirm approval and return
+  metadata. `DECISIONS.md`'s token-custody line matches.
+- Token-file modes: README and `MCP.md` now say "no group or world permission
+  bits (0600 or 0400 in practice)", matching `src/grant/file.rs`
+  (`mode & 0o077 != 0` is refused, owner-only bits are free).
+- Tests: `tests/docs.rs` gains a `markdown_section` helper and four contracts —
+  the "Current status" section has no "not implemented yet"/session-token-only
+  claim, names each session-token request and TODO 3.8; `DECISIONS.md` names
+  the CLI as grant writer; `MCP.md` says the daemon never holds a token and
+  `request_claim` never returns one; README and `MCP.md` agree on 0600/0400.
+  Each fails on the previous text.
+- Gate: `cargo fmt --check`, clippy `-D warnings`, full `cargo test` pass
+  (`cargo audit` not installed, skipped).
+- **Next iteration must know:** TODO 4.8 still calls the flow a
+  "claim-secret exchange" and its "token is claimed once" test wording should
+  be read as "the pending request/claim is consumed once, and no token is
+  returned". Next unchecked item is R.33 (stale R.15b checklist entry).
 ## 2026-11-03 — Close the grant-token existence oracle (TODO R.31)
 
 - `src/daemon/run.rs::record_use` now decides everything that does not need

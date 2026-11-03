@@ -275,15 +275,20 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   or `yes`; anything else writes nothing. Allowing one still requires
   `--allow-interpreter`. The name list is best-effort: a grant binds only
   `argv[0]`, so allowing any program is a decision to trust what it can run.
-- Claiming a token: when the MCP server creates a request, it also makes a
-  random 32-byte claim secret and sends only its hash. After approval,
-  `request_access`/`access_status` call `request_claim` with the secret. The
-  daemon hands the grant token over **once** and forgets it. The MCP server
-  keeps the token in memory only (zeroized on drop). The token never appears
-  in tool output.
+- Minting a token: the daemon never holds a grant token, so it cannot hand
+  one over. The MCP server mints it itself when it creates a request: a
+  random 32-byte secret that *is* the future grant token, sent to the daemon
+  only as its SHA-256 (`token_hash`, exactly like `pm grant create`). The
+  server keeps the raw token in memory only (zeroized on drop). The human
+  approves that exact hash with `pm grant approve <id>`; afterwards
+  `request_access`/`access_status` call `request_claim` with the raw token,
+  and the daemon answers whether the matching grant exists and is active
+  (plus metadata) by comparing hashes. `request_claim` never returns a token,
+  and the token never appears in tool output.
 - The MCP server can also start with a pre-made grant. Pass
-  `PASSMGR_GRANT_FILE` pointing at a 0600 file that holds the token. Refuse
-  the file if it is group- or world-readable.
+  `PASSMGR_GRANT_FILE` pointing at a regular file owned by you with no group
+  or world permission bits (0600 or 0400 in practice); a group- or
+  world-readable file is refused.
 
 ## Server `instructions` (shown to the model)
 
