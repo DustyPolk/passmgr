@@ -236,12 +236,28 @@ pub(crate) fn command_grant_create(
 
     out.write_token(&token)?;
     out.commit();
-    eprintln!(
-        "Grant '{}' created; token written to '{}'.",
-        request.label(),
-        options.out.display()
-    );
+    eprintln!("{}", grant_created_message(request.label(), &options.out));
     Ok(())
+}
+
+/// The success line for a written grant.
+fn grant_created_message(label: &str, out: &Path) -> String {
+    format!(
+        "Grant '{}' created; token written to '{}'.",
+        escape_hidden(label),
+        display_path(out)
+    )
+}
+
+/// Render an argv-supplied path for a human.
+///
+/// `--out` comes from argv and may have been suggested by an agent, so a raw
+/// escape sequence in it would act on the human's terminal (an OSC 52 payload
+/// writes the clipboard). [`escape_hidden`] writes every control character as
+/// a visible `\u{..}` escape. A path that is not UTF-8 is shown with lossy
+/// replacement, exactly as `Path::display` would.
+fn display_path(path: &Path) -> String {
+    escape_hidden(&path.to_string_lossy())
 }
 
 /// Show the human the request they are about to approve, on stderr.
@@ -665,7 +681,7 @@ impl TokenFile {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
                     Error::InvalidInput(format!(
                         "refusing to overwrite the existing token file '{}'",
-                        path.display()
+                        display_path(path)
                     ))
                 } else {
                     Error::Io(error)
@@ -731,6 +747,35 @@ mod tests {
         ] {
             assert!(parse_expiry(text).is_err(), "{text:?}");
         }
+    }
+
+    /// `--out` is argv and may be agent-suggested, so a control character in
+    /// it must never be echoed raw: neither the success line nor the
+    /// existing-file error may write an escape sequence to the terminal.
+    #[cfg(unix)]
+    #[test]
+    fn a_token_path_with_hidden_characters_is_rendered_as_text() {
+        let path = Path::new("/tmp/out\u{1b}]52;c;Y2FuYXJ5\u{7}");
+        let created = grant_created_message("deploy prod", path);
+        assert!(created.contains("token written to"), "{created}");
+        assert!(
+            created.contains("/tmp/out\\u{1b}]52;c;Y2FuYXJ5\\u{7}'"),
+            "{created}"
+        );
+        assert!(!created.contains('\u{1b}'), "{created}");
+        assert!(!created.contains('\u{7}'), "{created}");
+
+        let directory = tempfile::tempdir().unwrap();
+        let existing = directory.path().join("tok\u{1b}[2K\r");
+        std::fs::write(&existing, b"keep me").unwrap();
+        let error = match TokenFile::create(&existing) {
+            Ok(_) => panic!("an existing token file must be refused"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("tok\\u{1b}[2K\\r"), "{error}");
+        assert!(!error.contains('\u{1b}'), "{error}");
+        assert!(!error.contains('\r'), "{error}");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"keep me");
     }
 
     #[cfg(unix)]

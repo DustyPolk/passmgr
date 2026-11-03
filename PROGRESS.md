@@ -1,3 +1,33 @@
+## 2026-11-03 — Escape argv-supplied `--out` paths before echoing them (TODO R.29)
+
+- `src/cli/grant.rs`: new private `display_path(&Path) -> String` renders a path
+  through `grant::escape_hidden` (after `to_string_lossy`, so a non-UTF-8 path
+  still renders) instead of `Path::display`. Both places that echo `--out` use
+  it: the success line, now factored into `grant_created_message(label, out)`
+  so a unit test can reach it, and the existing-token-file error inside
+  `TokenFile::create`. The label is escaped the same way (its validation
+  already refuses hidden characters, so this only guards a future loosening).
+- Chose a pure formatting helper over a PTY test because the escaping problem
+  is in string construction, not terminal state; the path is the only argv
+  value echoed outside the approval summary, which already escaped its text.
+- Test: `a_token_path_with_hidden_characters_is_rendered_as_text` builds an
+  OSC 52 payload (`\u{1b}]52;c;...`) and a BEL on the success line and an
+  ESC/CR file name for the existing-file error, asserting the `\u{..}` text is
+  present, no raw ESC/BEL/CR is, and the existing file is untouched. It fails
+  (raw escape in the message) when `display_path` is swapped back to
+  `path.display()`.
+- Docs: `DECISIONS.md` says argv-supplied paths are escaped wherever they are
+  echoed; TODO R.29 is checked off with a Done note.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  the full `cargo test` pass. `cargo audit` is not installed; skipped as
+  instructed.
+- **Next iteration must know:** R.29 was the last Phase R item, so the next
+  `- [ ]` item is TODO 3.6 (daemon authorizes `run` by grant). `src/cli/
+  grant.rs` is at 971 lines — the next addition there should move the
+  summary/rendering helpers into `src/cli/grant/summary.rs` first. Any other
+  argv path echoed to a human (e.g. future `--file`/`--out` flags) needs the
+  same `display_path` treatment; there is no shared module for it yet.
+
 ## 2026-11-03 — `revoke --all` touches only active grants (TODO R.28)
 
 - One predicate now decides "active": `GrantStatus` (`Active`, `Expired`,

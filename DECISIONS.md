@@ -559,6 +559,9 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   before the password. Display text uses `grant::escape_hidden`, which
   escapes only hidden characters so `Bob's token` keeps its apostrophe; error
   messages keep the quoted variant that also escapes quotes and backslashes.
+  Paths taken from argv (`--out`) go through the same escape before they are
+  echoed, on success and in the existing-file error, because an agent may
+  have suggested the path (TODO R.29).
 - `pm grant create` mints a `GrantToken` of 32 random bytes, held in
   `Zeroizing`, with a redacting `Debug`. Its lowercase hex is written only to
   `--out` (opened `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, then `fsync`); an

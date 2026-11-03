@@ -519,7 +519,7 @@ Rules that apply to every item:
       and never counted. The unit test in `src/daemon/tests.rs` fails against
       the old `!is_revoked()` filter (it would report 3 and revoke all 3).
 
-- [ ] **R.29 `--out` paths are echoed with raw control characters.**
+- [x] **R.29 `--out` paths are echoed with raw control characters.**
       The success line at `src/cli/grant.rs:226` interpolates
       `options.out.display()`, and the existing-file error at
       `src/cli/grant.rs:576` interpolates `path.display()`; unlike command
@@ -535,6 +535,14 @@ Rules that apply to every item:
       in both messages.
       Test: a formatting unit test, or a PTY existing-file case, asserts the
       message contains `\u{1b}` as text and no raw ESC/OSC sequence.
+      Done: new `display_path` (`src/cli/grant.rs`) escapes a path through
+      `escape_hidden` (`to_string_lossy` first, so a non-UTF-8 path still
+      renders), and the success line moved into `grant_created_message` so it
+      is unit-testable. Both messages use it; the label is escaped the same
+      way (validation already refuses hidden characters, so this is
+      defense-in-depth). The unit test covers an OSC 52 payload on the success
+      line and an ESC/CR file name on the existing-file error, and fails
+      against the plain `display()`.
 
 ## Phase 3 — grants and audit log
 
