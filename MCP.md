@@ -144,15 +144,25 @@ Rules, enforced by the **daemon** (the MCP server is untrusted plumbing):
 - The child env is built from scratch: a fixed allowlist from the daemon env
   (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `TERM`),
   then `plain_env`, then the secrets. Never inherit the agent's full env.
-- Resolve `command[0]` through the child's `PATH` to a canonical absolute
-  path, then check it against the grant's command allowlist. The daemon
-  requires an absolute `cwd` and an absolute `command[0]` and never resolves
-  either itself; the MCP server does the resolving, as `passmgr run` does.
-- Every injected secret is redacted from stdout and stderr: the exact bytes,
-  plus best-effort encodings (lower/upper hex, standard and URL-safe base64
-  of the value, percent-encoding). Redaction is streaming, with an overlap
-  window so a secret split across reads is still caught. Replace each match
-  with `[REDACTED:<VAR>]`.
+- `command[0]` is resolved to a canonical absolute path and checked against
+  the grant's command allowlist. The MCP server resolves a bare or relative
+  name through the agent's `PATH` and `cwd` (as `passmgr run` does) and sends
+  an absolute path, but that path is **untrusted input**: before spawning, the
+  daemon canonicalizes it itself (resolving symlinks), requires the result to
+  be absolute, NUL-free and within the protocol's path cap, checks that
+  canonical path against the allowlist, and execs the canonical path. A path
+  that cannot be canonicalized is refused. The daemon never resolves a
+  program through its own `PATH` (that belongs to the shell that ran
+  `unlock`), and `cwd` must be absolute.
+- Every injected secret is redacted from stdout and stderr as an **exact,
+  contiguous byte sequence**. Redaction is streaming, with an overlap window
+  so a secret split across reads is still caught. Replace each match with
+  `[REDACTED:<VAR>]`.
+- Encoded or transformed copies (lower/upper hex, standard and URL-safe
+  base64, percent-encoding, case changes) are **not redacted yet**; TODO 4.6
+  adds them. Until then an allowlisted encoder can exfiltrate a value, which
+  is why the command allowlist and the interpreter confirmation matter. Do
+  not describe or test encoding redaction as if it worked today.
 - Secrets shorter than 8 bytes are refused for agent runs. Redaction cannot
   protect them, and they would mangle output.
 - Temp files for `files` live in a 0700 directory under the runtime dir. They
@@ -230,14 +240,19 @@ outcome. It **never** holds a secret or a token. Records are hash-chained
 ## Tests that must exist (keep them green forever)
 
 1. Full-session byte capture: drive `pm mcp serve` through both eras with a
-   canary secret. The secret, its hex, and its base64 never appear in any
-   stdout byte, any stderr byte, the audit log or the socket traffic.
+   canary secret. The secret never appears as exact bytes in any stdout byte,
+   any stderr byte, the audit log or the socket traffic. From TODO 4.6 the
+   same capture must also assert that its hex and base64 do not appear.
 2. Every stdout line parses as a JSON-RPC message.
-3. Red-team suite (one test each): `printenv VAR` is redacted; `base64` of
-   the value is redacted; a shell not in the allowlist is refused; an
-   out-of-scope ref gets the same error as a nonexistent one; an expired,
-   revoked or used-up grant is refused; denylisted env names are refused; a
+3. Red-team suite (one test each): `printenv VAR` is redacted; a shell not in
+   the allowlist is refused; an out-of-scope ref gets the same error as a
+   nonexistent one; an expired, revoked or used-up grant is refused;
+   denylisted env names are refused; a
    `files` target that is a pre-placed symlink is not followed; huge output
    is truncated, not buffered without bound; a forged `request_claim`
    secret fails; a 1 MiB+ line does not crash the server; a request before
    `initialize` (legacy) is rejected.
+
+TODO 4.6 extends tests 1 and 3 with encoded copies (hex, base64,
+percent-encoding). Until it lands, no document or test may claim they are
+redacted.

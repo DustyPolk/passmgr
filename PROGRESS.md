@@ -1,3 +1,33 @@
+## 2026-11-02 — Make MCP.md honest about redaction and command resolution (TODO R.10)
+
+- Docs only: `MCP.md` now says redaction replaces an **exact, contiguous byte
+  sequence** and that encoded/transformed copies (hex, base64, percent, case)
+  are not redacted until TODO 4.6. "Tests that must exist" 1 and 3 no longer
+  require the impossible: test 1 asserts exact bytes now and adds hex/base64
+  from 4.6; the `base64` red-team bullet moved to that note.
+- `MCP.md`'s `run_with_credentials` rules now say the MCP server only does the
+  convenience resolution and that the **daemon** canonicalizes `command[0]`
+  itself (symlinks), keeps it absolute, checks the canonical path against the
+  grant allowlist and execs that path; an uncanonicalizable path is refused.
+  This removes the contradiction where a "daemon-enforced" allowlist was
+  checked against a path the untrusted MCP server chose.
+- `DECISIONS.md`: recorded that daemon-side canonicalization/allowlist rule
+  (marked planned for 3.6/4.5, since `src/protocol/mod.rs` today only requires
+  an absolute `command[0]`) and extended the exact-bytes redaction decision to
+  MCP.md. No behavior or dependency changed.
+- Tests: `tests/docs.rs` gains `mcp_documents_the_exact_bytes_redaction_limit`
+  and `mcp_says_the_daemon_checks_the_canonical_command_path`, plus an `MCP`
+  include. Both fail against the previous MCP.md (verified with `git stash`),
+  so the drift cannot silently return.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` pass. `cargo audit` is not
+  installed.
+- **Next iteration must know:** R.10 is the last Phase R item; TODO 3.2 (grant
+  model) is next. When 3.6/4.5 implement command authorization, follow the new
+  MCP.md wording (canonicalize in `pmd`, check the canonical path) and update
+  the DECISIONS line from "planned" to current. When 4.6 lands, restore the
+  hex/base64 assertions in MCP.md test 1 and the red-team list, and update the
+  two contract tests together with README/`--help`/SECURITY.md.
+
 ## 2026-11-02 — Prompt before taking the vault write lock (TODO R.9)
 
 - `src/vault.rs`: new `Vault::empty` and `Vault::lock_for_update`. The latter

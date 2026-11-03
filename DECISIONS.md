@@ -32,8 +32,10 @@ code does not implement yet.
 - Child-output redaction replaces only an **exact, contiguous occurrence** of
   the injected value. Encoded or transformed copies (base64, hex,
   percent-encoding, case changes) are not redacted until TODO 4.6; README,
-  `--help` and `SECURITY.md` must say so, and `tests/run.rs`
+  `--help`, `SECURITY.md` and `MCP.md` must say so, and `tests/run.rs`
   (`redaction_replaces_only_the_exact_secret_not_its_encodings`) proves it.
+  `tests/docs.rs` pins the same limit in MCP.md and forbids claiming encoded
+  redaction before 4.6.
 
 ## Crypto
 
@@ -321,6 +323,14 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Creating or approving a grant requires the master password at a TTY, proved
   with `HMAC-SHA256(vault_key, "passmgr-approve-v1" || nonce || digest)` using
   a single-use 60 s nonce, compared in constant time. Revoking needs no proof.
+- The daemon canonicalizes `command[0]` itself (symlinks resolved), requires
+  the result to stay absolute, and checks that canonical path against the
+  grant's command allowlist immediately before spawning; a path it cannot
+  canonicalize is refused. The MCP server resolves a bare/relative name for
+  the agent's convenience, but the result is untrusted input: any same-user
+  process can call the daemon, so only a check inside `pmd` counts. Planned
+  with TODO 3.6/4.5; `src/protocol/mod.rs` today only requires an absolute
+  path.
 - Interpreters and shells in a command allowlist are refused unless the human
   passes `--allow-interpreter`.
 - `pm mcp serve` is a hand-written synchronous JSON-RPC 2.0 stdio server (no

@@ -108,7 +108,7 @@ come before Phase 3.
       `Vault::lock_for_update`, which takes the lock and refuses with
       `VaultChanged` if the vault bytes changed meanwhile. The duplicate /
       not-found checks stay before the prompt, so their tests are unchanged.
-- [ ] **R.10 MCP.md still promises encoded-secret redaction and contradicts
+- [x] **R.10 MCP.md still promises encoded-secret redaction and contradicts
       itself on who resolves `command[0]`.**
       `MCP.md:151-153` says redaction covers "best-effort encodings (lower/upper
       hex, standard and URL-safe base64 … percent-encoding)"; the daemon
@@ -123,6 +123,13 @@ come before Phase 3.
       encoding redaction as 4.6), record in DECISIONS.md that the daemon
       canonicalizes and checks `command[0]` itself, and add the MCP.md
       contract test.
+      Done: MCP.md now states the exact-contiguous-bytes limit, defers
+      encodings to 4.6 (including in "Tests that must exist" 1 and 3), and
+      says the daemon canonicalizes `command[0]` and checks the canonical
+      path itself while the MCP server's resolution is untrusted convenience.
+      DECISIONS.md records that rule as planned for 3.6/4.5 (the protocol
+      today only requires an absolute path). `tests/docs.rs` gains two MCP.md
+      contracts; both fail on the old text.
 
 ## Phase 3 — grants and audit log
 

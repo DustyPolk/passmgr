@@ -6,6 +6,7 @@
 
 const SECURITY: &str = include_str!("../SECURITY.md");
 const README: &str = include_str!("../README.md");
+const MCP: &str = include_str!("../MCP.md");
 
 /// Collapse Markdown emphasis and line wrapping so a sentence can be matched
 /// regardless of how it is formatted in the source.
@@ -207,4 +208,44 @@ fn docs_agree_that_redaction_does_not_follow_encodings() {
             "{name} must not claim that common encodings are redacted"
         );
     }
+}
+
+/// `MCP.md` promised encoded-secret redaction that the daemon does not do
+/// (TODO R.10). It must state the exact-bytes limit that ships today and defer
+/// encodings to TODO 4.6, or the MCP contract lies about a security property.
+#[test]
+fn mcp_documents_the_exact_bytes_redaction_limit() {
+    let text = plain(MCP).to_lowercase();
+    assert!(
+        text.contains("exact, contiguous byte sequence"),
+        "MCP.md must say redaction covers only exact contiguous secret bytes"
+    );
+    assert!(
+        text.contains("not redacted yet") && text.contains("todo 4.6"),
+        "MCP.md must defer encoded-copy redaction to TODO 4.6"
+    );
+    assert!(
+        !text.contains("best-effort encodings"),
+        "MCP.md must not promise encoded redaction before TODO 4.6"
+    );
+}
+
+/// The allowlist check must happen in `pmd`, because the MCP server is
+/// untrusted plumbing. `MCP.md` once said the rules were "enforced by the
+/// daemon" and then left `command[0]` resolution to the MCP server (TODO R.10).
+#[test]
+fn mcp_says_the_daemon_checks_the_canonical_command_path() {
+    let text = plain(MCP);
+    assert!(
+        text.contains("the daemon canonicalizes it itself"),
+        "MCP.md must say the daemon canonicalizes command[0] itself"
+    );
+    assert!(
+        text.contains("checks that canonical path against the allowlist"),
+        "MCP.md must say the daemon checks the canonical path against the allowlist"
+    );
+    assert!(
+        !text.contains("the MCP server does the resolving"),
+        "MCP.md must not leave command[0] resolution to the untrusted MCP server"
+    );
 }
