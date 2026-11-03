@@ -21,6 +21,10 @@ pub const EXIT_AUTH_FAILED: u8 = 4;
 pub const EXIT_REFUSED: u8 = 5;
 /// The vault file is malformed, truncated, or in an unsupported format.
 pub const EXIT_MALFORMED_VAULT: u8 = 6;
+/// `run` could not relay its own output because the caller closed the pipe.
+/// 141 is the shell's SIGPIPE status (128 + 13): the child's status can no
+/// longer reach the caller, so reporting success would hide a failure.
+pub const EXIT_OUTPUT_CLOSED: u8 = 141;
 
 /// Errors returned by the library.
 #[derive(Debug)]

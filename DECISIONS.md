@@ -201,7 +201,11 @@ code does not implement yet.
 - Unknown options, extra arguments and misplaced flags are usage errors
   (exit 2). `-h`/`--help` and `-V`/`--version` are accepted globally and as
   commands.
-- A broken stdout pipe (`BrokenPipe` while writing command data) exits 0.
+- A broken stdout pipe (`BrokenPipe` while writing command data) exits 0,
+  because the reader asked for less output and the command itself succeeded.
+  `run` is the exception: its status is the child's result, so a closed pipe
+  makes it cancel the run and exit 141 (`EXIT_OUTPUT_CLOSED`) rather than
+  claim a success the caller can no longer observe (TODO R.47).
 - `generate` prints a fresh value on stdout. It exposes no stored secret, but
   whether agent mode should refuse it is still open (see "Open questions").
 - CLI code lives in `src/cli/`: `mod.rs` (entry, dispatch, output, tests),
@@ -222,6 +226,9 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - 4 wrong master password / failed vault authentication.
 - 5 refused (non-TTY or agent reveal, `unlock` in agent context).
 - 6 malformed, truncated or unsupported vault.
+- 141 `run` could not relay its own output because the caller closed the
+  pipe; the run is cancelled. This is the shell's SIGPIPE status (128 + 13)
+  and exists only so a pipeline cannot hide a failed command.
 - `Error::Crypto` stays 1, not 6: it also covers RNG and cipher-setup
   failures, which are not a malformed file. Read-time corruption is
   `MalformedVault` (6) or `AuthenticationFailed` (4).

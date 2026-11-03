@@ -1036,7 +1036,7 @@ Rules that apply to every item:
       post-creation `revoked_at`/`last_used`); crypto/`decode` accept
       `MAX_PAYLOAD_BYTES` = 10 MiB + 16 KiB (16 bytes x 1,024 grants).
 
-- [ ] **R.47 `passmgr run` exits 0 when its stdout pipe closes, hiding the
+- [x] **R.47 `passmgr run` exits 0 when its stdout pipe closes, hiding the
       child's status.**
       `src/cli/mod.rs:46-48` maps any `Error::Io(BrokenPipe)` to `EXIT_OK`;
       the stdout relay in `src/cli/run.rs:122-127` returns exactly that. Help
@@ -1050,6 +1050,9 @@ Rules that apply to every item:
       child's status if it is known) and cancels the run.
       Test: CLI e2e with a child that prints, sleeps and exits 7 while the
       reader is dropped: status is non-zero, never 0.
+      Done: `run` exits 141 (`EXIT_OUTPUT_CLOSED`) and the daemon cancels
+      the child; the test proves both. The child's status is unknowable once
+      relaying failed, so 141 rather than a guess.
 
 - [ ] **R.48 Service names and usernames accept bidi and zero-width
       characters and are printed raw.**

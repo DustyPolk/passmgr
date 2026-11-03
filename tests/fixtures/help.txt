@@ -70,6 +70,11 @@ Commands:
                              percent-encoding, case changes) are not
                              replaced. passmgr exits with the child's status,
                              or 128+N when the child was killed by signal N.
+                             If this process's output pipe closes (for example
+                             'run ... | head -1'), the run is cancelled and
+                             passmgr exits 141 instead: it cannot relay the
+                             child's status, so reporting success would hide
+                             a failure.
                              Needs a running unlock daemon and a grant token,
                              read from FILE or PASSMGR_GRANT_FILE (a 0600 file
                              written by 'grant create --out'). The token never
@@ -217,7 +222,8 @@ Notes:
   - Exit codes are stable: 0 success, 1 runtime failure, 2 usage or invalid
     input, 3 not found, 4 wrong master password, 5 refused (for example
     'get --reveal' without a terminal, in an agent context, or with --agent),
-    6 malformed, truncated or unsupported vault file.
+    6 malformed, truncated or unsupported vault file, and 141 when 'run'
+    cannot relay its output because its pipe was closed.
   - 'unlock' starts a per-user background daemon that keeps the vault key in
     memory, so later commands do not prompt again. The daemon listens on a
     socket inside $XDG_RUNTIME_DIR/passmgr that only the owning user can

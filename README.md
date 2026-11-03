@@ -204,7 +204,10 @@ occurrence of the secret replaced by `[REDACTED]`; encoded or transformed
 copies (base64, hex, percent-encoding, case changes) are not replaced —
 redaction is best-effort, not a sandbox (see `SECURITY.md`, limit 3).
 `passmgr` exits with the child's status, or 128+N when the child was killed by
-signal N. The vault is always the one the running daemon was unlocked with, so
+signal N. If the reader closes passmgr's output pipe (for example
+`passmgr run ... | head -1`), passmgr cancels the run and exits 141: it can no
+longer relay the child's status, so reporting success would hide a failure.
+The vault is always the one the running daemon was unlocked with, so
 `run` refuses `--db` and `PASSMGR_DB` with exit code 2 rather than inject from
 a different vault. Loader and shell-hook
 names (`PATH`, `LD_*`, `BASH_ENV`, ...) are refused with exit code 5. The
@@ -550,6 +553,7 @@ These codes are stable: scripts and agents may rely on them.
 | 4 | Authentication failed (wrong master password) |
 | 5 | Refused (plaintext reveal without a terminal, in an agent context, or with `--agent`) |
 | 6 | Malformed, truncated, or unsupported vault file |
+| 141 | `run` could not relay its output because the pipe was closed; the run was cancelled |
 
 ## License
 

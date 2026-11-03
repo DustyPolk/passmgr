@@ -1,3 +1,34 @@
+## 2026-11-03 — `run` reports a closed output pipe instead of success (TODO R.47)
+
+- `src/cli/run.rs`: the relay callback now records a `BrokenPipe` in a
+  `Cell<bool>` (`relay()`) instead of letting it fall through to the generic
+  `main` mapping. On a closed stdout/stderr pipe, `run` writes one diagnostic
+  to stderr and returns `EXIT_OUTPUT_CLOSED` (141). Only the relayed-output
+  path uses the flag; a socket `BrokenPipe` keeps the old mapping.
+- `src/error.rs`: new `EXIT_OUTPUT_CLOSED: u8 = 141` — the shell's SIGPIPE
+  status (128 + 13). Why 141 and not the child's status: once relaying fails,
+  the child's status is unknowable, and 0 would tell a `pipefail` pipeline
+  that a possibly failed command succeeded. Dropping the connection makes the
+  daemon kill the child (R.37), so the run is cancelled too.
+- Docs: `src/cli/help.rs` run section and exit-code list, regenerated
+  `tests/fixtures/help.txt` from the binary, `README.md` run text and exit
+  table, `DECISIONS.md` (broken-pipe rule + exit-code contract).
+- Test: `a_closed_output_pipe_cancels_the_run_and_exits_nonzero` in
+  `tests/run.rs`. A real `passmgr run` gets bytes until the redactor emits,
+  the test drops its end of the pipe, and the child (which waits on a flag
+  file) prints again. Asserts 141, the stderr explanation, no canary, and —
+  by polling `kill(pid, 0)` — that the daemon killed the child. Proved it
+  fails on the old code (`ExitStatus(0)`), passes with it.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` pass (audit not installed).
+- **Next iteration must know:** the redactor always holds back
+  `secret.len() - 1` bytes (`src/redact.rs`), *independent of content*, as a
+  timing-oracle defense. Any test that waits for relayed output before the
+  child exits must pad the first write past that window (the new test prints
+  a second padding line), or it deadlocks. Also: `run` deliberately does not
+  pass through the child's exit code when the caller's pipe is gone.
+  `tests/run.rs` is now 972 lines: split it before adding more tests.
+
 ## 2026-11-03 — Keep room for grant growth above the payload cap (TODO R.46)
 
 - `src/store/payload.rs`: `byte_len` now returns `PayloadSize { encoded,

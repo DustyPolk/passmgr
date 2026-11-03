@@ -8,9 +8,11 @@
 use passmgr::Error;
 
 #[cfg(unix)]
+use std::cell::Cell;
+#[cfg(unix)]
 use std::ffi::OsStr;
 #[cfg(unix)]
-use std::io::Write;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
@@ -20,6 +22,8 @@ use std::process::ExitCode;
 
 #[cfg(unix)]
 use passmgr::client::{self, RunOutcome};
+#[cfg(unix)]
+use passmgr::error::EXIT_OUTPUT_CLOSED;
 #[cfg(unix)]
 use passmgr::protocol::{ResponseError, RunExit, RunFrame, RunRequest};
 #[cfg(unix)]
@@ -119,22 +123,32 @@ pub(crate) fn command_run(options: super::RunOptions) -> Result<ExitCode, Error>
     let stderr = std::io::stderr();
     let mut out = stdout.lock();
     let mut err = stderr.lock();
-    let outcome = client::run(&paths, &token, &request, |frame| match frame {
-        RunFrame::Stdout(bytes) => {
-            out.write_all(bytes)?;
-            out.flush()?;
-            Ok(())
-        }
-        RunFrame::Stderr(bytes) => {
-            err.write_all(bytes)?;
-            err.flush()?;
-            Ok(())
-        }
+    let output_closed = Cell::new(false);
+    let outcome = match client::run(&paths, &token, &request, |frame| match frame {
+        RunFrame::Stdout(bytes) => relay(&mut out, bytes, &output_closed),
+        RunFrame::Stderr(bytes) => relay(&mut err, bytes, &output_closed),
         // `client::run` returns terminal frames instead of relaying them.
         other => Err(Error::Daemon(format!(
             "unexpected frame in a run stream: {other:?}"
         ))),
-    })?;
+    }) {
+        Ok(outcome) => outcome,
+        // The caller stopped reading (a closed pipe, `head -1`, an agent host
+        // that dropped its reader). Nothing relaying the child's output is
+        // left, so even a successful status could not be trusted to describe
+        // what the caller saw: cancel the run (dropping the connection makes
+        // the daemon kill the child) and exit 141 instead of letting the
+        // generic BrokenPipe mapping report success (TODO R.47).
+        Err(_) if output_closed.get() => {
+            // Best effort: the caller may have closed stderr too.
+            let _ = writeln!(
+                err,
+                "passmgr: output pipe closed; cancelled the run (exit {EXIT_OUTPUT_CLOSED})"
+            );
+            return Ok(ExitCode::from(EXIT_OUTPUT_CLOSED));
+        }
+        Err(error) => return Err(error),
+    };
     // Release the locks before returning to the dispatch loop.
     drop(out);
     drop(err);
@@ -232,6 +246,22 @@ fn status_code(exit: RunExit) -> u8 {
         RunExit::Code(code) => code,
         RunExit::Signal(signal) => 128u8.saturating_add(signal),
     }
+}
+
+/// Relay one output frame and flush it.
+///
+/// A closed pipe is only remembered in `closed`: it is the caller's own output
+/// stream going away, not a daemon failure. Only the relayed-output path may
+/// turn it into exit 141; a `BrokenPipe` from the socket still takes the
+/// generic mapping (TODO R.47).
+fn relay(sink: &mut impl Write, bytes: &[u8], closed: &Cell<bool>) -> Result<(), Error> {
+    if let Err(error) = sink.write_all(bytes).and_then(|()| sink.flush()) {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            closed.set(true);
+        }
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 /// Map a terminal daemon error to a stable error and exit code.
