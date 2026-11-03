@@ -1,3 +1,31 @@
+## 2026-11-03 — Exec the canonical authorized program, not the request path (TODO R.34)
+
+- `src/runner.rs` `execute` now takes `program: &Path` separately from
+  `args: &[String]`, runs `Command::new(program)` and lets it become
+  `argv[0]`; the old `argv[0]`-is-the-program convention is gone from the
+  API. `src/daemon/run.rs` passes the canonical path it checked, so a symlink
+  swapped between the allowlist check and the spawn cannot redirect the exec,
+  and a multi-call binary cannot be steered by a caller-chosen link name.
+  `src/cli/run.rs::absolute` still sends the lexically absolute path; the
+  single resolution happens in the daemon.
+- Tests (`tests/daemon_run.rs`): (a) the lock-held swap from the item — the
+  test flocks `<vault>.lock`, waits for the daemon's unconditional `chmod` to
+  change the lock file's ctime (the daemon is non-dumpable, so `/proc/pid/fd`
+  is not readable), then swaps the link; no loot file, `Exit(Code(0))` from
+  `/bin/true`; (b) `sh`-link with `-c 'printf %s "$0"'` prints the canonical
+  path. Both fail with the daemon mutated back to `request.command[0]`.
+- Decisions: `#[allow(clippy::too_many_arguments)]` on `execute` — the inputs
+  are orthogonal spawn parameters, and grouping them would obscure the
+  `program`/`args` split this fix relies on. Recorded in DECISIONS.md with
+  the multi-call rationale.
+- Gate: fmt, clippy, full test suite pass.
+- **Next iteration must know:** the exec still re-opens the path, so replacing
+  the target *file* (not the link) in the canonicalize→exec window, or a
+  writable-directory race, is not closed. The item's "consider" (open once,
+  `fexecve`/`O_PATH`) is the follow-up; the daemon currently also relies on
+  `Command::new` doing PATH lookup only when the path has no `/`, which the
+  protocol rules out. Next unchecked item is R.35 (allowlist/scope proof).
+
 ## 2026-11-03 — Retire the stale R.15b block and prove A-then-B end to end (TODO R.33)
 
 - `TODO.md` R.15b is now `[x]` (was `[!]`, "blocked on 3.4/4.9", both long

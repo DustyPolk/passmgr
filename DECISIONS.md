@@ -541,8 +541,13 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   never writes; the CLI in 3.4d owns the vault write.
 - The daemon canonicalizes `command[0]` itself (symlinks resolved), requires
   the result to stay absolute, and checks that canonical path against the
-  grant's command allowlist immediately before spawning; a path it cannot
-  canonicalize is refused. The MCP server resolves a bare/relative name for
+  grant's command allowlist. It then **spawns exactly that canonical path**,
+  which also becomes the child's `argv[0]` (TODO R.34); the caller's path and
+  name are never used for the exec. Before R.34 the daemon checked the
+  canonical path but spawned the request path, so a symlink swapped after the
+  check ran an unlisted program with the secret, and a caller-chosen link name
+  selected the applet of a multi-call binary. A path it cannot canonicalize is
+  refused. The MCP server resolves a bare/relative name for
   the agent's convenience, but the result is untrusted input: any same-user
   process can call the daemon, so only a check inside `pmd` counts. The
   protocol only requires an absolute path; canonicalization and the grant

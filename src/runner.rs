@@ -132,7 +132,15 @@ enum Message {
     Done,
 }
 
-/// Run `argv` with `env_name=secret` injected, streaming redacted output.
+/// Run `program` with `args` and `env_name=secret` injected, streaming redacted
+/// output.
+///
+/// `program` is executed exactly as given, and becomes `argv[0]` (the default
+/// for [`Command`]). The daemon passes the same canonical path it checked
+/// against the grant's allowlist, so the program that was authorized is the
+/// program that runs: a symlink swapped between the check and the spawn can no
+/// longer redirect the exec, and a multi-call binary is not handed a caller-
+/// chosen `argv[0]`.
 ///
 /// `inherited` is the already-filtered environment the child starts from
 /// (usually [`inherited_env`] of the daemon's own variables). `cancel` is
@@ -147,8 +155,13 @@ enum Message {
 /// write the frame before returning. Exactly one [`RunFrame::Exit`] is emitted
 /// on success; an error is returned instead when the run could not finish.
 /// No frame ever contains the un-redacted value.
+// The arguments are the orthogonal inputs of a process spawn. Grouping them
+// into a struct would only move the arity, and `program` must stay separate
+// from `args` so the caller cannot accidentally let `argv[0]` pick the binary.
+#[allow(clippy::too_many_arguments)]
 pub fn execute<F>(
-    argv: &[String],
+    program: &Path,
+    args: &[String],
     env_name: &str,
     secret: &str,
     cwd: &Path,
@@ -159,12 +172,12 @@ pub fn execute<F>(
 where
     F: FnMut(RunFrame) -> io::Result<()>,
 {
-    let Some(program) = argv.first() else {
+    if program.as_os_str().is_empty() {
         return Err(RunError::Spawn(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "the command is empty",
+            "the program is empty",
         )));
-    };
+    }
     // The protocol already validates this, but `Command::env` must never be
     // handed a name it would panic on.
     if env_name.is_empty() || env_name.contains('=') || env_name.contains('\0') {
@@ -175,7 +188,7 @@ where
     }
 
     let mut command = Command::new(program);
-    command.args(&argv[1..]);
+    command.args(args);
     command.current_dir(cwd);
     command.env_clear();
     for (name, value) in inherited {
@@ -509,7 +522,8 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut frames = Vec::new();
         let result = execute(
-            &argv,
+            Path::new(&argv[0]),
+            &argv[1..],
             env_name,
             secret,
             Path::new("/"),
@@ -687,7 +701,8 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let mut frames = Vec::new();
         let result = execute(
-            &argv,
+            Path::new(&argv[0]),
+            &argv[1..],
             "PM_TEST",
             "secret-1234",
             dir.path(),
@@ -707,7 +722,8 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let argv = ["/bin/true".to_string()];
         let err = execute(
-            &argv,
+            Path::new(&argv[0]),
+            &argv[1..],
             "BAD=NAME",
             "secret-1234",
             Path::new("/"),
@@ -737,7 +753,8 @@ mod tests {
 
         let cancel = AtomicBool::new(false);
         let err = execute(
-            &argv,
+            Path::new(&argv[0]),
+            &argv[1..],
             "PM_TEST",
             "secret-1234",
             Path::new("/"),
@@ -751,7 +768,8 @@ mod tests {
         let argv = quiet;
         let cancel = AtomicBool::new(true);
         let err = execute(
-            &argv,
+            Path::new(&argv[0]),
+            &argv[1..],
             "PM_TEST",
             "secret-1234",
             Path::new("/"),
@@ -811,7 +829,8 @@ mod tests {
         let runner_cancel = Arc::clone(&cancel);
         let runner = std::thread::spawn(move || {
             execute(
-                &argv,
+                Path::new(&argv[0]),
+                &argv[1..],
                 "PM_TEST",
                 "secret-1234",
                 Path::new("/"),
@@ -863,7 +882,8 @@ mod tests {
         let runner_cancel = Arc::clone(&cancel);
         let runner = std::thread::spawn(move || {
             execute(
-                &argv,
+                Path::new(&argv[0]),
+                &argv[1..],
                 "PM_TEST",
                 "secret-1234",
                 Path::new("/"),

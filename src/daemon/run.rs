@@ -79,7 +79,9 @@ pub(super) fn serve_run(
         return;
     };
     // Resolve the program before matching it against the grant, so a symlink
-    // or `..` cannot name one program in the request and run another.
+    // or `..` cannot name one program in the request and run another. The
+    // canonical path is also what `runner::execute` spawns, so a link swapped
+    // after this point cannot redirect the exec to an unlisted program.
     let Ok(program) = std::fs::canonicalize(program) else {
         // A program that cannot be resolved can never match a grant, and
         // saying so is not an oracle: the grant is checked on the same path.
@@ -114,7 +116,8 @@ pub(super) fn serve_run(
         return;
     }
     let result = runner::execute(
-        &request.command,
+        &program,
+        &request.command[1..],
         &request.env,
         secret.as_str(),
         Path::new(&request.cwd),

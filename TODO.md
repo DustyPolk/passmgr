@@ -691,9 +691,14 @@ Rules that apply to every item:
       fails against a mutated `Approvals::take` that ignores the digest
       (`GrantApproved` instead of `Denied`).
 
-- [ ] **R.34 `pmd` checks the canonical program path but execs the raw
+- [x] **R.34 `pmd` checks the canonical program path but execs the raw
       request path, so a symlink swap runs an unlisted program with the
       secret.**
+      Done: `runner::execute` now takes the executable separately and spawns
+      exactly the canonical path the daemon authorized, with that path as
+      `argv[0]`. Residual: a swap of the target *file* between
+      canonicalize and `execve` is still open (`fexecve`/`O_PATH` would
+      close it); see PROGRESS.md. Tests: lock-held link swap and `$0`.
       `src/daemon/run.rs:81` canonicalizes `command[0]` and uses the result
       only for the grant check (`record_use`, `:92`); `:114-115` then hands
       the original `request.command` to `runner::execute`, and

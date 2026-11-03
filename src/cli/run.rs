@@ -204,9 +204,11 @@ fn is_executable_file(path: &Path) -> bool {
     }
 }
 
-/// Lexically make `path` absolute without resolving symlinks, so the program
-/// the daemon spawns is the one this process found and `argv[0]` keeps the
-/// name the caller used.
+/// Lexically make `path` absolute without resolving symlinks, so the request
+/// carries an absolute path the daemon can resolve itself. The daemon
+/// canonicalizes the path it is sent and executes exactly that canonical path,
+/// so a link here is resolved once, on the trusted side, and the caller's name
+/// is not what decides which program runs.
 #[cfg(unix)]
 fn absolute(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())

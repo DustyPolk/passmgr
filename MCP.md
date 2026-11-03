@@ -154,7 +154,8 @@ Rules, enforced by the **daemon** (the MCP server is untrusted plumbing):
   an absolute path, but that path is **untrusted input**: before spawning, the
   daemon canonicalizes it itself (resolving symlinks), requires the result to
   be absolute, NUL-free and within the protocol's path cap, checks that
-  canonical path against the allowlist, and execs the canonical path. A path
+  canonical path against the allowlist, and execs the canonical path as
+  `argv[0]` (the request's path and name are never used to spawn). A path
   that cannot be canonicalized is refused. The daemon never resolves a
   program through its own `PATH` (that belongs to the shell that ran
   `unlock`), and `cwd` must be absolute.

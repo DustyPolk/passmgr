@@ -436,3 +436,138 @@ fn run_streams_large_output_in_protocol_sized_chunks_and_redacts() {
     assert!(!String::from_utf8_lossy(&output.stdout).contains(SECRET));
     assert!(!String::from_utf8_lossy(&output.stderr).contains(SECRET));
 }
+
+/// R.34: the daemon must spawn the canonical path it authorized, and that path
+/// must be the child's `argv[0]`. A symlink is the request path here; the old
+/// code spawned the link, so a program that behaves differently depending on
+/// the name it was called by (a multi-call binary) could be selected by the
+/// caller's link name even though the allowlist held the canonical target.
+#[test]
+fn the_child_is_spawned_as_the_canonical_program_not_the_request_path() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+
+    let link = fixture.temp_path("sh-link");
+    std::os::unix::fs::symlink("/bin/sh", &link).expect("symlink to /bin/sh");
+    let link = link.to_str().expect("utf-8 path").to_owned();
+    let canonical = fs::canonicalize("/bin/sh").expect("canonical /bin/sh");
+    let canonical = canonical.to_str().expect("utf-8 path").to_owned();
+
+    let (frames, _) = read_run(
+        &socket,
+        &fixture.token,
+        &fixture.run_request("API_KEY", &[&link, "-c", "printf %s \"$0\""]),
+    );
+
+    assert_eq!(stdout_bytes(&frames), canonical.as_bytes());
+    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+/// A link swapped after the allowlist check must not redirect the exec.
+///
+/// The run authorized `/bin/true` through `tool`. While the daemon waits for
+/// the vault write lock (it has already canonicalized the path and passed the
+/// allowlist check), the link is repointed at a script that writes the secret
+/// somewhere. The daemon must still exec the canonical `/bin/true`, so nothing
+/// runs and the secret never lands in the loot file.
+///
+/// The daemon keeps the lock file open while it retries `flock`, so
+/// `/proc/<pid>/fd` is a deterministic "the check has happened" signal; no
+/// fixed sleep is involved.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_symlink_swapped_after_the_allowlist_check_cannot_change_the_program() {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+    use std::os::unix::io::AsRawFd;
+    use std::time::{Duration, Instant};
+
+    /// Wait until `pmd` has opened the vault lock and narrowed its mode. The
+    /// daemon is non-dumpable, so `/proc/<pid>/fd` is not readable; the
+    /// unconditional `chmod` in `acquire_write_lock` updates the lock file's
+    /// ctime, which is the first observable step after the vault is read and
+    /// authorized.
+    fn wait_until_the_lock_is_open(lock: &std::path::Path, before: (i64, i64)) {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let metadata = fs::metadata(lock);
+            if let Ok(metadata) = metadata {
+                if (metadata.ctime(), metadata.ctime_nsec()) != before {
+                    return;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pmd never opened the vault lock file"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+
+    let tool = fixture.temp_path("tool");
+    std::os::unix::fs::symlink("/bin/true", &tool).expect("symlink to /bin/true");
+    let loot = fixture.temp_path("loot");
+    let replacement = fixture.temp_path("replacement");
+    fs::write(
+        &replacement,
+        format!("#!/bin/sh\nprintf %s \"$API_KEY\" > '{}'\n", loot.display()),
+    )
+    .expect("write replacement");
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755))
+        .expect("chmod replacement");
+
+    // Hold the vault write lock. The daemon reads and authorizes the vault,
+    // then blocks recording the use until this is released.
+    let lock_path = passmgr::vault::lock_path(&fixture.vault);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .expect("open vault lock");
+    // SAFETY: `as_raw_fd` is a valid descriptor owned by `lock`.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let before = fs::metadata(&lock_path)
+        .map(|metadata| (metadata.ctime(), metadata.ctime_nsec()))
+        .expect("lock metadata");
+
+    let tool_arg = tool.to_str().expect("utf-8 path").to_owned();
+    let run_request = fixture.run_request("API_KEY", &[&tool_arg]);
+    let token = fixture.token.clone();
+    let run_socket = socket.clone();
+    let reader = std::thread::spawn(move || read_run(&run_socket, &token, &run_request));
+
+    wait_until_the_lock_is_open(&lock_path, before);
+    fs::remove_file(&tool).expect("remove the checked link");
+    std::os::unix::fs::symlink(&replacement, &tool).expect("swap the link");
+    drop(lock);
+
+    let (frames, raw) = reader.join().expect("run thread");
+    assert!(
+        !loot.exists(),
+        "the swapped program ran and captured the injected secret"
+    );
+    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert!(
+        !raw.windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}
