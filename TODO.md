@@ -544,6 +544,110 @@ Rules that apply to every item:
       line and an ESC/CR file name on the existing-file error, and fails
       against the plain `display()`.
 
+- [ ] **R.30 Argument and validator errors echo agent-supplied argv raw, so a
+      suggested value can drive the human's terminal.**
+      R.29 escaped only `--out`; the rest of the argument/validation errors
+      still interpolate the raw value: `src/cli/args/mod.rs:141` (unknown
+      global option), `:241` (unknown command), `:311` (`run`'s unexpected
+      argument), `:320` (`--env` name), `:336` (`--env` reference), `:417`,
+      `:462`, `:490`, `:524`, `:591`, `:694`, `:766`, `:773`, `:786`
+      (`parse_length`), and `src/cli/args/grant.rs:86,186,232,257,289`
+      (unknown subcommand/flag). `src/cli/grant.rs:58,63,70,76` interpolate
+      `--expires` text. Validators echo too: `EntryId::parse_ref`
+      (`src/store.rs:140-150`), `validate_tag` (`src/store.rs:403-428`,
+      including the bad character) and `validate_field_name`
+      (`src/grant/validate.rs:362-373`).
+      `Error::VaultNotFound`/`ReadOnlyVault`/the lock and changed errors
+      (`src/error.rs:95` and `:126-138`) print `path.display()`, so `--db`
+      is in the same class.
+      Failure (confirmed against the built binary): `passmgr run --env
+      $'API_KEY=pm://\e]52;c;ZXZpbA==\a' -- /bin/true` prints
+      `passmgr: --env reference 'pm://^[]52;c;ZXZpbA==^G' ...` — the raw ESC
+      and BEL reach stderr, before any grant or password is checked. OSC 52
+      (`\e]52;c;...`) overwrites the human's clipboard; `\e[2K\r` can erase
+      and rewrite the line so the visible error is a lie. The same was
+      confirmed for `--env` names, `--ref`, `--tag`, `--expires`
+      (`invalid --expires '^[]52;c;...'`) and an unknown argument. This
+      contradicts `DECISIONS.md`'s rule that agent-supplied text shown to a
+      human is sanitized.
+      Fix: escape untrusted argv at every display site. Put the helper in a
+      low module (a new `src/text.rs`, or reuse `escape_hidden` by moving it)
+      because `src/store.rs` cannot depend on `grant`; alternatively sanitize
+      once in the top-level error printer so no future message can forget.
+      Test: a table-driven CLI test (the real binary, as `tests/run.rs` does)
+      passing `\x1b]52;c;ZXZpbA==\x07` in `--env` name, `--env` reference,
+      `--ref`, `--tag`, `--expires`, `--length`, an unknown flag, and `--db`;
+      assert stderr contains no raw `\x1b`/`\x07` and does show the visible
+      `\u{1b}`/`\u{7}` form. Add unit cases to `validate_tag`,
+      `EntryId::parse_ref` and `validate_field_name`. All must fail against
+      the current code.
+
+- [ ] **R.31 A valid grant token is an existence oracle for out-of-scope
+      references, contradicting `DECISIONS.md`.**
+      `src/daemon/run.rs:160-171` (`record_use`) looks the credential up
+      first: a missing ref returns `RecordError::NotFound` (`:162-163`),
+      while an existing ref outside the grant reaches `authorizes` (`:168`)
+      and returns `RecordError::Denied` (`:170-171`). `DECISIONS.md:254-256`
+      and `:591` promise "an out-of-scope ref answers exactly like a
+      nonexistent one (no existence oracle)", and the CLI maps the two to
+      different exits (`src/cli/run.rs:241-243` vs `:265-271`).
+      Failure: with a grant for `pm://A`, `pm run --env
+      X=pm://B ...` (B exists but out of scope) exits 5 with "the unlock
+      daemon refused the run", while `pm://C` (nonexistent) exits 3 with
+      "no credential found for reference 'pm://C'". The agent learns that B
+      exists even though the grant forbids using it.
+      Fix: answer `not_found` for a scope denial in `record_use` (keep
+      `denied` for a bad/expired/revoked/exhausted/capability-denied grant),
+      or change `DECISIONS.md` and the CLI mapping if the oracle is accepted;
+      keep one contract.
+      Test: extend `tests/daemon_run.rs` with a grant for ref A and runs for
+      an existing out-of-scope ref B and a nonexistent ref C; assert the same
+      `RunFrame::Error`/exit status. It must fail against the current order.
+
+- [ ] **R.32 Security and protocol docs still describe the pre-3.6 state.**
+      `SECURITY.md:14-16` says grant authorization is "not implemented yet"
+      and that `run` is authorized by the session token, contradicting
+      `:21-23` and the code; `:23` omits `grant_create` from the operations
+      the session token authorizes; `:63-68` presents the hash-chained audit
+      log as part of "Grants" although TODO 3.8 is still open (`run` writes
+      no audit record). `DECISIONS.md:405-407` says "The CLI still cannot
+      create a grant". `README.md:182` says the token file "must be in a 0600
+      file", but `src/grant/file.rs` accepts 0400 as well. `MCP.md:280-283`
+      says "The daemon hands the grant token over **once**", but 3.4c made
+      the CLI generate and write the token (the daemon only stores its hash),
+      so an MCP implementer would build a claim exchange that cannot work.
+      Failure: a reviewer trusts `SECURITY.md` and treats `run` as
+      session-token gated (the hole 3.6 just closed) or expects `pm audit` to
+      exist; an MCP implementation follows `MCP.md` and asks the daemon for a
+      token it never had.
+      Fix: update the four docs to the implemented flow (grant required;
+      `grant_create` in the session-token list; audit still TODO 3.8; CLI
+      writes the token; 0600/0400 documented as the code behaves), or open
+      explicit TODOs where the doc is the intended future contract.
+      Test: extend `tests/docs.rs` to assert `SECURITY.md` contains neither
+      "not implemented yet" nor the session-token-only claim, that its
+      session-token list contains `grant_create`, that `DECISIONS.md` says
+      the CLI creates the grant, and that `MCP.md`'s token-ownership sentence
+      matches the daemon-stores-only-the-hash contract.
+
+- [ ] **R.33 TODO R.15b is stale: the property it guards is implemented and
+      tested.**
+      `TODO.md:28-34` keeps `[!]` and "Blocked on TODO 3.4/4.9", but 3.4 and
+      3.6 are `[x]`. `src/daemon.rs`'s GrantCreate arm re-checks
+      `check_approvable` and then spends exactly one approval with
+      `approvals.take(&request.digest(), ...)`; `tests/grant_create.rs:27`
+      proves the identical request is refused the second time and the vault
+      is untouched; `src/presence.rs:767` proves a different digest does not
+      consume the approval. The only gap is that no e2e test submits digest B
+      to `grant_create` (the unit test covers `Approvals::take`).
+      Failure: the next iteration sees an open blocked item, assumes the
+      write path is still unprotected, and either reimplements it or treats
+      the approval as replayable in a new caller.
+      Fix: check R.15b off with the evidence above and, if wanted, add the
+      A-then-B `grant_create` case to `tests/grant_create.rs`.
+      Test: none beyond the existing tests; the checklist must stop saying
+      blocked.
+
 ## Phase 3 — grants and audit log
 
 The design for grants, approval and audit lives in `MCP.md` ("Grants and the

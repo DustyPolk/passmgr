@@ -1,3 +1,45 @@
+## 2026-11-03 — Review of 4a16226..2208a50
+
+- 4 findings: 1 authorization (R.31), 1 unsafe input/output or terminal
+  injection (R.30), 2 drift/test gap (R.32, R.33). No new secret-printing
+  path, no crypto misuse, no maintainability issue. Added R.30–R.33 to
+  `TODO.md` (Phase R, at the top of the item list).
+- R.30 (high): R.29 fixed only `--out`; parse and validation errors still
+  interpolate agent-supplied argv (`--env` name/reference, `--ref`, `--tag`,
+  `--expires`, `--length`, unknown flags, `--db`). Confirmed against the built
+  binary: `--env $'API_KEY=pm://\e]52;c;ZXZpbA==\a'` prints the raw ESC/BEL;
+  OSC 52 and line-erase sequences reach the human's terminal before any grant
+  or password check. `src/store.rs` validators echo the value too.
+- R.31 (medium): `record_use` (`src/daemon/run.rs:160-171`) returns
+  `not_found` for a missing ref but `denied` for an existing out-of-scope ref,
+  violating `DECISIONS.md:254-256`/`:591` and giving a grant token an
+  existence oracle (CLI exits 3 vs 5).
+- R.32 (medium): `SECURITY.md:14-16` still says grant auth is "not
+  implemented" and `run` is session-token gated; `:23` omits `grant_create`;
+  `:63-68` presents the audit log as current (TODO 3.8 open);
+  `DECISIONS.md:405-407` says the CLI cannot create grants; `README.md:182`
+  says 0600 but 0400 is accepted; `MCP.md:280-283` says the daemon hands the
+  token over.
+- R.33 (low): TODO R.15b is still `[!]`/blocked on completed 3.4/4.9, but the
+  daemon spends one approval by digest and tests cover replay and a different
+  digest.
+- Confirmed fine: `src/grant/file.rs` (regular file, own uid, no group/world
+  bits, `O_NOFOLLOW`, 128-byte cap, no token echo), `TokenFile` (`create_new`
+  + 0600 + `O_NOFOLLOW|O_CLOEXEC`, drop on failure), approval digest binding
+  and one-shot spend, `serve_run`/`record_use` order (authorize, record use,
+  then decrypt and spawn; 8 retries with `VaultChanged` re-read), redaction
+  and chunk caps, no daemon/client logging of secrets, all files <1,000 lines,
+  and test suites with no fixed sleeps and real canaries.
+- Checked, not filed: raw grant token hex in the JSON frame `Vec<u8>` is not
+  zeroized (same systemic pattern as the session token and proof; same-user
+  memory is out of scope); `read_grant_token`'s comment says one trailing
+  newline while `trim_end()` accepts all trailing whitespace (safe,
+  doc-only); `record_use` takes `now` once for up to 8 lock retries (expiry
+  judged at arrival; needs a same-user flock holder); no daemon-level expiry
+  test (grant unit tests cover expiry).
+- `cargo test --quiet` passes (all suites and doctests). Only `TODO.md` and
+  this entry changed.
+
 ## 2026-11-03 — Daemon authorizes `run` by grant (TODO 3.6)
 
 - Protocol v4: `RunRequest.grant` is required. A v3 daemon would ignore the
