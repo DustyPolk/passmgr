@@ -145,7 +145,11 @@ fn no_daemon() -> Error {
 /// Only a regular file with at least one execute bit counts, so a directory or
 /// a non-executable file earlier on `PATH` does not shadow the real program.
 #[cfg(unix)]
-fn resolve_program(program: &str, cwd: &Path, path_var: &OsStr) -> Result<PathBuf, Error> {
+pub(crate) fn resolve_program(
+    program: &str,
+    cwd: &Path,
+    path_var: &OsStr,
+) -> Result<PathBuf, Error> {
     let candidate = Path::new(program);
     if candidate.is_absolute() {
         return Ok(candidate.to_path_buf());

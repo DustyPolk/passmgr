@@ -6,7 +6,7 @@
 //! turns into `MalformedVault`. The label table is the one the review notes
 //! (TODO R.18) point at.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{MAX_COMMANDS, MAX_FIELD_NAME_BYTES, MAX_LABEL_BYTES};
 use crate::error::{Error, Result};
@@ -116,6 +116,87 @@ fn escape_hidden(text: &str) -> String {
         }
     }
     escaped
+}
+
+/// Programs that run code, or a program named by their arguments, so a grant
+/// that allows one can execute anything the redactor cannot follow. A human
+/// must pass `--allow-interpreter` to add one.
+///
+/// Kept as a pure table next to the label rules, shared by the CLI and (from
+/// TODO 4.9) the MCP request path, so both refuse the same names. Matching is
+/// by file name only: `/usr/bin/python3.12` is an interpreter even though its
+/// path is not `/usr/bin/python`. The versioned bases accept a suffix that
+/// starts with a digit or a dot, so `pythonista` is not mistaken for Python.
+const INTERPRETERS: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "dash",
+    "ash",
+    "ksh",
+    "mksh",
+    "csh",
+    "tcsh",
+    "busybox",
+    "env",
+    "xargs",
+    "awk",
+    "gawk",
+    "mawk",
+    "tclsh",
+    "wish",
+    "nodejs",
+    "osascript",
+    "cargo",
+    "make",
+    "npm",
+    "npx",
+    "yarn",
+    "pnpm",
+    "deno",
+    "bun",
+    "java",
+    "dotnet",
+    "expect",
+];
+
+/// Bases whose installed name carries a version, such as `python3.12`,
+/// `perl5.36`, `node18` or `pwsh7`.
+const VERSIONED_INTERPRETERS: &[&str] = &[
+    "python",
+    "perl",
+    "ruby",
+    "node",
+    "php",
+    "lua",
+    "pwsh",
+    "powershell",
+    "julia",
+    "Rscript",
+];
+
+/// Whether `path` names a shell, interpreter or program runner.
+///
+/// The check is on the final path component, because that is what the daemon
+/// execs; a grant stores canonical absolute paths.
+pub fn is_interpreter(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(is_interpreter_name)
+}
+
+fn is_interpreter_name(name: &str) -> bool {
+    INTERPRETERS.contains(&name)
+        || VERSIONED_INTERPRETERS.iter().any(|base| {
+            name == *base
+                || name.strip_prefix(base).is_some_and(|suffix| {
+                    suffix
+                        .chars()
+                        .next()
+                        .is_some_and(|first| first.is_ascii_digit() || first == '.')
+                })
+        })
 }
 
 pub(super) fn validate_commands(commands: Vec<PathBuf>) -> Result<Vec<PathBuf>> {

@@ -517,7 +517,22 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   with TODO 3.6/4.5; `src/protocol/mod.rs` today only requires an absolute
   path.
 - Interpreters and shells in a command allowlist are refused unless the human
-  passes `--allow-interpreter`.
+  passes `--allow-interpreter` (TODO 3.4d). Detection lives in
+  `grant/validate.rs::is_interpreter` and is name-based on the canonical file
+  name: a fixed list of shells/runners plus versioned `python`/`perl`/`ruby`/
+  `node`/`php`/`lua`/`pwsh`/`julia`/`Rscript` names whose suffix starts with a
+  digit or `.`. Over-refusal is preferred (`pythonista` is not an interpreter;
+  `python3.12` is), and `--allow-interpreter` is the human override. Refusal
+  happens before the password prompt, file creation or any daemon request.
+- `pm grant create` mints a `GrantToken` of 32 random bytes, held in
+  `Zeroizing`, with a redacting `Debug`. Its lowercase hex is written only to
+  `--out` (opened `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, then `fsync`); an
+  existing file is refused, and a newly created file is unlinked if a later
+  step fails. The token never goes to stdout/stderr. The vault stores only
+  its SHA-256. The CLI derives the key once, opens the vault read-only to run
+  `Vault::check_grant_writable` before `challenge`, then proves and sends
+  `grant_create`, and only after `grant_approved` takes the write lock and
+  saves with `save_with_key` so the daemon's key stays valid.
 - `pm mcp serve` is a hand-written synchronous JSON-RPC 2.0 stdio server (no
   MCP SDK, no async runtime): 1 MiB line cap with resync to the next newline,
   batches rejected, stdout carries only JSON-RPC, diagnostics on stderr, and

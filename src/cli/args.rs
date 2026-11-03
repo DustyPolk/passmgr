@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use passmgr::password::{MAX_LEN, MIN_LEN, Preset};
 use passmgr::store;
+use passmgr::store::EntryId;
 
 pub(crate) const DEFAULT_DB: &str = "passwords.dat";
 
@@ -41,8 +42,27 @@ pub(crate) enum Command {
     },
     Lock,
     Run(RunOptions),
+    Grant(GrantCommand),
     Help,
     Version,
+}
+
+#[derive(Debug)]
+pub(crate) enum GrantCommand {
+    Create(GrantCreateOptions),
+}
+
+#[derive(Debug)]
+pub(crate) struct GrantCreateOptions {
+    pub(crate) label: String,
+    pub(crate) references: Vec<EntryId>,
+    pub(crate) tags: Vec<String>,
+    /// Paths exactly as given; `grant create` resolves them before use.
+    pub(crate) commands: Vec<String>,
+    pub(crate) expires: std::time::Duration,
+    pub(crate) max_uses: Option<u32>,
+    pub(crate) allow_interpreter: bool,
+    pub(crate) out: PathBuf,
 }
 
 #[derive(Debug)]
@@ -222,6 +242,7 @@ pub(crate) fn parse_command(command: OsString, rest: Vec<OsString>) -> Result<Co
             Ok(Command::Lock)
         }
         "run" => parse_run(rest),
+        "grant" => parse_grant(rest),
         other => Err(format!("unknown command '{other}' (try 'passmgr --help')")),
     }
 }
@@ -737,6 +758,172 @@ pub(crate) fn parse_generate(args: Vec<OsString>) -> Result<Command, String> {
         preset,
         length: length.unwrap_or_else(|| preset.default_length()),
     }))
+}
+
+/// `grant create` and, later, the other `grant` subcommands.
+pub(crate) fn parse_grant(args: Vec<OsString>) -> Result<Command, String> {
+    const USAGE: &str = "'grant' usage: passmgr grant create --label <text> \
+                         (--ref <pm://...> | --tag <tag>) --command <path> \
+                         --expires <1h|30m|7d> --out <file>";
+
+    if args.len() == 1 {
+        if let Some(flag) = args[0].to_str() {
+            if flag == "-h" || flag == "--help" {
+                return Ok(Command::Help);
+            }
+        }
+    }
+
+    let mut args = args.into_iter();
+    let subcommand = args
+        .next()
+        .ok_or_else(|| format!("'grant' requires a subcommand; {USAGE}"))?
+        .into_string()
+        .map_err(|_| "the 'grant' subcommand must be valid UTF-8".to_owned())?;
+    let rest: Vec<OsString> = args.collect();
+    match subcommand.as_str() {
+        "create" => parse_grant_create(rest),
+        other => Err(format!(
+            "unknown 'grant' subcommand '{other}' (try 'passmgr help')"
+        )),
+    }
+}
+
+/// `grant create --label <text> (--ref <pm://...> | --tag <tag>)...
+/// --command <path>... --expires <duration> --out <file>`.
+///
+/// Everything here is syntax: refs are parsed as ids, tags are left to be
+/// normalized by `Scope::new`, and commands are resolved against the real
+/// filesystem by the command itself. Nothing touches the vault or a secret.
+pub(crate) fn parse_grant_create(args: Vec<OsString>) -> Result<Command, String> {
+    const USAGE: &str = "'grant create' usage: passmgr grant create --label <text> \
+                         (--ref <pm://...> | --tag <tag>) --command <path> \
+                         --expires <1h|30m|7d> --out <file> \
+                         [--max-uses N] [--allow-interpreter]";
+
+    let mut label = None;
+    let mut references = Vec::new();
+    let mut tags = Vec::new();
+    let mut commands = Vec::new();
+    let mut expires = None;
+    let mut max_uses = None;
+    let mut allow_interpreter = false;
+    let mut out = None;
+
+    let mut index = 0;
+    while index < args.len() {
+        let text = args[index]
+            .to_str()
+            .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
+        match text {
+            "-h" | "--help" => return Ok(Command::Help),
+            "--label" => {
+                label = Some(flag_value(&args, index, "--label")?);
+                index += 2;
+                continue;
+            }
+            other if other.starts_with("--label=") => {
+                label = Some(other["--label=".len()..].to_owned());
+            }
+            "--ref" => {
+                let value = flag_value(&args, index, "--ref")?;
+                references.push(EntryId::parse_ref(&value).map_err(|error| error.to_string())?);
+                index += 2;
+                continue;
+            }
+            other if other.starts_with("--ref=") => {
+                references.push(
+                    EntryId::parse_ref(&other["--ref=".len()..])
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            "--tag" => {
+                tags.push(flag_value(&args, index, "--tag")?);
+                index += 2;
+                continue;
+            }
+            other if other.starts_with("--tag=") => {
+                tags.push(other["--tag=".len()..].to_owned());
+            }
+            "--command" => {
+                commands.push(flag_value(&args, index, "--command")?);
+                index += 2;
+                continue;
+            }
+            other if other.starts_with("--command=") => {
+                commands.push(other["--command=".len()..].to_owned());
+            }
+            "--expires" => {
+                let value = flag_value(&args, index, "--expires")?;
+                expires = Some(super::grant::parse_expiry(&value)?);
+                index += 2;
+                continue;
+            }
+            other if other.starts_with("--expires=") => {
+                expires = Some(super::grant::parse_expiry(&other["--expires=".len()..])?);
+            }
+            "--max-uses" => {
+                let value = flag_value(&args, index, "--max-uses")?;
+                max_uses = Some(parse_max_uses(&value)?);
+                index += 2;
+                continue;
+            }
+            other if other.starts_with("--max-uses=") => {
+                max_uses = Some(parse_max_uses(&other["--max-uses=".len()..])?);
+            }
+            "--allow-interpreter" => allow_interpreter = true,
+            "--out" => {
+                out = Some(PathBuf::from(flag_value(&args, index, "--out")?));
+                index += 2;
+                continue;
+            }
+            other if other.starts_with("--out=") => {
+                out = Some(PathBuf::from(&other["--out=".len()..]));
+            }
+            other => {
+                return Err(format!(
+                    "unexpected argument '{other}' for 'grant create' (see '{USAGE}')"
+                ));
+            }
+        }
+        index += 1;
+    }
+
+    let label = label.ok_or("'grant create' requires --label <text>")?;
+    let expires = expires.ok_or_else(|| {
+        "'grant create' requires --expires <duration> (for example 1h)".to_owned()
+    })?;
+    let out = out.ok_or("'grant create' requires --out <file>")?;
+    if out.as_os_str().is_empty() {
+        return Err("'grant create' --out must not be empty".to_owned());
+    }
+    if references.is_empty() && tags.is_empty() {
+        return Err("'grant create' needs at least one --ref or --tag".to_owned());
+    }
+    if commands.is_empty() {
+        return Err("'grant create' needs at least one --command <path>".to_owned());
+    }
+
+    Ok(Command::Grant(GrantCommand::Create(GrantCreateOptions {
+        label,
+        references,
+        tags,
+        commands,
+        expires,
+        max_uses,
+        allow_interpreter,
+        out,
+    })))
+}
+
+fn parse_max_uses(value: &str) -> Result<u32, String> {
+    let uses = value
+        .parse::<u32>()
+        .map_err(|_| format!("invalid --max-uses '{value}' (expected a positive integer)"))?;
+    if uses == 0 {
+        return Err("--max-uses must be at least 1".to_owned());
+    }
+    Ok(uses)
 }
 
 pub(crate) fn parse_length(value: &str) -> Result<usize, String> {

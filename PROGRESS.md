@@ -1,3 +1,33 @@
+## 2026-11-03 — Add `pm grant create` CLI (TODO 3.4d, closes R.22b)
+
+- `src/cli/grant.rs` + `Command::Grant(GrantCommand::Create(..))`: resolve
+  commands to canonical executables; refuse interpreters unless
+  `--allow-interpreter`; TTY/no-agent gate (exit 5); require a daemon; create
+  `--out` (`O_EXCL|O_NOFOLLOW`, 0600); prompt once, derive the key, build a
+  `GrantRequest` with a fresh 32-byte token; open the vault and
+  `check_grant_writable` **before** `challenge` (R.22b); prove, send
+  `grant_create`, accept only `grant_approved`; re-lock, add, `save_with_key`
+  (daemon key stays valid); commit the token file. Failures before commit
+  unlink a file this run created.
+- New `GrantToken` (`src/grant/token.rs`, split for the line limit): 32
+  random bytes, `Zeroizing`, redacting `Debug`; hex only in `--out`, vault
+  keeps SHA-256. `is_interpreter` (shells, runners, versioned
+  python/perl/ruby/node/php/lua/pwsh/julia/Rscript) in `grant/validate.rs`.
+- Docs: `--help`/golden file, README "Create a grant", SECURITY marker
+  removed, DECISIONS policy; MCP.md unchanged.
+- Tests: unit parsing/expiry/token-file/cleanup/Debug/interpreter; new
+  `tests/grant_cli.rs` (5) proves the token is never printed and is 0600,
+  stored scope/commands/hash, the daemon still injects after the write, an
+  existing `--out` is refused before the prompt, interpreter/agent refusals,
+  and a full vault against a stub socket (exit 2, no connection, no file).
+- Gate green: fmt, clippy `-D warnings`, full `cargo test` (234 lib, 41 bin,
+  123 integration/docs, 2 doctests); `cargo audit` skipped as allowed.
+- **Next iteration must know:** 3.5 is next. `grant create` does not
+  auto-unlock; an existing `--out` is detected after the session loads. No
+  `--fields` flag yet (Scope fields `None`), deferred to Phase 6. A failure
+  after `grant_approved` spends the approval; retry needs a fresh request.
+  Grants are stored but not yet enforced (3.6).
+
 ## 2026-11-03 — One authoritative `grant_create` frame body (TODO R.24)
 
 - TODO 3.4c's spec line showed the fields nested under a `request` key; they

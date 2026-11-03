@@ -103,7 +103,7 @@ read the injected variable, transform it, and write it anywhere. Redaction
 cannot follow a transformation (see limit 3).
 
 Mitigations: interpreters and shells are refused in a grant's command
-allowlist unless the human passes `--allow-interpreter` (TODO 3.4); grant the
+allowlist unless the human passes `--allow-interpreter`; grant the
 specific binary a workflow needs, not a general-purpose interpreter. Passing
 `--allow-interpreter` is a deliberate decision to trust the agent with the
 value.

@@ -210,6 +210,33 @@ copies of an injected value; retry once an earlier command finishes.
 `run` is the supported way to give an agent a credential. The agent supplies
 the reference (from `list --json`) and a command, never the value.
 
+### Create a grant
+
+A grant is a human-authorized, scoped, expiring permission for an agent. It
+is created at a terminal, while the unlock daemon is running:
+
+```bash
+passmgr unlock
+passmgr grant create --label 'deploy prod' --tag prod \
+    --command /usr/bin/gh --expires 1h --out ./deploy.token
+```
+
+`--ref` (a `pm://` reference) and `--tag` choose the entries a grant covers and
+are repeatable; tags must all match. `--command` is repeatable and each path
+is resolved and canonicalized before it is stored. `--expires` accepts minutes
+(`30m`), hours (`1h`) or days (`7d`) up to 30 days, and `--max-uses` adds an
+optional use limit. Shells and interpreters are refused unless
+`--allow-interpreter` is given: a grant that allows one can run arbitrary code,
+so the redactor no longer bounds what it can do with the secret.
+
+The master password is prompted once. The CLI derives the vault key, proves it
+to the daemon for this exact request, and the daemon accepts that request once;
+only then does the CLI write the grant into the vault with the same key. The
+raw 32-byte token is written only to `--out`, as a new file with mode 0600,
+and never to stdout; an existing file is refused, and a failed command removes
+the file it created. A vault that cannot hold another grant is refused before
+the approval is spent. The vault stores only the token's SHA-256 hash.
+
 ### List services
 
 ```bash

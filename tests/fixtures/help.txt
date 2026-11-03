@@ -88,6 +88,27 @@ Commands:
                              one the running daemon was unlocked with: 'run'
                              refuses --db and PASSMGR_DB (exit 2) instead of
                              injecting from a vault the caller did not name.
+  grant create [options]     Create a scoped, expiring grant at a human
+                             terminal. The master password is prompted once
+                             and a running daemon ('unlock') is required.
+                             The raw token is written only to --out, mode
+                             0600, never to stdout. Allowed options:
+                               --label TEXT       Human-readable label.
+                               --ref PM://ID      Entry reference (repeatable).
+                               --tag TAG          Tag scope (repeatable; an
+                                                  entry matches every tag).
+                               --command PATH     Executable the grant may run
+                                                  (repeatable; resolved to a
+                                                  canonical absolute path).
+                               --expires 30m|1h|7d
+                                                  Lifetime, at most 30d.
+                               --max-uses N       Optional use limit.
+                               --allow-interpreter
+                                                  Permit shells/interpreters
+                                                  in the command allowlist.
+                               --out FILE         New token file (O_EXCL).
+                             At least one --ref or --tag and one --command
+                             are required. Refuses to overwrite --out.
   help                       Show this help.
   version                    Show version information.
 
@@ -124,10 +145,14 @@ Examples:
   passmgr lock
   passmgr run --env GH_TOKEN=pm://0123456789abcdef0123456789abcdef \
       -- gh auth status
+  passmgr grant create --label 'deploy prod' --tag prod \
+      --command /usr/bin/gh --expires 1h --out /run/user/1000/gh.token
   passmgr --db ~/.secrets/work.dat list
 
 Notes:
   - The master password is required for every command except generate/help/version.
+    'grant create' also prompts for it once, at a terminal, and needs a
+    running daemon; its token is written only to --out.
   - Prompts are written to stderr; command data is written to stdout.
   - 'add --generate' never prints the generated password; read it back with
     the TTY-gated 'get --reveal'.

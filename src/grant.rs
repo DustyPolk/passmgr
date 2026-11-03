@@ -875,11 +875,13 @@ impl fmt::Debug for Grant {
 
 mod capabilities;
 mod request;
+mod token;
 mod validate;
 
 pub use capabilities::{Capabilities, Capability};
 pub use request::GrantRequest;
-pub use validate::{LABEL_FORBIDDEN_CLASSES, validate_field_name};
+pub use token::{GRANT_TOKEN_BYTES, GrantToken};
+pub use validate::{LABEL_FORBIDDEN_CLASSES, is_interpreter, validate_field_name};
 
 #[cfg(test)]
 mod tests {
@@ -927,5 +929,35 @@ mod tests {
         // The untouched grant is writable: the check rejects only bad state.
         assert!(Grant::check_stored(&grant().to_stored()).is_ok());
         assert!(crate::store::encode(&[], std::slice::from_ref(&grant())).is_ok());
+    }
+
+    /// Interpreters are recognised by their file name, including versioned
+    /// spellings, while ordinary programs (and lookalike names) are not.
+    #[test]
+    fn interpreters_are_recognised_by_file_name() {
+        for path in [
+            "/bin/sh",
+            "/usr/bin/bash",
+            "/usr/bin/env",
+            "/usr/bin/xargs",
+            "/usr/bin/python3",
+            "/usr/bin/python3.12",
+            "/usr/local/bin/perl5.36",
+            "/usr/bin/node18",
+            "/usr/bin/ruby",
+            "/usr/bin/busybox",
+        ] {
+            assert!(is_interpreter(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/usr/bin/gh",
+            "/usr/bin/git",
+            "/usr/bin/envoy",
+            "/usr/bin/pythonista",
+            "/usr/bin/shadow",
+            "/usr/bin/maker",
+        ] {
+            assert!(!is_interpreter(Path::new(path)), "{path}");
+        }
     }
 }

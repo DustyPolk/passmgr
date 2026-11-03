@@ -4,12 +4,14 @@
 
 mod args;
 mod commands;
+mod grant;
 mod help;
 mod run;
 mod unlock;
 
 pub(crate) use args::*;
 pub(crate) use commands::*;
+pub(crate) use grant::*;
 pub(crate) use help::*;
 pub(crate) use run::*;
 pub(crate) use unlock::*;
@@ -79,6 +81,7 @@ fn run() -> Result<std::process::ExitCode, CliError> {
         Command::Unlock { idle_timeout } => command_unlock(agent_mode, &path, idle_timeout)?,
         Command::Lock => command_lock()?,
         Command::Run(options) => return Ok(command_run(options)?),
+        Command::Grant(command) => command_grant(command, agent_mode, &path)?,
     }
     Ok(std::process::ExitCode::SUCCESS)
 }
@@ -643,5 +646,108 @@ mod tests {
         .unwrap();
         assert!(parsed.agent);
         assert!(matches!(parsed.command, Command::Run(_)));
+    }
+
+    #[test]
+    fn parses_grant_create_fields() {
+        let Command::Grant(GrantCommand::Create(options)) = parse(&[
+            "grant",
+            "create",
+            "--label",
+            "deploy prod",
+            "--tag",
+            "prod",
+            "--ref",
+            RUN_REF,
+            "--command",
+            "/usr/bin/gh",
+            "--expires",
+            "1h",
+            "--max-uses",
+            "2",
+            "--allow-interpreter",
+            "--out",
+            "/tmp/token",
+        ])
+        .unwrap() else {
+            panic!("expected grant create");
+        };
+        assert_eq!(options.label, "deploy prod");
+        assert_eq!(options.references.len(), 1);
+        assert_eq!(options.references[0].to_ref(), RUN_REF);
+        assert_eq!(options.tags, ["prod"]);
+        assert_eq!(options.commands, ["/usr/bin/gh"]);
+        assert_eq!(options.expires, std::time::Duration::from_secs(3_600));
+        assert_eq!(options.max_uses, Some(2));
+        assert!(options.allow_interpreter);
+        assert_eq!(options.out, PathBuf::from("/tmp/token"));
+    }
+
+    #[test]
+    fn grant_create_accepts_equals_flags_and_help() {
+        let Command::Grant(GrantCommand::Create(options)) = parse(&[
+            "grant",
+            "create",
+            "--label=deploy",
+            "--tag=prod",
+            "--command=/usr/bin/gh",
+            "--expires=30m",
+            "--out=/tmp/token",
+        ])
+        .unwrap() else {
+            panic!("expected grant create");
+        };
+        assert_eq!(options.label, "deploy");
+        assert_eq!(options.expires, std::time::Duration::from_secs(1_800));
+
+        assert!(matches!(
+            parse(&["grant", "create", "--help"]).unwrap(),
+            Command::Help
+        ));
+        assert!(matches!(
+            parse(&["grant", "--help"]).unwrap(),
+            Command::Help
+        ));
+    }
+
+    #[test]
+    fn grant_create_rejects_missing_or_bad_flags() {
+        let base = [
+            "grant",
+            "create",
+            "--label",
+            "deploy",
+            "--tag",
+            "prod",
+            "--command",
+            "/usr/bin/gh",
+            "--expires",
+            "1h",
+            "--out",
+            "/tmp/token",
+        ];
+        for missing in ["--label", "--tag", "--command", "--expires", "--out"] {
+            let values: Vec<&str> = base
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(index, _)| {
+                    *index / 2 != base.iter().position(|v| *v == missing).unwrap() / 2
+                })
+                .map(|(_, value)| value)
+                .collect();
+            assert!(parse(&values).is_err(), "missing {missing}: {values:?}");
+        }
+        for extra in [
+            vec!["--expires", "0m"],
+            vec!["--expires", "31d"],
+            vec!["--max-uses", "0"],
+            vec!["--ref", "not-a-ref"],
+            vec!["--unknown"],
+        ] {
+            let mut values = base.to_vec();
+            values.extend(extra.iter().copied());
+            assert!(parse(&values).is_err(), "accepted {extra:?}");
+        }
     }
 }

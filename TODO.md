@@ -312,7 +312,7 @@ Rules that apply to every item:
       `check_grant_writable_accepts_a_grant_that_still_fits` (one slot left is
       accepted; a duplicate id is refused before the write). The
       `MAX_PLAINTEXT_BYTES` branch shares the same `store::encode` call.
-- [!] **R.22b `pm grant create` must refuse a full vault before the proof.**
+- [x] **R.22b `pm grant create` must refuse a full vault before the proof.**
       Blocked on TODO 3.4d, which owns the CLI and its vault access. 3.4d must
       open the vault with the derived key and call
       `Vault::check_grant_writable` on the grant it is about to propose
@@ -501,7 +501,7 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       `bad_request` and leaves the approval unspent. A hash that is not 64
       lowercase hex, a bad ref, unknown capability bits, an empty label and
       `max_uses: 0` are refused at the boundary.
-- [ ] **3.4d `pm grant create` CLI** (TTY + master password via the proof,
+- [x] **3.4d `pm grant create` CLI** (TTY + master password via the proof,
       refused in agent context with exit 5). Flags: `--label`, `--ref`/`--tag`
       (repeatable), `--command PATH` (repeatable; resolved to a canonical
       path at creation), `--expires 1h|30m|7d` (required, max 30 d),
@@ -523,6 +523,10 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       agent/TTY refusal exits 5, a full vault sends no `challenge`/`prove`
       (R.22b), and the daemon is still usable after the write (its key was
       not invalidated).
+      Done: `--expires` also accepts minutes (`30m`); interpreter refusal and
+      the TTY/agent gate happen before the password prompt; a newly created
+      `--out` is unlinked when a later step fails; `check_grant_writable` runs
+      after key derivation (needed to open the vault) but before `challenge`.
 - [ ] **3.5 `pm grant list|show|revoke` (+ `--json`).** list/show print
       metadata only, never tokens or hashes. revoke needs no password and takes
       effect on the next request. `revoke --all` exists. Tests for each.
