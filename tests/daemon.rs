@@ -122,10 +122,15 @@ impl Fixture {
     }
 }
 
-fn read_response(stream: &mut UnixStream) -> Response {
+fn try_read_response(stream: &mut UnixStream) -> std::io::Result<Response> {
     let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).expect("read response");
-    protocol::decode_response(&bytes).expect("decode response")
+    stream.read_to_end(&mut bytes)?;
+    protocol::decode_response(&bytes)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid response frame"))
+}
+
+fn read_response(stream: &mut UnixStream) -> Response {
+    try_read_response(stream).expect("read response")
 }
 
 fn try_request(
@@ -138,7 +143,7 @@ fn try_request(
     stream
         .write_all(&protocol::encode(token, request).expect("encode request"))
         .expect("write request");
-    Ok(read_response(&mut stream))
+    try_read_response(&mut stream)
 }
 
 fn request(socket: &Path, token: &SessionToken, request: &Request) -> Response {

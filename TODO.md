@@ -11,7 +11,7 @@ Rules that apply to every item:
 
 ## Phase H — housekeeping before the next feature wave
 
-- [ ] **H.1 Create `DECISIONS.md`.** Go through `PROGRESS.md` and
+- [x] **H.1 Create `DECISIONS.md`.** Go through `PROGRESS.md` and
       `PROGRESS-archive.md` and extract every standing decision and
       constraint into a short, grouped list with one line each. Groups:
       crypto, vault format and versions, CLI conventions, exit codes,
@@ -19,6 +19,9 @@ Rules that apply to every item:
       Argon2id chosen; the store version history; refs are full
       `pm://<32 hex>` with no prefixes; tag charset; `Error::Daemon` exits 1;
       unlock refuses when a daemon is already running. No code changes.
+      (Also covers dependencies and the planned grant/MCP design from
+      `MCP.md`, plus an "Open questions" section that is explicitly *not* a
+      decision list.)
 - [ ] **H.2 Split `src/main.rs` (≈1,600 lines) into `src/cli/` modules**
       (argument parsing, one module per command group, output formatting). No
       behavior change: every existing test passes unmodified, and `--help`

@@ -1,0 +1,276 @@
+# Standing decisions
+
+One line per decision, grouped. Extracted from `PROGRESS.md`,
+`PROGRESS-archive.md`, `TODO-done.md` and `MCP.md` by TODO H.1.
+
+When a decision changes, edit its line **and** record why in the
+`PROGRESS.md` entry for that iteration. The progress logs are history; do not
+rewrite them. "Planned" marks a decision already fixed in `MCP.md` that the
+code does not implement yet.
+
+## Scope and naming
+
+- `pm` in `TODO.md`, `MCP.md` and the loop prompt is the CLI binary, which
+  ships as `passmgr`; the daemon binary beside it is `pmd`.
+- Local, single-user, Unix only (Linux and macOS). No network calls, no HTTP
+  transport, no server, no sync, no telemetry.
+- Agents may **use** credentials but never read them: every agent-facing
+  surface returns refs, names, usernames, tags, field names, URLs and
+  timestamps only.
+- Plaintext reveal (`get --reveal`, later `--copy`) is for a human at a TTY
+  only, with no bypass flag. The MCP module must not be able to reach reveal
+  code.
+- Known, documented limit (do not "fix" by weakening anything): a same-user
+  process can read a child's `/proc/<pid>/environ`, and an allowlisted
+  interpreter can exfiltrate. passmgr prevents accidents and makes deliberate
+  misuse require an explicit human grant.
+
+## Crypto
+
+- Vault encryption: AES-256-GCM, 12-byte random nonce per save, 16-byte tag,
+  and the 56-byte header supplied as associated data (`src/crypto.rs`,
+  `FORMAT.md`).
+- KDF: Argon2id, version 0x13, 32-byte output key, 16-byte random salt per
+  save; parameters are stored in the header and validated against strict
+  bounds.
+- Default parameters written by this build: `m_cost` 65536 KiB, `t_cost` 3,
+  `p_cost` 1. Do not change them without a migration note and `FORMAT.md`.
+- Accepted bounds: m 8192..=1048576 KiB, t 1..=16, p 1..=8, and m >= 8 * p.
+  Out-of-range values are `UnsupportedFormat` (exit 6), never clamped.
+- Wrong password and corrupted ciphertext are deliberately indistinguishable
+  (`AuthenticationFailed`, exit 4).
+- The custom container is final; `age` and other envelopes were rejected and
+  the two must not be mixed.
+- Password generation uses `getrandom` plus rejection sampling (no modulo
+  bias): length 4..=128; presets strong (20 chars, letters/digits/symbols),
+  simple (16, alphanumeric), pin (6, digits).
+- Keys, master passwords, credential values and decrypted payloads are
+  zeroized on drop; `pmd` also `mlock`s its key best-effort.
+- Constant-time comparison for tokens and MACs; secret-bearing types have a
+  redacting `Debug` (tested).
+
+## Vault format and versions
+
+- Container version (header offset 4) and store version (first payload byte)
+  are independent counters; today they are 2 and 4.
+- Container version 1 is the legacy C format (PBKDF2, line-oriented). It is
+  detected and rejected as `LegacyVault` (exit 6), never read or written.
+- Every format change needs a reader for **every** older store version, a
+  `FORMAT.md` update, and a migration test.
+- Store history: v1 (no ids) -> v2 (ids) -> v3 (tags) -> v4
+  (`created`/`last_rotated`). Migration generates ids in memory, decodes
+  missing tags as empty and missing timestamps as `0`; the next save writes
+  v4.
+- Entry id: 16 random bytes, rendered `pm://<32 lowercase hex>`. Full ids
+  only: no prefixes, no service-based refs. Upper-case input is accepted and
+  lower-cased; anything else is `InvalidInput` (exit 2).
+- Ids are metadata, not secrets, but they live inside the encrypted payload
+  (so the file does not leak the entry count). Duplicate ids in one payload
+  are `MalformedVault`.
+- Tags: sorted, deduped, 1-32 bytes, first byte an ASCII lowercase letter or
+  digit, then `[a-z0-9._-]`, max 32 per credential. Validated on read and
+  write. `list --tag` filters with AND semantics.
+- Timestamps: `u64` Unix seconds UTC; `0` means unknown and renders as JSON
+  `null`; maximum 253402300799 (9999-12-31T23:59:59Z). `created` never
+  changes; `last_rotated` moves only when the password changes. Do not reject
+  `created > last_rotated` (backwards clocks are legitimate).
+- Field rules: service and password non-empty; no Unicode control characters
+  in service/username; each field <= 4096 bytes; <= 10000 credentials; decoded
+  payload <= 10 MiB; vault file <= 16 MiB.
+- Saves are atomic: temp file in the vault's directory, fsync, rename, and a
+  best-effort directory fsync. The vault is mode 0600.
+- Group- or world-readable vaults are currently **warned about** on use; TODO
+  8.10 turns that into a refusal, which is what the invariant requires. Do not
+  drop the warning before then.
+- One file, no compression or deduplication; the container leaks only its
+  total size and the KDF parameters.
+
+## CLI conventions
+
+- Global options come before the command:
+  `passmgr [--db PATH] [--agent] <command> [args]`; `--agent` after the
+  command is a usage error (exit 2).
+- Vault path precedence: `--db PATH`, then `$PASSMGR_DB`, then
+  `./passwords.dat`. `--db` takes one non-empty path.
+- Prompts and diagnostics go to stderr; command data goes to stdout. With
+  `--json`, stdout carries exactly one JSON document plus `\n`.
+- `list --json` prints `{"entries":[...]}`; `show --json` prints the entry
+  object. Entry keys: `ref`, `service`, `username`, `tags`, `created`,
+  `last_rotated`. There is no password key and none may be added.
+- No password ever appears in argv. Prompts read without echo; a non-TTY
+  stdin reads ordinary lines so the tool stays scriptable.
+- `get` is metadata-only; `get --reveal` is the only plaintext path. `add
+  --generate` and `edit --generate` store but never print the value.
+- Reveal gate: stdin **and** stdout must be TTYs, no agent marker
+  (`PASSMGR_AGENT`, `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_SANDBOX`; presence
+  counts even when empty) and no `--agent`. Checked before unlocking, so a
+  refusal never prompts. The decision lives in `src/agent.rs`.
+- `--agent` can only add refusal. `unlock` is human-only under the same rule;
+  `lock` needs no TTY because it can only stop the daemon.
+- `rm` is a pure alias of `delete` (same message, same exit code).
+- `edit` rotation rule: a bare `edit` or one with `--generate` rotates the
+  password; `--username`/`--rename`/`--tag`/`--clear-tags` alone is a
+  metadata-only edit and does not prompt.
+- Validate non-secret input before unlocking: bad refs, tags, options and
+  unknown services fail (2 or 3) without a password prompt.
+- Unknown options, extra arguments and misplaced flags are usage errors
+  (exit 2). `-h`/`--help` and `-V`/`--version` are accepted globally and as
+  commands.
+- A broken stdout pipe (`BrokenPipe` while writing command data) exits 0.
+- `generate` prints a fresh value on stdout. It exposes no stored secret, but
+  whether agent mode should refuse it is still open (see "Open questions").
+
+## Exit codes
+
+Defined in `src/error.rs`; this is a contract, never renumber. Use the
+`EXIT_*` constants, never a literal.
+
+- 0 success.
+- 1 runtime failure: `Io`, `Crypto`, `DuplicateService`, `Daemon`.
+- 2 usage error or invalid input (including invalid input at a prompt).
+- 3 not found: `VaultNotFound`, `ServiceNotFound`, `EntryNotFound`.
+- 4 wrong master password / failed vault authentication.
+- 5 refused (non-TTY or agent reveal, `unlock` in agent context).
+- 6 malformed, truncated or unsupported vault.
+- `Error::Crypto` stays 1, not 6: it also covers RNG and cipher-setup
+  failures, which are not a malformed file. Read-time corruption is
+  `MalformedVault` (6) or `AuthenticationFailed` (4).
+- Daemon-internal error enums (`SocketError`, `ProtocolError`,
+  `SessionError`) stay module-local; the CLI boundary maps them to
+  `Error::Daemon` (exit 1) with a message that never contains secrets.
+
+## Daemon and protocol
+
+- `pmd` holds only the derived 32-byte key, never a decrypted vault; it
+  decrypts on demand per request and drops the plaintext immediately.
+- Key handover: `pm unlock` derives and authenticates the key, spawns the
+  `pmd` found next to its own executable, and writes exactly 32 bytes to its
+  stdin, then EOF. The key never appears in argv, the environment or any
+  output; `pmd` refuses a short, long or trailing handover.
+- Startup order: harden (`RLIMIT_CORE` 0 and Linux `PR_SET_DUMPABLE` 0, both
+  fail closed) -> signal handlers -> `setsid` best effort -> verify the key
+  against the vault -> bind the socket. A wrong key never creates a socket.
+- `unlock` refuses when a daemon is already running (tells the human to run
+  `passmgr lock`), so a second unlock can never silently replace a key.
+- Runtime directory: `$XDG_RUNTIME_DIR/passmgr`, else
+  `<temp_dir>/passmgr-<euid>`; must be a real directory owned by us with mode
+  exactly 0700, otherwise refused (`InsecurePath`). Bad modes are refused, not
+  repaired, and parent directories are never created.
+- Files: `pmd.sock` 0600 (chmod after bind), `pmd.lock` 0600 (flock target),
+  `session` 0600 (session token). Paths are capped at 104 bytes so anything
+  that works on Linux also works on macOS.
+- Single instance: non-blocking exclusive `flock` on `pmd.lock`, retried every
+  5 ms for up to 250 ms (a just-exited holder can linger briefly), then
+  `AlreadyRunning`. The lock file is never unlinked; the socket is unlinked on
+  drop only if its inode still matches the one recorded at bind time.
+- Stale sockets: never steal a socket that answers `connect`; replace it only
+  after `ECONNREFUSED`. A symlink or non-socket at the path is refused
+  untouched.
+- Peer check before any read: `SO_PEERCRED` on Linux/Android, `getpeereid` on
+  macOS; any other Unix target fails closed. A mismatched uid is closed with
+  no reply. The pid is informational and never used for authorization.
+- Framing: 4-byte big-endian length prefix + JSON body, 64 KiB body cap
+  checked before slicing, one request per connection, 5 s read/write timeout,
+  200 ms accept poll.
+- Envelope: `{"version":2,"token":"<64 lowercase hex>","request":{...}}`. The
+  token is parsed before the request. Unknown envelope **fields** are
+  ignored; unknown versions and request types are hard errors. Requests are
+  validated on encode *and* decode.
+- **No request type returns plaintext, ever.** Any same-user process can reach
+  the socket, so client-side checks protect nothing; every authorization
+  decision is made in `pmd`.
+- Responses today: `pong`, `locked`, or a fixed error code `bad_request`,
+  `unsupported`, `unauthorized`. Streaming `stdout`/`stderr`/`exit` frames and
+  the `not_found`/`spawn_failed` codes are planned (2.6b). Errors never echo
+  field values or the token.
+- Session token: 32 OS-random bytes as 64 lowercase hex in
+  `$XDG_RUNTIME_DIR/passmgr/session`. Loading requires a regular 0600 file
+  owned by the user, opened `O_NOFOLLOW`, at most 512 bytes; anything else is
+  an error, never repaired.
+- The session token authorizes only `ping`, `lock`, `status` and `revoke`
+  (planned 3.6) and is **not** a human/agent boundary: holding it must never
+  be enough to use a secret. `revoke` over the session token is an accepted
+  DoS-at-worst trade-off.
+- An `unauthorized` request does not refresh the idle timer.
+- Idle timeout: default 900 s (`pmd --idle-timeout SECS`,
+  `passmgr unlock --idle-timeout SECS`); zero is refused. Activity means a
+  successfully decoded request after the peer check; malformed frames and
+  rejected tokens do not count.
+- `lock`, `SIGTERM`, `SIGINT` and the idle timeout all wipe the key, remove
+  the socket, and remove the session file only if it still holds this
+  daemon's token.
+- `client`, `daemon`, `session` and `socket` are `#[cfg(unix)]`; the CLI has
+  non-Unix stubs, and no unchecked accept path exists on an unsupported
+  platform.
+
+## Grants, approval and MCP (planned, per `MCP.md`)
+
+- Agents get access only through grants stored in the encrypted vault: scope
+  (refs, tags, optional field names), a command allowlist of canonical
+  absolute paths, capabilities, `expires_at` (max 30 days), optional
+  `max_uses`, `revoked_at`, `last_used`. Only the SHA-256 of the grant token
+  is stored.
+- Creating or approving a grant requires the master password at a TTY, proved
+  with `HMAC-SHA256(vault_key, "passmgr-approve-v1" || nonce || digest)` using
+  a single-use 60 s nonce, compared in constant time. Revoking needs no proof.
+- Interpreters and shells in a command allowlist are refused unless the human
+  passes `--allow-interpreter`.
+- `pm mcp serve` is a hand-written synchronous JSON-RPC 2.0 stdio server (no
+  MCP SDK, no async runtime): 1 MiB line cap with resync to the next newline,
+  batches rejected, stdout carries only JSON-RPC, diagnostics on stderr, and
+  requests are handled sequentially.
+- Dual era: legacy `2025-11-25` handshake and modern stateless `2026-07-28`
+  (`_meta` validation, `server/discover`, `resultType`, `serverInfo`); an
+  unknown modern version gets `-32022` with the supported list.
+- An out-of-scope ref answers exactly like a nonexistent one (no existence
+  oracle). Agent-supplied text shown to a human is sanitized (control and
+  bidi characters stripped) and labelled untrusted.
+- Grant tokens reach only the MCP server, via a one-time claim exchange, live
+  in memory, and never appear in tool output or the audit log.
+- Audit: append-only `$XDG_STATE_HOME/passmgr/audit.jsonl` (fallback
+  `~/.local/state`), 0600, one JSON object per line, hash-chained with `prev`
+  = SHA-256 of the previous line. No secrets, no tokens; `pm audit verify`
+  reports the first broken link with exit 6.
+
+## Dependencies
+
+- Allowed: `aes-gcm`, `argon2`, `getrandom`, `libc`, `serde_json`,
+  `tempfile`, `zeroize`; `proptest` as a dev-dependency only (TODO 9.2).
+- Rejected: an MCP SDK, an async runtime, a CLI framework (hand-written
+  argument parsing is deliberate), any HTTP/network crate, and `serde` derive
+  on `Credential` (it could add a password field by accident).
+- Justify every new dependency in `PROGRESS.md`.
+- `cargo audit` is not installed on this machine: skip that gate step and say
+  so in the `PROGRESS.md` entry; do not install it. A `Cargo.lock` grep test
+  for banned crates is planned (9.6).
+
+## Testing conventions
+
+- Every behavior change has a test that fails without it; every security
+  property has a test proving it, usually with a per-test random canary value
+  that must not appear in stdout, stderr, logs, audit records, socket bytes or
+  MCP output.
+- Deterministic tests: a temp dir per test, `XDG_*`/`HOME` set per test, no
+  real credentials, no network, no dependency on test order, and polling with
+  a deadline instead of fixed sleeps as synchronization.
+- Test through public interfaces and keep pure logic reachable by unit tests.
+  CLI e2e tests run the real binary with the real default KDF parameters (the
+  suite is Argon2-bound and slow).
+- `tests/daemon.rs` builds its own fixture vaults with deliberately cheap KDF
+  parameters because it does not test the KDF; the shipped defaults are never
+  lowered, and no test may weaken a shipped parameter or check.
+- PTY tests use `posix_openpt` and are Linux-only; macOS relies on the pure
+  decision-logic unit tests.
+- Never delete, `#[ignore]` or weaken a test to pass the gate. If a test is
+  wrong, fix it and explain why in `PROGRESS.md`.
+- Gate per iteration: `cargo fmt --check`,
+  `cargo clippy --all-targets -- -D warnings`, `cargo test`, then
+  `cargo audit` where it exists.
+- Keep files under ~1,000 lines and split before growing past that;
+  `src/main.rs` is already over (TODO H.2 splits it).
+
+## Open questions (not decided; do not cite as decisions)
+
+- Should `generate` refuse or redact in agent context? It prints a fresh
+  value, not a stored secret, but it is still plaintext on stdout.
+- Should `pmd` warn when `mlock` fails? It is currently silent and non-fatal.

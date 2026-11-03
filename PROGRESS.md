@@ -1,3 +1,54 @@
+## 2026-11-02 — Create `DECISIONS.md` (TODO H.1)
+
+- New `DECISIONS.md` (~280 lines, 90 bullet entries): one-line standing
+  decisions grouped as scope/naming, crypto, vault format and versions, CLI
+  conventions, exit codes, daemon/protocol, grants/approval/MCP, dependencies
+  and testing conventions.
+  `TODO.md` H.1 is checked with a note that the file also covers dependencies
+  and `MCP.md`. Cherry-picked from the rolled-back iteration-21 branch and
+  re-verified; the only code change is the flaky-test harness fix below.
+- Sourced from `PROGRESS.md`, `PROGRESS-archive.md`, `TODO-done.md`, `MCP.md`
+  and a read of `src/error.rs`, `src/agent.rs`, `src/crypto.rs`,
+  `src/protocol.rs`, `src/socket.rs`, `src/session.rs`, `src/store.rs`,
+  `src/vault.rs` and `src/main.rs`, so each line is checked against the code,
+  not only against older prose.
+- Conventions chosen for the file: one decision per line; "Planned" marks a
+  decision from `MCP.md` that the code does not implement yet; the exit-code
+  section carries the full 0-6 mapping plus the `Crypto`-stays-1 rationale; an
+  explicit "Open questions (not decided)" section keeps undecided behavior out
+  of the decision list.
+- Corrections made while extracting: the daemon has **no** `ok` response and
+  no `not_found`/`spawn_failed` code yet (recorded as `pong`/`locked`/fixed
+  error codes, with 2.6b planned); container version and store version are
+  separate counters that both have a "version 1" with different meanings, so
+  that is now stated in one place.
+- Flaky-test fix: iteration 21's gate failed in
+  `unauthorized_requests_do_not_refresh_the_idle_timeout` with
+  `ConnectionReset` while reading a response, because the daemon can expire
+  between accepting a connection and replying. That is expected, but the test
+  helper `read_response` panicked instead of returning `Err`, so the loop's
+  `_ => break` never ran. Added `try_read_response` (io::Result) and made
+  `try_request` propagate the error; the test semantics are unchanged (it
+  still requires repeated `unauthorized` replies and a prompt expiry).
+- Gate: `cargo fmt --check` clean, `cargo clippy --all-targets -- -D warnings`
+  clean, `cargo test` passes (139 lib, 20 bin, 27 CLI, 12 daemon, 8 unlock).
+  `cargo audit` is not installed on this machine; skipped, not installed.
+- **Next iteration must know:** next is **H.2** (`src/main.rs` -> `src/cli/`,
+  no behavior change, `--help` byte-identical). `DECISIONS.md` is the place to
+  check a constraint before inventing one; if an iteration changes a decision,
+  edit its line there *and* explain why in the new PROGRESS entry.
+- **NEEDS HUMAN REVIEW:** `tests/daemon.rs` builds fixture vaults with
+  `KdfParams::new(8 * 1024, 1, 1)` (the minimum bound) to keep the suite fast,
+  which is arguably "weakening the KDF to speed up tests" even though the
+  shipped default is untouched and the file does not test the KDF). Left as
+  is; `DECISIONS.md` records the current practice. A human should rule on
+  whether fixture-only cheap params are acceptable.
+- Minor doc drift found, not fixed here: `--help` in `src/main.rs` states the
+  tag rules twice, and README still says insecure vault modes are "warned
+  about" while TODO 8.10 will make them a refusal. H.2 (help text is asserted
+  byte-identical) must not "fix" the duplicate; do it in a later help/README
+  item.
+
 ## 2026-11-02 — loop note: gate failed (iteration 21)
 
 - Commits from this work iteration (TODO H.1) failed the gate and were rolled back.
