@@ -601,8 +601,8 @@ fn handle_connection(
         Request::Challenge => {
             let response = match challenges.issue(Instant::now()) {
                 Ok(nonce) => Response::Challenge(nonce),
-                // Too many unspent nonces: the bounded store is full. Nothing
-                // was issued, and this is not activity.
+                // Only a failing CSPRNG gets here; the pool never refuses a
+                // challenge because it is full (it evicts the oldest).
                 Err(_) => Response::Error(ResponseError::Busy),
             };
             let _ = write_response(&mut stream, &response);

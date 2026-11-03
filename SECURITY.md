@@ -155,6 +155,10 @@ passmgr does not and cannot protect against:
 - root, a compromised kernel, or a compromised operating system;
 - keyloggers, screen capture, or a malicious process running as the same user
   (see limits 1 and 4);
+- denial of service by a same-user process: it can kill `pmd`, hold the
+  socket, or keep issuing `challenge` requests faster than a human can approve
+  and so evict a fresh nonce (TODO R.16 keeps a single burst from doing it,
+  but not a sustained one). No secret is exposed either way;
 - a compromised agent host, or one that ignores the TTY/agent rules — the
   agent markers and terminal checks are honest signals for cooperating hosts,
   not proof of who is running the binary;

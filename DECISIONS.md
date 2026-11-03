@@ -402,9 +402,20 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
     therefore never authorize B, and a stale `Proven` cannot be read as
     consent for a later request. The first consumer is the grant write (TODO
     3.4/4.9, tracked as R.15b).
-  - At most 16 unspent nonces are held (in memory, never persisted);
-    requesting one when full answers `busy`. Expired nonces are pruned on the
-    next issue, so the window is one minute.
+  - At most 16 unspent nonces are held (in memory, never persisted). A full
+    pool never refuses a challenge: the **oldest** nonce is evicted, because
+    `challenge` needs only the session token that an agent holds by design,
+    and the approval path must not be starvable by the party it constrains
+    (TODO R.16). A single burst of sixteen challenges — an agent retrying in a
+    loop — therefore cannot block a human who asks afterwards. The rule is
+    deliberately oldest-first and not per-connection or per-holder: every
+    request is a fresh connection, the peer UID is the same for the human and
+    the agent, and no identity distinguishes them, so any cleverer rule would
+    either be spoofable or need data that does not exist. A peer that keeps
+    issuing challenges faster than one human round trip can still evict a
+    fresh nonce, exactly as it can already kill `pmd`; that residual same-user
+    DoS is documented in `SECURITY.md` and is not a privilege escalation.
+    Expired nonces are pruned before eviction, so the window is one minute.
   - `Proof` zeroizes, `Debug` renders `Proof(<redacted>)`, and equality is
     implemented as the constant-time `matches` (there is no early-exit `==`).
     The nonce and digest are public and may appear in `Debug`/errors.

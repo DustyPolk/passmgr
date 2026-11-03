@@ -56,6 +56,12 @@ pub const CHALLENGE_LIFETIME: Duration = Duration::from_secs(60);
 /// Bounds the memory a client can make the daemon hold, and the number of
 /// proofs that could still be replayed. Sixteen is far more than one human
 /// needs; the oldest-free window is one [`CHALLENGE_LIFETIME`].
+///
+/// Reaching the cap never refuses a new nonce: the **oldest** pending one is
+/// evicted instead. A `challenge` request only needs the session token, which
+/// any same-user process can read, so a client that asked for sixteen nonces
+/// must not be able to lock the human out of the one path that mints a grant.
+/// The residual risk is documented in [`Challenges::issue`].
 pub const MAX_PENDING_CHALLENGES: usize = 16;
 
 const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
@@ -235,8 +241,6 @@ pub enum PresenceError {
     UnknownChallenge,
     /// The nonce is real but older than [`CHALLENGE_LIFETIME`].
     ExpiredChallenge,
-    /// [`MAX_PENDING_CHALLENGES`] unexpired nonces are already outstanding.
-    TooManyPending,
     /// No unconsumed approval matches this digest (never approved, already
     /// consumed by an earlier write, or expired).
     NotApproved,
@@ -251,7 +255,6 @@ impl fmt::Display for PresenceError {
         match self {
             Self::UnknownChallenge => f.write_str("unknown or already used challenge"),
             Self::ExpiredChallenge => f.write_str("challenge has expired"),
-            Self::TooManyPending => f.write_str("too many outstanding challenges"),
             Self::NotApproved => f.write_str("no approval for this request"),
             Self::Random(detail) => write!(f, "could not generate a challenge: {detail}"),
             Self::UnusableKey => f.write_str("the key cannot be used for HMAC-SHA256"),
@@ -286,11 +289,31 @@ impl Challenges {
 
     /// Issue a fresh nonce, pruning expired ones first.
     ///
+    /// This never refuses because the pool is full: when
+    /// [`MAX_PENDING_CHALLENGES`] unexpired nonces are outstanding the oldest
+    /// is evicted so the new one always fits. A caller that lost its nonce
+    /// this way gets the ordinary `denied` on `prove` and simply asks again.
+    ///
+    /// The eviction policy is deliberately the oldest, not "whoever holds
+    /// the most": the socket cannot tell the human's `pm` process from an
+    /// agent (same UID, same session token, a new connection per request), so
+    /// any cleverer rule would be spoofable or would need an identity that
+    /// does not exist. The policy guarantees that a *single* burst of
+    /// challenges — the realistic accident, e.g. an agent retrying in a loop
+    /// — cannot block a human who asks afterwards. A peer that keeps issuing
+    /// challenges faster than one per human round trip can still evict a
+    /// fresh nonce, exactly as it could already kill `pmd` or hold the socket:
+    /// that is the documented same-user DoS limit (`SECURITY.md`), not a
+    /// privilege escalation.
+    ///
     /// `now` is injected so expiry is testable without sleeping.
     pub fn issue(&mut self, now: Instant) -> Result<ChallengeNonce, PresenceError> {
         self.prune(now);
+        // `pending` is in issue order, so index 0 is the oldest nonce and the
+        // only one whose loss costs the least: it was issued longest ago and
+        // has the least chance of a proof being in flight for it.
         if self.pending.len() >= MAX_PENDING_CHALLENGES {
-            return Err(PresenceError::TooManyPending);
+            self.pending.remove(0);
         }
         let nonce = ChallengeNonce::generate()?;
         self.pending.push(Pending { nonce, issued: now });
@@ -619,20 +642,45 @@ mod tests {
     }
 
     #[test]
-    fn outstanding_challenges_are_bounded_and_expired_ones_make_room() {
+    fn a_full_challenge_pool_evicts_the_oldest_instead_of_refusing() {
+        let now = Instant::now();
+        let mut challenges = Challenges::new();
+        let mut issued = Vec::new();
+        for _ in 0..MAX_PENDING_CHALLENGES {
+            issued.push(challenges.issue(now).expect("issue within the cap"));
+        }
+
+        // The seventeenth request succeeds: asking for nonces must never be a
+        // way to deny a human the challenge they need to approve anything.
+        let newest = challenges
+            .issue(now)
+            .expect("a full pool evicts the oldest instead of failing");
+        assert_eq!(challenges.pending(), MAX_PENDING_CHALLENGES);
+
+        // Exactly the oldest went away; the next-oldest and the newest work.
+        assert_eq!(
+            challenges.verify_and_consume(&issued[0], now),
+            Err(PresenceError::UnknownChallenge)
+        );
+        assert_eq!(challenges.verify_and_consume(&issued[1], now), Ok(()));
+        assert_eq!(challenges.verify_and_consume(&newest, now), Ok(()));
+    }
+
+    #[test]
+    fn expired_challenges_are_pruned_before_a_fresh_one_is_evictable() {
         let now = Instant::now();
         let mut challenges = Challenges::new();
         for _ in 0..MAX_PENDING_CHALLENGES {
             challenges.issue(now).expect("issue within the cap");
         }
-        assert_eq!(challenges.pending(), MAX_PENDING_CHALLENGES);
-        assert_eq!(challenges.issue(now), Err(PresenceError::TooManyPending));
 
-        // A minute later every old nonce is expired and pruned, so a human
-        // whose approval timed out can ask for a new challenge.
-        challenges
-            .issue(now + CHALLENGE_LIFETIME)
-            .expect("issue after expiry prunes the rest");
+        // A minute later every old nonce is expired: they are pruned first, so
+        // a nonce issued now is alone in the pool rather than competing with
+        // sixteen dead entries.
+        let later = now + CHALLENGE_LIFETIME;
+        let fresh = challenges.issue(later).expect("issue after expiry");
+        assert_eq!(challenges.pending(), 1);
+        assert_eq!(challenges.verify_and_consume(&fresh, later), Ok(()));
     }
 
     #[test]

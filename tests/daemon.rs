@@ -22,7 +22,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use passmgr::crypto::KEY_LEN;
-use passmgr::presence::{ChallengeNonce, Proof, RequestDigest};
+use passmgr::presence::{ChallengeNonce, MAX_PENDING_CHALLENGES, Proof, RequestDigest};
 use passmgr::protocol::{
     self, MAX_CHUNK_BYTES, ProveRequest, Request, Response, ResponseError, RunExit, RunFrame,
     RunRequest,
@@ -507,6 +507,73 @@ fn a_presence_proof_is_accepted_once_and_stays_out_of_daemon_output() {
             "the presence proof must never be written to daemon output"
         );
     }
+}
+
+/// Filling the challenge pool cannot lock the human out of approving: a new
+/// challenge is always issued (the oldest is evicted), and the fresh one
+/// proves normally while the evicted one is refused.
+///
+/// This is the availability half of the approval boundary. `challenge` needs
+/// only the session token, which an agent holds by design, so a flood of
+/// sixteen challenges used to answer `busy` and block the only path that
+/// mints a grant.
+#[test]
+fn approval_still_works_after_an_agent_fills_the_challenge_pool() {
+    let fixture = Fixture::new();
+    let child = fixture.start();
+    let socket = fixture.socket();
+
+    // An agent (or a retrying client) asks for every nonce the daemon used to
+    // hold, and keeps the first one.
+    let mut issued = Vec::new();
+    for _ in 0..MAX_PENDING_CHALLENGES {
+        issued.push(challenge(&socket, &fixture.token));
+    }
+
+    // The human asks now. A full pool must not answer `busy`.
+    let nonce = challenge(&socket, &fixture.token);
+    let digest = RequestDigest::new([0x5a; 32]);
+    let proof = Proof::compute(fixture.key.as_slice(), &nonce, &digest).expect("compute proof");
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce,
+                digest,
+                proof,
+            }
+        ),
+        Response::Proven,
+        "the human's fresh challenge must be usable after a flood"
+    );
+
+    // The oldest nonce was the one evicted; a valid MAC for it is still
+    // refused, so the approval came from the fresh challenge, not from a
+    // pool that quietly grew.
+    let evicted = issued.remove(0);
+    let digest = RequestDigest::new([0x5b; 32]);
+    let proof = Proof::compute(fixture.key.as_slice(), &evicted, &digest).expect("compute proof");
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce: evicted,
+                digest,
+                proof,
+            }
+        ),
+        Response::Error(ResponseError::Denied),
+        "the evicted challenge must be gone"
+    );
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    let output = child.wait_with_output().expect("wait for pmd");
+    assert!(output.status.success());
 }
 
 /// Every way a proof can be wrong is refused with the same answer, the nonce

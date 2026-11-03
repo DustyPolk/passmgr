@@ -204,8 +204,11 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   `challenge` request. The CLI, at a TTY, prompts for the master password,
   derives the key and answers `prove` with
   `HMAC-SHA256(vault_key, "passmgr-approve-v1" || nonce || request_digest)`.
-  The nonce is accepted once and only within 60 seconds. A verified proof
-  records that **exact** request digest as a one-shot approval (also 60 s);
+  The nonce is accepted once and only within 60 seconds. The daemon holds at
+  most 16 unspent nonces and always issues a new one, dropping the oldest, so
+  a client that hoards challenges cannot lock a human out of asking for one.
+  A verified proof records that **exact** request digest as a one-shot
+  approval (also 60 s);
   the write request must present the same digest and spends the approval
   once. `proven` on its own authorizes nothing, so an approval harvested for
   one request can never be replayed onto another. Every bad nonce or MAC gets

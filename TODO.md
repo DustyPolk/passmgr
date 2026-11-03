@@ -31,7 +31,7 @@ Rules that apply to every item:
       `a_verified_proof_records_exactly_the_digest_it_covered`, so this item
       is the write path's obligation, not a new mechanism.
 
-- [ ] **R.16 Any session-token holder can occupy all 16 challenge slots and
+- [x] **R.16 Any session-token holder can occupy all 16 challenge slots and
       block human approval.**
       `MAX_PENDING_CHALLENGES` (`src/presence.rs:56`) is global; `issue`
       (`src/presence.rs:282-292`) prunes only when called and otherwise
@@ -50,6 +50,16 @@ Rules that apply to every item:
       a new `challenge` still succeeds, the evicted nonce is refused and the
       newest works; add a daemon test where approval succeeds after 16
       agent-issued challenges.
+      Done: `Challenges::issue` prunes expired nonces and then evicts the
+      **oldest** when the pool is full, so it no longer fails; the
+      `PresenceError::TooManyPending` variant is gone (only a CSPRNG failure
+      answers `busy` now). No per-connection allowance: every request is a
+      fresh connection and the peer UID is identical for agent and human, so
+      such a rule would be spoofable. A sustained flood can still evict a
+      fresh nonce; recorded as same-user DoS in `SECURITY.md`. Tests: the
+      pool eviction unit test, the prune-before-evict test, and the daemon
+      test where a proof succeeds after 16 agent-issued challenges while the
+      evicted first nonce is denied.
 
 - [ ] **R.17 `store::encode` can write a payload its own decoder rejects, so
       one bad timestamp bricks the vault.**

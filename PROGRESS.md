@@ -1,3 +1,37 @@
+## 2026-11-03 — A full challenge pool evicts instead of refusing (TODO R.16)
+
+- `src/presence.rs`: `Challenges::issue` prunes expired nonces, then evicts
+  the **oldest** pending nonce when `MAX_PENDING_CHALLENGES` is reached instead
+  of returning `TooManyPending`; the variant is removed. `issue` can now fail
+  only when the CSPRNG fails, which the daemon still answers `busy` to.
+- Rationale: `challenge` needs only the session token that the agent holds by
+  design, so a client hoarding 16 nonces could answer `busy` to the human's
+  `pm grant approve` and block the only path that mints a grant. A single
+  burst of 16 (an agent retry loop) can no longer block a human who asks
+  afterwards.
+- Rejected the TODO's alternative, a per-connection allowance: the client
+  opens a new connection per request and every same-UID peer is
+  indistinguishable, so an owner id would be either spoofable or meaningless.
+  Oldest-first is the only rule that needs no identity.
+- Residual limit, documented in `SECURITY.md` "Out of scope" and
+  `DECISIONS.md`: a peer that keeps issuing challenges faster than a human
+  round trip can still evict a fresh nonce (and it can already kill `pmd`).
+  `MCP.md` now says a full pool always issues a new challenge.
+- Tests: `a_full_challenge_pool_evicts_the_oldest_instead_of_refusing`
+  (17th issue succeeds, exactly `issued[0]` is gone, `issued[1]` and the
+  newest still verify) and
+  `expired_challenges_are_pruned_before_a_fresh_one_is_evictable`; the daemon
+  test `approval_still_works_after_an_agent_fills_the_challenge_pool` fills
+  the pool over a real socket, proves with a fresh nonce (`Proven`) and gets
+  `denied` for the evicted first nonce with an otherwise valid MAC.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` green (207 lib tests,
+  19 daemon tests). `cargo audit` not installed; skipped.
+- **Next iteration must know:** R.17 (store::encode can write what its decoder
+  rejects) is next, then R.18. The daemon's `Challenge` handler still maps any
+  error to `busy`; that is now only reachable on CSPRNG failure. `pm grant
+  approve` (3.4/4.9) may still see a sustained flood evict its nonce: it
+  should treat `denied` as "ask for a new challenge", not a hard failure.
+
 ## 2026-11-03 — Record the digest a presence proof approved (TODO R.15a)
 
 - Split R.15: the daemon half is now fixed, the write half is R.15b, blocked
