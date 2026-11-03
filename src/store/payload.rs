@@ -16,7 +16,7 @@ use super::{
     STORE_VERSION_WITHOUT_GRANTS, STORE_VERSION_WITHOUT_IDS, STORE_VERSION_WITHOUT_TAGS,
     STORE_VERSION_WITHOUT_TIMESTAMPS, Timestamps, validate_tag,
 };
-use crate::crypto::MAX_PLAINTEXT_BYTES;
+use crate::crypto::{MAX_PAYLOAD_BYTES, MAX_PLAINTEXT_BYTES};
 use crate::error::{Error, Result};
 use crate::grant::{
     Capabilities, GRANT_ID_BYTES, Grant, GrantId, MAX_COMMANDS, MAX_FIELD_NAME_BYTES, MAX_GRANTS,
@@ -29,7 +29,34 @@ fn contents_too_large() -> Error {
     Error::InvalidInput("vault contents are too large".into())
 }
 
-fn byte_len(credentials: &[Credential], grants: &[Grant]) -> Result<usize> {
+/// Bytes a stored grant can gain **after** it is created: `revoked_at` and
+/// `last_used` each add 8 bytes, and `max_uses` is fixed at creation. The
+/// vault content cap deliberately excludes this growth, and
+/// [`crate::crypto::MAX_PLAINTEXT_GROWTH_BYTES`] reserves
+/// `GRANT_GROWTH_BYTES * MAX_GRANTS` for it, so a vault accepted at the cap
+/// can always save a revocation or a recorded use (TODO R.46).
+pub const GRANT_GROWTH_BYTES: usize = 16;
+
+fn grant_growth_bytes(grant: &Grant) -> usize {
+    let mut growth = 0;
+    if grant.revoked_at_unix().is_some() {
+        growth += 8;
+    }
+    if grant.last_used_unix().is_some() {
+        growth += 8;
+    }
+    growth
+}
+
+/// Both sizes the writer needs: the exact number of bytes it emits and the
+/// content size the cap applies to (the encoded size minus the grant fields
+/// that may appear after creation).
+struct PayloadSize {
+    encoded: usize,
+    content: usize,
+}
+
+fn byte_len(credentials: &[Credential], grants: &[Grant]) -> Result<PayloadSize> {
     let mut total: usize = 1 + 4 + 4;
     for credential in credentials {
         total = total
@@ -56,7 +83,16 @@ fn byte_len(credentials: &[Credential], grants: &[Grant]) -> Result<usize> {
             .checked_add(grant_byte_len(grant))
             .ok_or_else(contents_too_large)?;
     }
-    Ok(total)
+    let mut content = total;
+    for grant in grants {
+        content = content
+            .checked_sub(grant_growth_bytes(grant))
+            .ok_or_else(contents_too_large)?;
+    }
+    Ok(PayloadSize {
+        encoded: total,
+        content,
+    })
 }
 
 /// Encoded size of one grant record. Every part is already bounded
@@ -108,6 +144,11 @@ fn write_string(out: &mut Vec<u8>, value: &str) {
 }
 
 /// Serialize credentials and grants for encryption.
+///
+/// The cap applies to the payload's **content**: the encoded size minus the
+/// bytes of grant fields that are absent until the grant is revoked or used.
+/// That keeps room for those fields, which can appear after this call, inside
+/// the container's slightly larger plaintext bound (TODO R.46).
 pub fn encode(credentials: &[Credential], grants: &[Grant]) -> Result<Zeroizing<Vec<u8>>> {
     if credentials.len() > MAX_CREDENTIALS {
         return Err(Error::InvalidInput(format!(
@@ -121,10 +162,11 @@ pub fn encode(credentials: &[Credential], grants: &[Grant]) -> Result<Zeroizing<
             grants.len()
         )));
     }
-    let total = byte_len(credentials, grants)?;
-    if total > MAX_PLAINTEXT_BYTES {
+    let size = byte_len(credentials, grants)?;
+    if size.content > MAX_PLAINTEXT_BYTES {
         return Err(Error::InvalidInput(format!(
-            "vault contents are too large ({total} bytes; maximum is {MAX_PLAINTEXT_BYTES})"
+            "vault contents are too large ({} bytes; maximum is {MAX_PLAINTEXT_BYTES})",
+            size.content
         )));
     }
 
@@ -148,7 +190,7 @@ pub fn encode(credentials: &[Credential], grants: &[Grant]) -> Result<Zeroizing<
         stored_grants.push(stored);
     }
 
-    let mut out = Zeroizing::new(Vec::with_capacity(total));
+    let mut out = Zeroizing::new(Vec::with_capacity(size.encoded));
     out.push(STORE_VERSION);
     out.extend_from_slice(&(credentials.len() as u32).to_le_bytes());
     for credential in credentials {
@@ -171,7 +213,7 @@ pub fn encode(credentials: &[Credential], grants: &[Grant]) -> Result<Zeroizing<
     for stored in &stored_grants {
         encode_grant(&mut out, stored);
     }
-    debug_assert_eq!(out.len(), total);
+    debug_assert_eq!(out.len(), size.encoded);
     Ok(out)
 }
 
@@ -384,7 +426,7 @@ pub struct Payload {
 
 /// Parse decrypted vault contents.
 pub fn decode(data: &[u8]) -> Result<Payload> {
-    if data.len() > MAX_PLAINTEXT_BYTES {
+    if data.len() > MAX_PAYLOAD_BYTES {
         return Err(Error::MalformedVault("credential data is too large".into()));
     }
     let mut cursor = Cursor::new(data);

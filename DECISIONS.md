@@ -129,6 +129,14 @@ code does not implement yet.
 - Field rules: service and password non-empty; no Unicode control characters
   in service/username; each field <= 4096 bytes; <= 10000 credentials; decoded
   payload <= 10 MiB; vault file <= 16 MiB.
+- The 10 MiB payload limit bounds **content**, not the bytes a grant gains
+  after creation. `revoked_at` and `last_used` add 8 bytes each, up to 16 KiB
+  over all 1,024 grants; `store::encode` subtracts those present-fields bytes
+  before comparing against `MAX_PLAINTEXT_BYTES`, and crypto/`decode` accept
+  `MAX_PAYLOAD_BYTES` = 10 MiB + 16 KiB. A vault written at the cap can
+  therefore always save a revocation or a recorded use (TODO R.46). Chosen
+  over refusing grant growth at the cap because the kill switch must not fail
+  on a full vault. Readers accept 16 KiB more plaintext than writers produce.
 - Saves are atomic: temp file in the vault's directory, fsync, rename, and a
   best-effort directory fsync. The vault is mode 0600.
 - Writers serialize on an exclusive `flock` over the sidecar `<vault>.lock`

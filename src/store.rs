@@ -42,7 +42,7 @@ use crate::error::{Error, Result};
 use crate::text::escape_quoted;
 
 mod payload;
-pub use payload::{Payload, decode, encode};
+pub use payload::{GRANT_GROWTH_BYTES, Payload, decode, encode};
 
 pub const MAX_CREDENTIALS: usize = 10_000;
 pub const MAX_FIELD_BYTES: usize = 4096;

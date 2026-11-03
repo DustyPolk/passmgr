@@ -1,3 +1,35 @@
+## 2026-11-03 — Keep room for grant growth above the payload cap (TODO R.46)
+
+- `src/store/payload.rs`: `byte_len` now returns `PayloadSize { encoded,
+  content }`. The 10 MiB `MAX_PLAINTEXT_BYTES` check applies to `content`, the
+  encoded size minus the `revoked_at`/`last_used` fields (8 bytes each) that
+  appear only after a grant is created; `encoded` sizes the buffer and keeps
+  the `debug_assert_eq!` exact. `decode` accepts `MAX_PAYLOAD_BYTES`.
+- `src/crypto.rs`: new `MAX_PLAINTEXT_GROWTH_BYTES` (16 bytes x 1,024 grants
+  = 16 KiB) and `MAX_PAYLOAD_BYTES`; `check_plaintext_len` and the decrypt
+  bound use the latter. `src/store.rs` re-exports `GRANT_GROWTH_BYTES`.
+- Why: a vault written at the content cap had no bytes left for a revocation,
+  so `grant revoke --all` / `run` answered `internal` on the kill switch. I
+  chose "exempt the bounded post-creation growth from the cap" over only
+  reserving space for *new* grants: the reserve keeps future vaults from
+  landing at the wall but still cannot revoke a vault an older build already
+  wrote at the cap. This form makes both states work. `FORMAT.md` and a
+  `DECISIONS.md` bullet document the content cap vs. the 16 KiB headroom.
+- Tests: `a_revocation_fits_a_vault_written_at_the_payload_cap` in
+  `src/daemon/tests.rs` fills credentials (measured with the real codec, not
+  recomputed sizes) until `store::encode` emits exactly 10,485,760 bytes,
+  encrypts with cheap KDF params, then requires `revoke_grants(...)` to return
+  `Ok(1)` and the reopened vault to hold the revocation. Proved it fails on
+  the old rule (temporary `size.encoded > MAX` check): it answered
+  `Internal`. `grant_growth_headroom_covers_the_whole_grant_cap` in
+  `src/store/tests.rs` is a compile-time assert tying 16 x `MAX_GRANTS` to
+  the headroom. The new test takes ~6 s (debug AES-GCM over 10 MiB several
+  times), hence its cheap KDF.
+- Gate: fmt, clippy -D warnings, cargo test (all suites) pass.
+- **Next iteration must know:** the cap is now "content", so error text for a
+  too-large vault reports the content size, which can be a few bytes below the
+  encoded size; do not "fix" that by reporting `encoded`. R.47 is next.
+
 ## 2026-11-03 — Authorize a run with the clock read after the lock (TODO R.45)
 
 - `src/daemon/run.rs`: `record_use` no longer takes a `now`; it reads

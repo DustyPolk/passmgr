@@ -796,3 +796,17 @@ fn rejects_oversized_field_length() {
         Error::MalformedVault(_)
     ));
 }
+
+/// TODO R.46: a stored grant grows by 16 bytes after creation (`revoked_at`
+/// and `last_used`). The container's plaintext headroom must cover that for
+/// every grant the payload can hold, or a vault written at the content cap
+/// could never record a revocation or a use (the kill switch would fail).
+#[test]
+fn grant_growth_headroom_covers_the_whole_grant_cap() {
+    // Evaluated at compile time: a change to either bound fails the build
+    // instead of silently making a vault written at the cap unrevocable.
+    const {
+        assert!(GRANT_GROWTH_BYTES == 16); // revoked_at + last_used, 8 each
+        assert!(GRANT_GROWTH_BYTES * MAX_GRANTS <= crate::crypto::MAX_PLAINTEXT_GROWTH_BYTES);
+    }
+}

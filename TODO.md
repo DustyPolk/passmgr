@@ -1021,7 +1021,7 @@ Rules that apply to every item:
       `a_run_is_denied_when_its_grant_expires_during_the_lock_wait` in
       `tests/daemon_run.rs` (fixture `with_grant_expiring_in`).
 
-- [ ] **R.46 At the payload size limit a revocation cannot be saved.**
+- [x] **R.46 At the payload size limit a revocation cannot be saved.**
       Revoking or recording a use adds 8 bytes to a grant record
       (`src/store/payload.rs:93-101`); `check_grant_writable`
       (`src/vault.rs:319-323`) admits a grant right up to
@@ -1032,6 +1032,9 @@ Rules that apply to every item:
       Fix: reserve the growth (e.g. 16 bytes per grant) in the pre-check and
       `byte_len`, or exempt revocation growth from the cap.
       Test: in that state `revoke_grants` succeeds.
+      Done: the 10 MiB cap now bounds *content* (encoded size minus
+      post-creation `revoked_at`/`last_used`); crypto/`decode` accept
+      `MAX_PAYLOAD_BYTES` = 10 MiB + 16 KiB (16 bytes x 1,024 grants).
 
 - [ ] **R.47 `passmgr run` exits 0 when its stdout pipe closes, hiding the
       child's status.**

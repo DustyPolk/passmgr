@@ -358,7 +358,9 @@ impl Vault {
     ///
     /// [`Vault::save_with_key`] refuses a payload that holds more than
     /// [`crate::grant::MAX_GRANTS`] grants or more than
-    /// [`crypto::MAX_PLAINTEXT_BYTES`] bytes, but `pm grant create` spends the
+    /// [`crypto::MAX_PLAINTEXT_BYTES`] bytes of content (a grant's
+    /// post-creation fields do not count; see `FORMAT.md`), but
+    /// `pm grant create` spends the
     /// human's one-shot approval *before* it writes. The CLI asks this question
     /// first, with the vault it opened using the same derived key, so a vault
     /// that is already full is refused before the proof is spent (TODO R.22).

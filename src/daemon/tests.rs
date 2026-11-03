@@ -4,6 +4,8 @@
 
 use super::*;
 
+use crate::grant::Grant;
+
 fn handover_bytes(key: &[u8], token: &SessionToken) -> Vec<u8> {
     let mut bytes = key.to_vec();
     bytes.extend_from_slice(token.as_bytes());
@@ -585,5 +587,122 @@ fn revocation_does_not_lose_to_a_concurrent_vault_write() {
     assert!(
         vault.grant(concurrent_id).is_some(),
         "the revocation must not undo the concurrent write"
+    );
+}
+
+/// Build the largest credential list, together with `grant`, that the payload
+/// writer accepts, so the payload sits exactly on [`MAX_PLAINTEXT_BYTES`].
+///
+/// The per-credential sizes are measured with the real codec instead of being
+/// recomputed, so a format change fails the caller's exact-cap assertion
+/// rather than silently making the test vacuous.
+fn credentials_filled_to_the_payload_cap(grant: &Grant) -> Vec<crate::store::Credential> {
+    use crate::crypto::MAX_PLAINTEXT_BYTES;
+    use crate::store::{Credential, MAX_FIELD_BYTES};
+
+    let grants = std::slice::from_ref(grant);
+    let encoded_len = |credentials: &[Credential]| {
+        crate::store::encode(credentials, grants)
+            .expect("a filled payload must fit")
+            .len()
+    };
+    let make = |service: String, username: String, password_len: usize| {
+        Credential::new(service, username, Zeroizing::new("p".repeat(password_len)))
+            .expect("credential")
+    };
+
+    let empty = encoded_len(&[]);
+    // Every full-size credential has the same five-byte service name, so it
+    // adds exactly the same number of bytes.
+    let full = make("00000".into(), "u".into(), MAX_FIELD_BYTES);
+    let unit = encoded_len(std::slice::from_ref(&full)) - empty;
+    // Smallest possible credential (five-byte service, one-byte username and
+    // password); the last credential gets the leftover bytes.
+    let min = make("00000".into(), "u".into(), 1);
+    let min_len = encoded_len(std::slice::from_ref(&min)) - empty;
+
+    let body = MAX_PLAINTEXT_BYTES - empty;
+    let count = (body - min_len) / unit;
+    let mut credentials: Vec<Credential> = (0..count)
+        .map(|index| make(format!("{index:05}"), "u".into(), MAX_FIELD_BYTES))
+        .collect();
+    let used = encoded_len(&credentials);
+    let extra = MAX_PLAINTEXT_BYTES - used - min_len;
+    // Up to 4095 leftover bytes go into the username, the rest into the
+    // password, so both stay within MAX_FIELD_BYTES.
+    let username_extra = extra.min(MAX_FIELD_BYTES - 1);
+    credentials.push(make(
+        format!("{count:05}"),
+        "u".repeat(1 + username_extra),
+        1 + (extra - username_extra),
+    ));
+
+    assert_eq!(
+        encoded_len(&credentials),
+        MAX_PLAINTEXT_BYTES,
+        "the fixture must sit exactly on the content cap"
+    );
+    credentials
+}
+
+/// TODO R.46: revoking a grant adds its `revoked_at` (8 bytes), and recording
+/// a use adds `last_used` (8 bytes). A vault written at the content cap used
+/// to have no room for either, so the kill switch answered `internal` exactly
+/// when the vault was full. The content cap excludes that bounded growth; the
+/// container accepts the slightly larger payload.
+#[test]
+fn a_revocation_fits_a_vault_written_at_the_payload_cap() {
+    use crate::crypto::{KdfParams, MAX_PAYLOAD_BYTES, MAX_PLAINTEXT_BYTES};
+    use crate::grant::{Capabilities, Grant, GrantSpec, Scope, TokenHash};
+
+    let directory = tempfile::tempdir().expect("tempdir");
+    let path = directory.path().join("vault.dat");
+    let master = "test master password";
+    let now = 1_700_000_000u64;
+    let entry = crate::store::EntryId::generate().expect("entry id");
+
+    let grant = Grant::create(
+        GrantSpec {
+            label: "at the cap".into(),
+            scope: Scope::new(vec![entry], Vec::new(), None).expect("scope"),
+            commands: vec![std::path::PathBuf::from("/usr/bin/true")],
+            capabilities: Capabilities::RUN,
+            expires_at: now + 3_600,
+            max_uses: None,
+        },
+        TokenHash::of(b"cap grant"),
+        now,
+    )
+    .expect("grant");
+    let grant_id = grant.id();
+
+    let credentials = credentials_filled_to_the_payload_cap(&grant);
+    let plaintext = crate::store::encode(&credentials, std::slice::from_ref(&grant))
+        .expect("the largest accepted payload");
+    assert_eq!(plaintext.len(), MAX_PLAINTEXT_BYTES);
+
+    // Cheap KDF parameters: this test is about the size cap, not the KDF.
+    let container = crate::crypto::encrypt(&plaintext, master, KdfParams::new(8 * 1024, 1, 1))
+        .expect("encrypt the full vault");
+    std::fs::write(&path, &container).expect("write vault");
+    let key = crate::crypto::unlock_key(&container, master).expect("derive key");
+    let key = LockedKey::new(key).expect("lock key");
+
+    let revoked = revoke_grants(
+        &path,
+        &key,
+        &GrantWatermarks::new(),
+        GrantRevokeRequest::Id(grant_id),
+        now,
+    )
+    .expect("a revocation must fit a vault at the content cap");
+    assert_eq!(revoked, 1);
+
+    let vault = Vault::open_with_key(&path, key.as_slice()).expect("reopen the bigger vault");
+    assert!(vault.grant(grant_id).expect("grant").is_revoked());
+    let content = crate::store::encode(vault.list(), vault.grants()).expect("re-encode");
+    assert!(
+        content.len() <= MAX_PAYLOAD_BYTES,
+        "the revoked payload must stay inside the container's plaintext bound"
     );
 }

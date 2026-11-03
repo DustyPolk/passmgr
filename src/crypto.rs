@@ -37,7 +37,19 @@ pub const MAGIC: [u8; 4] = *b"PMGR";
 pub const FORMAT_VERSION: u8 = 2;
 
 pub const MAX_VAULT_BYTES: usize = 16 * 1024 * 1024;
+/// Content cap for the vault payload, credentials and grants together.
 pub const MAX_PLAINTEXT_BYTES: usize = 10 * 1024 * 1024;
+/// Plaintext headroom beyond [`MAX_PLAINTEXT_BYTES`] for grant fields that
+/// appear *after* a record is created: `revoked_at` and `last_used` add 8
+/// bytes each. A payload may hold at most 1,024 grants, so the bounded growth
+/// is 16 KiB. Without this headroom a vault written at the content cap could
+/// never record a revocation or a use, and the kill switch would fail exactly
+/// when the vault is full (TODO R.46). The content cap itself is still
+/// enforced by the payload writer, which counts the pre-growth size.
+pub const MAX_PLAINTEXT_GROWTH_BYTES: usize = 16 * 1024;
+/// The largest plaintext this build encrypts or decrypts: the content cap
+/// plus the bounded post-creation growth.
+pub const MAX_PAYLOAD_BYTES: usize = MAX_PLAINTEXT_BYTES + MAX_PLAINTEXT_GROWTH_BYTES;
 
 const KDF_ARGON2ID: u8 = 1;
 const AEAD_AES256_GCM: u8 = 1;
@@ -221,9 +233,9 @@ fn derive_key(
 }
 
 fn check_plaintext_len(plaintext: &[u8]) -> Result<()> {
-    if plaintext.len() > MAX_PLAINTEXT_BYTES {
+    if plaintext.len() > MAX_PAYLOAD_BYTES {
         return Err(Error::InvalidInput(format!(
-            "vault contents are too large ({} bytes; maximum is {MAX_PLAINTEXT_BYTES})",
+            "vault contents are too large ({} bytes; maximum is {MAX_PAYLOAD_BYTES})",
             plaintext.len()
         )));
     }
@@ -422,7 +434,7 @@ pub fn decrypt_with_key(container: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8
         )
         .map_err(|_| Error::AuthenticationFailed)?;
 
-    if plaintext.len() > MAX_PLAINTEXT_BYTES {
+    if plaintext.len() > MAX_PAYLOAD_BYTES {
         return Err(Error::MalformedVault(
             "decrypted vault contents are too large".into(),
         ));

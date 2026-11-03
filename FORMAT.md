@@ -185,7 +185,12 @@ implementation applies additional validation when reading and writing:
   usernames);
 - each service/username/password field is at most 4096 bytes;
 - at most 10,000 credentials and at most 1,024 grants;
-- the decoded payload is at most 10 MiB, credentials and grants together.
+- the payload's *content* is at most 10 MiB, credentials and grants together.
+  A grant's `revoked_at` and `last_used` fields (8 bytes each) are written
+  after creation and are excluded from that content cap: the container accepts
+  up to 16 KiB more (16 bytes x 1,024 grants), so a vault written at the cap
+  can always record a revocation or a use. The writer refuses a content size
+  over 10 MiB; a reader accepts up to 10 MiB + 16 KiB.
 
 An empty vault encodes as `05 00 00 00 00 00 00 00 00`: store version 5, a
 credential count of zero and a grant count of zero. Version 4
