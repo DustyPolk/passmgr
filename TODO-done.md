@@ -97,3 +97,106 @@ come first.
       pre-split binary. Also fixed a `BrokenPipe` panic in the daemon test
       helper, not a behavior change.)
 
+## Phase 2 — unlock daemon (`pmd`)
+
+- [x] **2.1 Protocol module.** Length-prefixed JSON framing with `version` field and
+      a hard max message size (e.g. 64 KiB). Pure functions, no I/O. Tests:
+      round-trip, truncated frame, oversized length, bad version, unknown request
+      type — all rejected without panic. (`src/protocol.rs`: `encode`/`decode`,
+      streaming `FrameDecoder`, envelope `{"version":1,"request":{"type":...}}`,
+      types `ping`/`lock`/`run`, 64 KiB body cap checked before slicing, unknown
+      fields tolerated, unknown types/versions rejected, `run.env`/`ref`/`command`
+      bounds validated on encode and decode, and no request type can carry or
+      return a plaintext value.)
+- [x] **2.2 Socket setup.** `$XDG_RUNTIME_DIR/passmgr/pmd.sock` (dir 0700, socket
+      0600; macOS per-user 0700 dir fallback). Stale-socket detection, single
+      instance lock. Tests where the platform allows. (`src/socket.rs`:
+      `RuntimePaths` resolves/validates the 0700 dir, `DaemonSocket::bind`
+      takes a non-blocking `flock` on `pmd.lock` before touching the socket,
+      and only unlinks a socket after a probe connect gets `ECONNREFUSED`.
+      Non-sockets and symlinks at the path are refused untouched. Drop removes
+      the socket and releases the lock. 15 unit tests.)
+- [x] **2.3 Peer credential check.** `SO_PEERCRED` on Linux, `getpeereid` on macOS;
+      reject mismatched UID before parsing a request. Test with a helper that
+      connects and asserts rejection when the check is forced to fail.
+      (`PeerCredentials` + `peer_credentials()`, and
+      `DaemonSocket::accept_peer()` rejects with `SocketError::PeerRejected`
+      before reading; unsupported Unix targets fail closed. Linux pid is
+      informational; macOS reports no pid.)
+- [x] **2.4a Daemon core + `pmd` binary.** Reusable `src/daemon.rs` that holds the
+      derived 32-byte vault key (not the decrypted vault), `mlock`s it,
+      zeroizes it on drop, sets `prctl(PR_SET_DUMPABLE, 0)` and disables core
+      dumps, installs SIGTERM/SIGINT handlers, and serves length-prefixed
+      `ping`/`lock` requests over `accept_peer()` (length-prefixed responses too).
+      `pmd` reads the key from stdin (never argv) and takes `--vault` and
+      `--runtime-dir`. Tests: ping/lock round-trip, lock removes the socket and
+      stops the process, SIGTERM and SIGINT exit cleanly and remove the socket,
+      malformed/oversized messages are rejected without a crash, a wrong key
+      does not start, a second instance is refused, `run` is refused for now,
+      and the secret never appears in socket bytes or daemon stderr.
+- [x] **2.4b `pm unlock` / `pm lock` CLI.** `unlock` is human-only (TTY on stdin
+      and stdout, refused in agent context with exit 5), prompts once, derives
+      and verifies the key, spawns `pmd` detached with the key over stdin, waits
+      for readiness, then exits. `lock` sends the lock request and reports.
+      Tests: non-TTY/agent refusal, unlock then lock end-to-end, no key or
+      secret in argv/stdout/stderr.
+- [x] **2.4c Idle timeout.** Default 15 minutes, configurable; daemon exits and
+      wipes the key after inactivity, refreshed by successful requests. Test:
+      short timeout exits, activity before the deadline keeps it alive.
+      (`pmd --idle-timeout SECS`; `passmgr unlock --idle-timeout SECS`
+      (also `=SECS`) passes it through. Activity = a request decoded after the
+      peer check; malformed frames are answered but never refresh. Zero is
+      refused. Not an authorization boundary until 2.5/3.1: any same-user
+      process can `ping` to keep the daemon alive; documented in `daemon.rs`.)
+- [x] **2.5 Session token file** (`$XDG_RUNTIME_DIR/passmgr/session`, 0600) written
+      at unlock; requests carry it; mismatch rejected. Test: wrong token rejected,
+      token file mode is 0600. (Token is 32 random bytes as 64 lowercase hex
+      chars; protocol bumped to version 2 with a required `token` envelope
+      field; `unauthorized` is a distinct response and does not refresh the
+      idle timer. `lock` and a daemon exit remove the file. Clients refuse a
+      token file that is not a regular 0600 file owned by the user.)
+- [x] **2.6 `run --env NAME=<ref> -- <cmd>` via the daemon.** Split into ordered
+      pieces because the item spans the redactor, the wire protocol, the daemon
+      and the CLI. (All pieces landed: 2.6a–2.6d.)
+- [x] **2.6a Streaming redactor (`src/redact.rs`).** Pure, reusable byte-stream
+      redactor: replaces every occurrence of the injected value with a fixed
+      marker and holds back a partial-match suffix so a value split across two
+      reads is still caught. Bounded pending buffer, zeroized on drop, redacted
+      `Debug`. Tests: whole and repeated occurrences, a split at every byte
+      offset, byte-at-a-time input, overlapping occurrences, binary bytes, an
+      empty value, `finish` flushing a trailing partial prefix, the pending
+      bound, and no secret bytes in `Debug`. (If the default `[REDACTED]`
+      marker would itself contain the value, a run of a byte absent from the
+      value is used instead. Best-effort: a hostile child that holds the value
+      can still exfiltrate it by other channels.)
+- [x] **2.6b Protocol streaming `run` responses.** `stdout`, `stderr` and `exit`
+      frames with hex-encoded data (arbitrary bytes survive JSON), plus stable
+      failure codes (`not_found`, `spawn_failed`). Tests: round-trip of binary
+      payloads, chunk-size cap, unknown frame types rejected without panic.
+      (`RunFrame` is separate from `Response`; 16 KiB raw chunk cap; `exit`
+      carries `code` xor `signal`; protocol stays v2; response code moved to
+      `src/protocol/response.rs`.)
+- [x] **2.6c Daemon executes `run`.** Decrypt, resolve the `pm://` ref, spawn the
+      child with only the requested variable injected, stream redacted
+      stdout/stderr, return its exit code. Tests: child sees the variable; the
+      value appears in neither socket bytes nor daemon output; missing ref and
+      failed spawn are distinct non-fatal errors; streaming output larger than
+      one chunk is redacted across chunk boundaries. (`src/runner.rs` owns the
+      spawn/redact/relay loop; the daemon refuses loader/shell-hook variable
+      names and starts the child from a fixed env allowlist, not the daemon's
+      environment. **Transitional:** `run` is authorized by the session token
+      until TODO 3.6 adds grants.)
+- [x] **2.6d CLI `run` + client reader.** `passmgr run --env NAME=<ref> -- <cmd>`
+      forwards frames to its own stdout/stderr and exits with the child's status;
+      refuses malformed specs and non-daemon operation with stable exit codes.
+      Tests: end-to-end injection, output relay, redaction, exit-code
+      propagation, and agent-mode use (this is the intended agent surface).
+      Audit-log assertions belong to 3.3, when the log exists.
+      (Exactly one `--env` per run because the protocol injects one value;
+      signal N renders as 128+N. Reader is `client::run`; e2e in `tests/run.rs`.)
+- [x] **2.7 `SECURITY.md` limit note**: same-user process can read
+      `/proc/<pid>/environ` while the child runs. Not optional. (Created
+      `SECURITY.md` with the accepted limits, interpreter exfiltration,
+      output-only redaction, and the transitional session-token disclosure;
+      pinned by `tests/docs.rs`.)
+
