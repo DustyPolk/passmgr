@@ -125,7 +125,7 @@ Rules that apply to every item:
       the error names the class without echoing the label; `tests/docs.rs`
       pins both documents to the constant.
 
-- [ ] **R.19 Consuming a non-last challenge reorders the pool, so the next
+- [x] **R.19 Consuming a non-last challenge reorders the pool, so the next
       full pool evicts the newest nonce, not the oldest.**
       `Challenges::verify_and_consume` takes the nonce with
       `self.pending.swap_remove(index)` (`src/presence.rs:340`), which moves
@@ -157,6 +157,20 @@ Rules that apply to every item:
       and the newest still verifies. The existing
       `a_full_challenge_pool_evicts_the_oldest_instead_of_refusing`
       (`src/presence.rs:645`) only covers a pool with no consumption.
+      Done: `verify_and_consume` now uses order-preserving
+      `self.pending.remove(index)` (`src/presence.rs:348`), with a doc comment
+      saying why. Correction to the finding: consuming a *middle* nonce never
+      put a newer one at index 0 -- `swap_remove` only moves the last entry
+      into the freed slot -- so that case already evicted the oldest survivor.
+      The observable breakage is spending the **oldest** nonce, which made the
+      newest take its place and the next `challenge` evict it. Tests cover
+      both: `consuming_the_oldest_nonce_keeps_the_oldest_survivor_evictable`
+      and `consuming_a_middle_nonce_leaves_the_oldest_at_index_zero` (unit),
+      plus the end-to-end
+      `spending_the_oldest_challenge_never_evicts_a_newer_one` in
+      `tests/daemon.rs`; the first and third fail with `swap_remove` (checked
+      by running them against it). `MCP.md`, `DECISIONS.md` and the
+      `MAX_PENDING_CHALLENGES` doc now say that spending keeps issue order.
 
 - [ ] **R.20 Four files are far over the ~1,000-line limit, and this range
       grew two of them.**

@@ -207,6 +207,8 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   The nonce is accepted once and only within 60 seconds. The daemon holds at
   most 16 unspent nonces and always issues a new one, dropping the oldest, so
   a client that hoards challenges cannot lock a human out of asking for one.
+  Spending a nonce keeps the remaining ones in issue order, so the oldest is
+  still the one dropped when two approvals overlap (TODO R.19).
   A verified proof records that **exact** request digest as a one-shot
   approval (also 60 s);
   the write request must present the same digest and spends the approval

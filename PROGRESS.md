@@ -1,3 +1,32 @@
+## 2026-11-03 — Keep the challenge pool in issue order (TODO R.19)
+
+- `src/presence.rs:348`: `Challenges::verify_and_consume` spent the nonce with
+  `swap_remove`, so the last (newest) entry moved into the freed slot. When the
+  spent nonce was the **oldest** (index 0) the newest landed there and the next
+  `challenge` -- which evicts index 0 as "the oldest" -- destroyed it, so a
+  flood could kill a nonce issued after the human started. Now uses
+  order-preserving `remove(index)`; the pool caps at 16, so the memmove is
+  irrelevant.
+- Correction to the review text: consuming a *middle* nonce never promoted a
+  newer one to index 0 (`swap_remove` only fills the freed slot with the last
+  entry), so that case was already evicting the oldest survivor. The observable
+  defect is the oldest-consume case, and the tests target it. Recorded in the
+  TODO item.
+- Docs: `MCP.md` and `DECISIONS.md` now also state that spending a nonce keeps
+  the remaining ones in issue order, which makes "the oldest is evicted" true
+  while two approvals overlap. `MAX_PENDING_CHALLENGES`' doc says the same.
+- Tests (both fail with `swap_remove`, verified by re-running them against it):
+  `consuming_the_oldest_nonce_keeps_the_oldest_survivor_evictable` and
+  `consuming_a_middle_nonce_leaves_the_oldest_at_index_zero` (unit), and
+  `spending_the_oldest_challenge_never_evicts_a_newer_one` (`tests/daemon.rs`,
+  through the real socket: prove the oldest, refill, force one eviction, assert
+  the next-oldest is denied and the two new nonces still prove).
+- Gate: fmt, clippy `-D warnings`, full `cargo test` green (lib 223; daemon 20).
+  `cargo audit` not installed; skipped per instructions.
+- **Next iteration must know:** the review's "consume a non-last nonce"
+  reproduction was arithmetically wrong; if a future refactor adds another
+  consumer of `pending`, it must keep order too (the doc comment says so).
+  Next unchecked item is R.20 (split the four oversized files).
 ## 2026-11-03 — Review of a51e85f..388faab
 
 Six commits (R.15a, R.16, R.17, R.18, 3.4a, 3.4b) reviewed against

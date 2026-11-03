@@ -58,7 +58,9 @@ pub const CHALLENGE_LIFETIME: Duration = Duration::from_secs(60);
 /// needs; the oldest-free window is one [`CHALLENGE_LIFETIME`].
 ///
 /// Reaching the cap never refuses a new nonce: the **oldest** pending one is
-/// evicted instead. A `challenge` request only needs the session token, which
+/// evicted instead. Spending a nonce keeps the rest in issue order, so
+/// "oldest" stays true while several approvals are in flight. A `challenge`
+/// request only needs the session token, which
 /// any same-user process can read, so a client that asked for sixteen nonces
 /// must not be able to lock the human out of the one path that mints a grant.
 /// The residual risk is documented in [`Challenges::issue`].
@@ -325,6 +327,12 @@ impl Challenges {
     /// The nonce is removed on *every* outcome, including expiry and an
     /// unknown value: a caller that fails the accompanying proof cannot retry
     /// against the same challenge, so one issue allows one attempt.
+    ///
+    /// Removal preserves issue order, even when the spent nonce is not the
+    /// newest. [`Self::issue`] evicts index 0 as "the oldest", so a swap with
+    /// the last entry would move the newest nonce to the front and the next
+    /// full pool would evict that instead (TODO R.19). The pool holds at most
+    /// [`MAX_PENDING_CHALLENGES`] entries, so the memmove is irrelevant.
     pub fn verify_and_consume(
         &mut self,
         nonce: &ChallengeNonce,
@@ -337,7 +345,7 @@ impl Challenges {
         else {
             return Err(PresenceError::UnknownChallenge);
         };
-        let pending = self.pending.swap_remove(index);
+        let pending = self.pending.remove(index);
         if now.saturating_duration_since(pending.issued) >= CHALLENGE_LIFETIME {
             return Err(PresenceError::ExpiredChallenge);
         }
@@ -663,6 +671,63 @@ mod tests {
             Err(PresenceError::UnknownChallenge)
         );
         assert_eq!(challenges.verify_and_consume(&issued[1], now), Ok(()));
+        assert_eq!(challenges.verify_and_consume(&newest, now), Ok(()));
+    }
+
+    #[test]
+    fn consuming_the_oldest_nonce_keeps_the_oldest_survivor_evictable() {
+        let now = Instant::now();
+        let mut challenges = Challenges::new();
+        let mut issued = Vec::new();
+        for _ in 0..MAX_PENDING_CHALLENGES {
+            issued.push(challenges.issue(now).expect("issue within the cap"));
+        }
+
+        // Spend the oldest nonce: a `swap_remove` would move the *newest*
+        // nonce into index 0 and the next eviction would destroy that one
+        // instead of the oldest survivor.
+        assert_eq!(challenges.verify_and_consume(&issued[0], now), Ok(()));
+        let refill = challenges.issue(now).expect("refill the freed slot");
+        assert_eq!(challenges.pending(), MAX_PENDING_CHALLENGES);
+        let newest = challenges
+            .issue(now)
+            .expect("a full pool evicts the oldest");
+
+        // Eviction must take the oldest survivor (issued[1]); everything issued
+        // after the consumption survives.
+        assert_eq!(
+            challenges.verify_and_consume(&issued[1], now),
+            Err(PresenceError::UnknownChallenge),
+            "the oldest survivor is the one evicted"
+        );
+        assert_eq!(challenges.verify_and_consume(&issued[2], now), Ok(()));
+        assert_eq!(challenges.verify_and_consume(&refill, now), Ok(()));
+        assert_eq!(challenges.verify_and_consume(&newest, now), Ok(()));
+    }
+
+    #[test]
+    fn consuming_a_middle_nonce_leaves_the_oldest_at_index_zero() {
+        let now = Instant::now();
+        let mut challenges = Challenges::new();
+        let mut issued = Vec::new();
+        for _ in 0..MAX_PENDING_CHALLENGES {
+            issued.push(challenges.issue(now).expect("issue within the cap"));
+        }
+
+        // Two approvals in flight: spend a middle nonce, then force an
+        // eviction. Whatever the internal order, the oldest *unspent* nonce
+        // (issued[0]) must be the one that goes, and the newer ones stay.
+        assert_eq!(challenges.verify_and_consume(&issued[1], now), Ok(()));
+        let refill = challenges.issue(now).expect("refill the freed slot");
+        let newest = challenges
+            .issue(now)
+            .expect("a full pool evicts the oldest");
+        assert_eq!(
+            challenges.verify_and_consume(&issued[0], now),
+            Err(PresenceError::UnknownChallenge),
+            "issued[0] is the oldest unspent nonce"
+        );
+        assert_eq!(challenges.verify_and_consume(&refill, now), Ok(()));
         assert_eq!(challenges.verify_and_consume(&newest, now), Ok(()));
     }
 

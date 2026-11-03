@@ -576,6 +576,89 @@ fn approval_still_works_after_an_agent_fills_the_challenge_pool() {
     assert!(output.status.success());
 }
 
+/// Spending an old challenge must not move a newer one to the front of the
+/// eviction queue: the challenge that follows must still drop the oldest
+/// *unspent* nonce, never one that was issued after the human started.
+///
+/// `verify_and_consume` used to `swap_remove`, so spending the oldest nonce
+/// moved the newest into index 0 and the next `challenge` evicted that one
+/// (TODO R.19).
+#[test]
+fn spending_the_oldest_challenge_never_evicts_a_newer_one() {
+    let fixture = Fixture::new();
+    let child = fixture.start();
+    let socket = fixture.socket();
+
+    let mut issued = Vec::new();
+    for _ in 0..MAX_PENDING_CHALLENGES {
+        issued.push(challenge(&socket, &fixture.token));
+    }
+
+    // A human proves the oldest nonce while an agent keeps flooding
+    // `challenge`.
+    let digest = RequestDigest::new([0x6a; 32]);
+    let proof = Proof::compute(fixture.key.as_slice(), &issued[0], &digest).expect("compute proof");
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce: issued[0],
+                digest,
+                proof,
+            }
+        ),
+        Response::Proven
+    );
+
+    // Refill the freed slot, then force one eviction. The oldest survivor is
+    // `issued[1]`; a swap_remove would have sacrificed a newer nonce instead.
+    let refill = challenge(&socket, &fixture.token);
+    let newest = challenge(&socket, &fixture.token);
+
+    let digest = RequestDigest::new([0x6b; 32]);
+    let proof = Proof::compute(fixture.key.as_slice(), &issued[1], &digest).expect("compute proof");
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce: issued[1],
+                digest,
+                proof,
+            }
+        ),
+        Response::Error(ResponseError::Denied),
+        "the oldest unspent challenge must be the one evicted"
+    );
+
+    // The nonces issued after the consumption survive and still prove.
+    for nonce in [refill, newest] {
+        let digest = RequestDigest::new([0x6c; 32]);
+        let proof = Proof::compute(fixture.key.as_slice(), &nonce, &digest).expect("compute proof");
+        assert_eq!(
+            present(
+                &socket,
+                &fixture.token,
+                ProveRequest {
+                    nonce,
+                    digest,
+                    proof,
+                }
+            ),
+            Response::Proven,
+            "a nonce issued after the consumption must not be evicted"
+        );
+    }
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    let output = child.wait_with_output().expect("wait for pmd");
+    assert!(output.status.success());
+}
+
 /// Every way a proof can be wrong is refused with the same answer, the nonce
 /// is spent by the attempt, and the daemon keeps serving.
 #[test]

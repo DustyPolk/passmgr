@@ -431,6 +431,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
     fresh nonce, exactly as it can already kill `pmd`; that residual same-user
     DoS is documented in `SECURITY.md` and is not a privilege escalation.
     Expired nonces are pruned before eviction, so the window is one minute.
+    Spending a nonce removes only that entry and leaves the rest in issue
+    order, so the entry at index 0 stays the oldest even when a non-last
+    challenge is consumed; `swap_remove` would have promoted the newest and
+    the next eviction would have destroyed it (TODO R.19).
   - `Proof` zeroizes, `Debug` renders `Proof(<redacted>)`, and equality is
     implemented as the constant-time `matches` (there is no early-exit `==`).
     The nonce and digest are public and may appear in `Debug`/errors.
