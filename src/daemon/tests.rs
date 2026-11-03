@@ -101,8 +101,20 @@ fn exchange(
     approvals: &mut presence::Approvals,
 ) -> Response {
     let frame = protocol::encode(token, request).expect("encode");
+    exchange_frame(&frame, token, key, challenges, approvals)
+}
+
+/// Send one already-encoded frame, for payloads [`exchange`] cannot build
+/// because they are invalid by construction. Everything else is identical.
+fn exchange_frame(
+    frame: &[u8],
+    token: &SessionToken,
+    key: &LockedKey,
+    challenges: &mut presence::Challenges,
+    approvals: &mut presence::Approvals,
+) -> Response {
     let (server, mut client) = UnixStream::pair().expect("socket pair");
-    client.write_all(&frame).expect("send request");
+    client.write_all(frame).expect("send request");
     let handled = handle_connection(server, token, key, challenges, approvals);
     assert!(
         !matches!(handled, Handled::Locked(_) | Handled::Run(..)),
@@ -284,4 +296,57 @@ fn grant_create_refuses_an_expired_request_without_spending_the_approval() {
     // still there for a corrected one.
     assert_eq!(approvals.pending(), 1);
     assert_eq!(approvals.take(&expired.digest(), Instant::now()), Ok(()));
+}
+
+/// TODO R.21: a frame whose command path carries terminal control characters
+/// is refused at decode, before the approval store is consulted. The human's
+/// approval for the request they actually saw is still spendable, and the
+/// forged frame is a `bad_request`, never a `denied` that would look like a
+/// spent approval.
+#[test]
+fn a_grant_frame_with_a_forged_command_does_not_spend_the_approval() {
+    use crate::protocol::GrantCreateRequest;
+
+    let key = LockedKey::new(Zeroizing::new(vec![0x5Au8; KEY_LEN])).expect("key");
+    let token = SessionToken::generate().expect("token");
+    let mut challenges = presence::Challenges::new();
+    let mut approvals = presence::Approvals::new();
+    let now = unix_now().expect("clock");
+    let approved = grant_request(now, 600);
+
+    assert_eq!(
+        prove_round_trip(
+            &token,
+            &key,
+            approved.digest(),
+            &mut challenges,
+            &mut approvals
+        ),
+        Response::Proven
+    );
+
+    // Take the exact frame the approving CLI would send, then rewrite only
+    // its command list to the path an agent would like a human to misread.
+    let encoded = protocol::encode(
+        &token,
+        &Request::GrantCreate(GrantCreateRequest::from_grant_request(&approved)),
+    )
+    .expect("encode");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&encoded[4..]).expect("decode envelope");
+    value["request"]["commands"] = serde_json::json!(["/usr/bin/gh\u{1b}[2K\r/usr/bin/true"]);
+    let body = value.to_string();
+    let mut forged = (body.len() as u32).to_be_bytes().to_vec();
+    forged.extend_from_slice(body.as_bytes());
+
+    assert_eq!(
+        exchange_frame(&forged, &token, &key, &mut challenges, &mut approvals),
+        Response::Error(ResponseError::BadRequest)
+    );
+    assert_eq!(
+        approvals.pending(),
+        1,
+        "a frame no write could accept must not spend the approval"
+    );
+    assert_eq!(approvals.take(&approved.digest(), Instant::now()), Ok(()));
 }

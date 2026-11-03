@@ -359,7 +359,14 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   canonicalizes first (TODO 3.6/4.5) and hands the check a canonical path.
   A run-capable grant needs at least one command; a list-only grant may have
   none. Commands are sorted and deduplicated, max 32, each <= `MAX_PATH_BYTES`
-  and valid UTF-8.
+  and valid UTF-8. A command path is untrusted text that the approval prompt
+  and `pm grant show` render, and it may come from an agent request, so it is
+  held to the label's character table: no control, bidi, zero-width/format,
+  line-separator or variation-selector character can be stored (TODO R.21).
+  Unlike a label, a bad command is named in the error, but with every hidden
+  character written as a `\u{..}` escape, so the error itself cannot move the
+  cursor or erase the line around it. Create and decode share the check, so
+  stored grants need no migration.
 - Grant limits: label 1..=64 bytes with no control, bidi, zero-width/format,
   line-separator or variation-selector characters (TODO R.14). The label is
   stored verbatim and later rendered by `pm grant list`, so validation

@@ -12,12 +12,14 @@ use super::{MAX_COMMANDS, MAX_FIELD_NAME_BYTES, MAX_LABEL_BYTES};
 use crate::error::{Error, Result};
 use crate::protocol::MAX_PATH_BYTES;
 
-/// The classes of character a grant label may not contain, spelled the same
-/// way in the rejection error, `FORMAT.md` and `DECISIONS.md` (TODO R.18).
+/// The classes of character a grant label or command path may not contain,
+/// spelled the same way in the rejection error, `FORMAT.md` and
+/// `DECISIONS.md` (TODO R.18, R.21).
 ///
 /// The error names the whole class rather than echoing the offending code
 /// point (or the label), because the label is untrusted text that later gets
-/// printed to a terminal.
+/// printed to a terminal. A bad command is echoed back, but escaped (see
+/// [`escape_hidden`]) so its own characters cannot forge the error line.
 pub const LABEL_FORBIDDEN_CLASSES: &str =
     "control, bidi, zero-width/format, line-separator or variation-selector";
 
@@ -39,11 +41,13 @@ pub(super) fn validate_label(label: &str) -> Result<()> {
 }
 
 /// Characters that are invisible, reorder neighbouring text, or can hide part
-/// of a label from a human reading `pm grant list`.
+/// of a string from a human reading it.
 ///
-/// The label is stored verbatim and later shown to a human, and from TODO 4.9
-/// it may come from an approved agent request, so this module rejects the
-/// whole class instead of trusting the renderer. Covered: C0/C1 controls;
+/// Both callers store the text verbatim and later show it to a human -- the
+/// label in `pm grant list`, each command path in the approval prompt -- and
+/// from TODO 4.9 the text may come from an agent request, so this module
+/// rejects the whole class instead of trusting the renderer. Covered: C0/C1
+/// controls;
 /// every Unicode **format** character (`Cf`) this build knows, which includes
 /// the bidi controls (U+061C, U+200E/U+200F, U+202A-U+202E, U+2066-U+2069),
 /// the zero-width set (U+200B-U+200D, U+2060-U+2064), soft hyphen, the tag
@@ -95,7 +99,30 @@ fn is_hidden_or_reordering(character: char) -> bool {
     )
 }
 
+/// Render untrusted path text for an error message.
+///
+/// Every character [`is_hidden_or_reordering`] refuses is written as its
+/// `\u{..}` escape, so a command such as `/usr/bin/gh\u{1b}[2K\r` is named in
+/// the error without moving the cursor or erasing the line around it. The
+/// quote and backslash are escaped too, so the quoted form cannot be closed
+/// early. Everything visible (including non-ASCII scripts) is kept as is.
+fn escape_hidden(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if is_hidden_or_reordering(character) || matches!(character, '\\' | '\'') {
+            escaped.extend(character.escape_debug());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
+}
+
 pub(super) fn validate_commands(commands: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+    // TODO R.21: a command path has the same provenance as a label, so it
+    // must not be able to hide or reorder what an approving human reads.
+    // Share the label's class table: one rule, one place. Stored grants need
+    // no migration; the check is on the create and decode paths.
     if commands.len() > MAX_COMMANDS {
         return Err(Error::InvalidInput(format!(
             "a grant allows at most {MAX_COMMANDS} commands"
@@ -106,19 +133,28 @@ pub(super) fn validate_commands(commands: Vec<PathBuf>) -> Result<Vec<PathBuf>> 
         let text = command
             .to_str()
             .ok_or_else(|| Error::InvalidInput("a grant command must be valid UTF-8".into()))?;
-        if !command.is_absolute() {
+        if text.is_empty() {
+            return Err(Error::InvalidInput(
+                "a grant command must be a non-empty path".into(),
+            ));
+        }
+        if text.chars().any(is_hidden_or_reordering) {
             return Err(Error::InvalidInput(format!(
-                "grant command '{text}' must be an absolute path"
+                "grant command '{}' must not contain {LABEL_FORBIDDEN_CLASSES} \
+                 characters",
+                escape_hidden(text)
             )));
         }
-        if text.is_empty() || text.contains('\0') {
-            return Err(Error::InvalidInput(
-                "a grant command must be a non-empty path without NUL bytes".into(),
-            ));
+        if !command.is_absolute() {
+            return Err(Error::InvalidInput(format!(
+                "grant command '{}' must be an absolute path",
+                escape_hidden(text)
+            )));
         }
         if text.len() > MAX_PATH_BYTES {
             return Err(Error::InvalidInput(format!(
-                "grant command '{text}' exceeds {MAX_PATH_BYTES} bytes"
+                "grant command '{}' exceeds {MAX_PATH_BYTES} bytes",
+                escape_hidden(text)
             )));
         }
     }

@@ -152,7 +152,9 @@ without control, bidi, zero-width/format, line-separator or
 variation-selector characters; capability bits and flag bits limited to the
 known set; `created` and `expires_at` at most 253402300799 and at most 30 days
 apart; at most 256 refs, 32 tags, 32 field names (each 1-32 bytes matching
-`[a-z0-9_-]+`) and 32 commands (absolute UTF-8 paths of at most 4096 bytes);
+`[a-z0-9_-]+`) and 32 commands (absolute UTF-8 paths of at most 4096 bytes,
+with no control, bidi, zero-width/format, line-separator or variation-selector
+characters -- the same classes the label rule below refuses);
 no duplicate refs, tags, field names or commands inside one grant; a `run`
 grant needs at least one command; `max_uses`, when present, is at least 1 and
 not below `uses`.

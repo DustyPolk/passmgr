@@ -173,6 +173,17 @@ fn grant_create_rejects_payloads_the_vault_writer_would_refuse() {
             serde_json::json!(crate::store::MAX_TIMESTAMP_UNIX + 1),
         );
     });
+    // TODO R.21: a command path is untrusted text a human will be shown.
+    for command in [
+        "/usr/bin/gh\u{1b}[2K\r/usr/bin/true",
+        "/usr/bin/gh\ntrue",
+        "/tmp/\u{202e}bin",
+        "/tmp/a\u{200b}b",
+    ] {
+        refused(&|request| {
+            request.insert("commands".into(), serde_json::json!([command]));
+        });
+    }
 }
 
 #[test]

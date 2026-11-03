@@ -1,3 +1,36 @@
+## 2026-11-03 — Refuse hidden characters in grant command paths (TODO R.21)
+
+- `src/grant/validate.rs`: `validate_commands` now rejects any command path
+  holding a character the label table (`is_hidden_or_reordering`) refuses --
+  C0/C1 controls, bidi, zero-width/format, line/paragraph separators and
+  variation selectors -- so an agent-chosen path cannot forge the approval
+  prompt or the `pm grant list|show` output (TODO 3.5/4.9).
+- A rejection names the offending command, but `escape_hidden` renders every
+  forbidden character (plus `'` and `\`) as its debug escape, so the error
+  cannot move the cursor or erase the line. The label error still names only
+  the class and never echoes the label.
+- Create and decode both call this one function, so the check is on the write
+  path and every older reader; stored grants need no migration and the format
+  version is unchanged.
+- Docs: `FORMAT.md` and `DECISIONS.md` state the command rule and why the same
+  table applies; the class constant is unchanged, so `tests/docs.rs` still
+  pins it.
+- Tests: `tests/grant.rs::commands_must_not_hide_or_reorder_text` (four hidden
+  forms refused through both `Grant::create` and `GrantRequest::new`, error
+  escapes them and echoes no hidden character, visible `/usr/bin/gh` and
+  `/usr/bin/grüße` still accepted); four new cases in
+  `src/protocol/tests.rs::grant_create_rejects_payloads_the_vault_writer_would_refuse`;
+  `src/daemon/tests.rs::a_grant_frame_with_a_forged_command_does_not_spend_the_approval`
+  (hand-built wire frame answers `bad_request` and the proved approval is
+  still spendable). `exchange` was split into `exchange` + `exchange_frame`
+  so a test can send a frame it could not build through `Request`.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` all green.
+- **Next iteration must know:** R.22 is next -- vault-level limits still burn
+  an approval after the master-password proof (only the expiry is checked in
+  `check_approvable`). The daemon decode order and `Handled` path are
+  unchanged. If a new error ever echoes a path, use `escape_hidden`.
+
 ## 2026-11-03 — Review of 388faab..4662526
 
 Scope: `4662526` (`grant_create` request and daemon handler, TODO 3.4c),

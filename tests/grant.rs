@@ -309,6 +309,57 @@ fn accepted_labels_hold_only_visible_characters() {
 }
 
 #[test]
+fn commands_must_not_hide_or_reorder_text() {
+    // TODO R.21: a command path reaches a human in the approval prompt and
+    // in `pm grant show`, and it may come from an agent request. Without the
+    // label's character filter, `/usr/bin/gh\x1b[2K\r/usr/bin/true` would
+    // render as `/usr/bin/gh` and the human would approve a binary they never
+    // saw.
+    let cases = [
+        ("/usr/bin/gh\u{1b}[2K\r", "/usr/bin/gh\\u{1b}[2K\\r"),
+        ("/usr/bin/gh\ntrue", "/usr/bin/gh\\ntrue"),
+        ("/tmp/\u{202e}bin", "/tmp/\\u{202e}bin"),
+        ("/tmp/a\u{200b}b", "/tmp/a\\u{200b}b"),
+    ];
+    for (command, escaped) in cases {
+        let mut bad = spec(Capabilities::RUN);
+        bad.commands = vec![PathBuf::from(command)];
+        let err = Grant::create(bad.clone(), TokenHash::of(TOKEN), NOW)
+            .expect_err(&format!("command {command:?} was accepted"));
+        let text = err.to_string();
+        assert!(
+            text.contains(LABEL_FORBIDDEN_CLASSES),
+            "{command:?}: the error must name the class: {text}"
+        );
+        // The offending command is named, but escaped, so the error itself
+        // cannot move the cursor or split into a second line.
+        assert!(
+            text.contains(escaped),
+            "{command:?}: the error must name the offending command as {escaped:?}: {text}"
+        );
+        assert!(!text.contains(command), "{command:?}: {text}");
+        assert!(
+            !text
+                .chars()
+                .any(|character| FORBIDDEN_IN_LABELS.contains(&character)),
+            "{command:?}: the error echoes a hidden character: {text}"
+        );
+        // The pre-spend path the CLI uses refuses it too, so no approval can
+        // ever be spent on a request the vault writer would reject.
+        assert!(GrantRequest::new(bad, TokenHash::of(TOKEN)).is_err());
+    }
+
+    // Ordinary visible paths stay usable, including a non-ASCII file name.
+    for command in ["/usr/bin/gh", "/usr/bin/grüße"] {
+        let mut good = spec(Capabilities::RUN);
+        good.commands = vec![PathBuf::from(command)];
+        let grant = Grant::create(good, TokenHash::of(TOKEN), NOW)
+            .unwrap_or_else(|err| panic!("visible command {command:?} was rejected: {err}"));
+        assert_eq!(grant.commands(), [PathBuf::from(command)]);
+    }
+}
+
+#[test]
 fn commands_are_sorted_deduplicated_and_must_be_absolute() {
     let spec = GrantSpec {
         commands: vec![
@@ -740,6 +791,13 @@ fn stored_grants_are_revalidated() {
     let mut hidden_label = stored_grant();
     hidden_label.label = "deploy\u{202e}prod".into();
     assert!(Grant::from_stored(hidden_label).is_err());
+
+    // TODO R.21: a stored command path is held to the label's class table,
+    // so a grant written by an older or hostile writer cannot smuggle a
+    // control sequence into the approval prompt or `pm grant show`.
+    let mut hidden_command = stored_grant();
+    hidden_command.commands = vec![PathBuf::from("/usr/bin/gh\u{1b}[2K")];
+    assert!(Grant::from_stored(hidden_command).is_err());
 
     let mut oversized_label = stored_grant();
     oversized_label.label = "x".repeat(MAX_LABEL_BYTES + 1);

@@ -245,7 +245,7 @@ Rules that apply to every item:
       `SERIAL` mutex, so the two binaries can run concurrently; both still run
       their own tests one at a time.
 
-- [ ] **R.21 A grant's command allowlist accepts terminal control, bidi and
+- [x] **R.21 A grant's command allowlist accepts terminal control, bidi and
       zero-width characters, so an agent-chosen path can forge the line a
       human reads when approving it.**
       `validate_commands` (`src/grant/validate.rs:105-118`) rejects only a
@@ -281,6 +281,12 @@ Rules that apply to every item:
       extend `grant_create_rejects_payloads_the_vault_writer_would_refuse` so a
       frame carrying the escaped path is `bad_request` and leaves no approval
       spent.
+      Done: `validate_commands` shares the private `is_hidden_or_reordering`
+      table; the error names the command with every hidden character escaped
+      (`escape_hidden`, which also escapes a quote and a backslash). Both
+      `Grant::create` and
+      `GrantRequest::new` use it, so create and decode agree and stored grants
+      need no migration.
 
 - [ ] **R.22 "Never spent on a request no write could accept" is false for
       vault-level limits, so a full vault silently burns the approval.**
