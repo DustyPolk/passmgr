@@ -1108,6 +1108,63 @@ Rules that apply to every item:
       Test: `tests/layout.rs` stays green with every file under ~800 lines;
       test counts unchanged.
 
+- [ ] **R.55 `SECURITY.md`'s terminal-safety bullet claims more than the code
+      does, and nothing pins it.**
+      `SECURITY.md:50-56` says "Every value passmgr echoes that came from an
+      argument ... is rendered with hidden characters (C0/C1 controls, bidi
+      controls, zero-width and variation selectors) written as visible
+      `\u{..}` escapes", and that agent-supplied argv "cannot emit an OSC 52
+      clipboard write or erase the line it is printed on". That is false for
+      service names and usernames today: `validate_service`/`validate_username`
+      still refuse only `char::is_control` (open R.48), so
+      `passmgr add --generate $'svc\u{202E}gnp.exe' bob` exits 0 and prints
+      `Credential 'svc<U+202E>gnp.exe' added successfully`, and `list` prints
+      the raw U+202E before the `(user) [pm://...]` part of the line
+      (confirmed against the built binary; C0/C1 are rejected, so the exposed
+      class is bidi, zero-width and variation selectors). No test in
+      `tests/docs.rs` mentions this bullet, so the sentence can also drift
+      further without a failing test.
+      Failure: a reviewer, or an agent told to rely on `SECURITY.md`, treats
+      every echoed argv value as terminal-safe and trusts a reordered `list`
+      line — the unclosed RLO reverses the `pm://` reference the human is about
+      to paste into a grant — and nothing notices if a later change makes the
+      universal wording more wrong.
+      Fix: scope the bullet to what the code does now (the error lines the CLI
+      printer escapes and the argv values it enumerates: reference, tag, field
+      name, `--env` name, duration, flag, `--db` path) and name R.48 as the
+      remaining gap; widen it back when R.48 lands. Keep it aligned with
+      `DECISIONS.md`'s "agent-supplied text shown to a human is sanitized"
+      rule.
+      Test: a `tests/docs.rs` test scoped to the `## What passmgr protects`
+      section (`markdown_section`) asserts the narrowed wording and, while
+      R.48 is open, that the doc does not claim every echoed argv value is
+      escaped; the per-site behavior stays proven by
+      `tests/cli_args_escape.rs`.
+
+- [ ] **R.56 `Redactor::finish`'s doc states the invariant the fixed window
+      deliberately dropped.**
+      `src/redact.rs:94-97` says "A held-back suffix is by construction only a
+      proper prefix of the secret, so emitting it does not reveal the value."
+      Since R.36 the holdback is content-independent: for secret `abcdef`,
+      `push(b"xyz")` holds `xyz`, which is not a prefix, and `finish` returns
+      it. `consume`'s own doc (`src/redact.rs:109-117`) gives the real reason
+      ("shorter than the secret by construction"), so the file contradicts
+      itself; the "never contains a complete occurrence" contract holds only
+      because of the length bound.
+      Failure: the next change that trusts `:96` — e.g. holding only bytes that
+      are a prefix, to restore the sentence — reintroduces the
+      content-dependent holdback R.36 exists to remove, and an agent that
+      controls child output learns the secret's prefix byte-by-byte from the
+      relay timing; alternatively a reviewer auditing "only a proper prefix can
+      leave the redactor" concludes the code is broken and adds an assertion
+      that panics on real output.
+      Fix: say the held suffix is "at most `secret.len() - 1` bytes, so it
+      cannot contain a complete occurrence; its content is arbitrary".
+      Test: a `src/redact.rs` unit test `the_held_tail_is_arbitrary_bytes`:
+      `redact("abcdef", b"xyz") == b"xyz"`, mid-stream `push(b"xyz")` returns
+      nothing, and `push(b"abcdef")` returns only the marker. A prefix-only
+      holdback fails the first two.
+
 ## Phase 3 — grants and audit log
 
 The design for grants, approval and audit lives in `MCP.md` ("Grants and the

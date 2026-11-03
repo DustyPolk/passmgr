@@ -1,3 +1,77 @@
+## 2026-11-03 — Review of 2208a50..a14dc54
+
+- Range: 10 commits (`03b7a31` argv escaping, `ce0a4b7` grant existence
+  oracle, `1665846` docs, `d5e0762` A-then-B approval, `2d5c1ea` canonical
+  exec, `bf6bcb6` daemon-enforcement tests, `a14dc54` fixed-window redaction,
+  plus the previous review and the loop archive), 28 files, ~2.9k added lines.
+  Reviewed every changed file except the `PROGRESS-archive.md` blob, opened the
+  surrounding code where the diff was not decisive, and ran the targeted
+  suites named below. No source, test or doc edit other than this review's
+  `TODO.md`/`PROGRESS.md`.
+- Findings: 2, both documentation. Secret exposure 0; authorization holes 0;
+  unsafe input handling 0; crypto misuse 0; maintainability 0; drift 2
+  (`R.55`, `R.56`) — `R.55` also closes the one missing-test gap (the new
+  `SECURITY.md` property had no test).
+- `R.55`: `SECURITY.md:50-56` says every argv-derived echo escapes hidden
+  characters, but service names and usernames still print raw bidi/zero-width
+  characters (open `R.48`); confirmed against the built binary, and no
+  `tests/docs.rs` test pins the bullet.
+- `R.56`: `src/redact.rs:96-97` still calls the held tail "a proper prefix of
+  the secret"; since `R.36` it is arbitrary bytes bounded only by length, and
+  the `consume` doc below it says so correctly.
+- Judged fine (do not redo):
+  - Escaping chain `src/text.rs` → validators/`Error::Display` → the
+    `report_runtime_error` backstop is idempotent: escaped text contains no
+    hidden characters, so the second pass is a no-op, and `escape_quoted` also
+    escapes `'`/`\`. `Error::GrantNotFound` is the only interpolated value left
+    unescaped at its own site, but the printer backstop covers it.
+  - `R.31` oracle fix: `serve_run` runs `check_grant_for_run` (state, RUN
+    capability, command) before `get_by_ref`, and a scope refusal maps to
+    `NotFound`. The four-state test compares whole `RunFrame` vectors; the CLI
+    counterpart asserts exits 5/5/5/3 plus the message text.
+  - `R.34` canonical exec: the path is canonicalized once, checked and spawned
+    from the same `Path`; `resolve_commands` (`src/cli/grant.rs`) canonicalizes
+    `--command` at create, so the allowlist and the request agree; `$0` is the
+    canonical path. The ctime-based lock-open signal in the swap test is sound
+    (`open_with_key` takes no lock; the first lock-file touch is
+    `lock_for_update`, after the allowlist check). 12/12 runs green.
+  - `R.36` redactor: the length-based holdback is correct, the discarded prefix
+    is zeroized, `Drop` zeroizes both buffers, `Debug` prints lengths only, and
+    the held tail is emitted before `Message::Done` (a cancelled relay drops it
+    on purpose). `tests/redaction_timing.rs` discriminates: under the old
+    matching-prefix holdback the identical 35-byte prefix is relayed during the
+    pause. Its 500 ms window is a lower bound on a leak, not a synchronization
+    sleep.
+  - `Vault::save_with_key` + `crypto::encrypt_with_key`: fresh random nonce on
+    every write (no AES-GCM nonce reuse), the template is authenticated before
+    sealing, and only the salt/KDF parameters are reused — which is exactly
+    what keeps the daemon's held key valid, as the doc says.
+  - Grant-token file reader (`src/grant/file.rs`): `O_NOFOLLOW`, `fstat` on the
+    opened descriptor, `mode & 0o077 == 0`, uid check, size cap — the
+    README/MCP "no group or world permission bits (0600 or 0400 in practice)"
+    and "owned by you" wording is accurate and pinned by `tests/docs.rs`.
+  - `denied_env_name`'s denylist lacks `GCONV_PATH`, `LOCPATH`,
+    `PYTHONSTARTUP`, `PERL5OPT`, `NODE_OPTIONS` and `SSH_ASKPASS`, but it is
+    not exploitable: the value injected into the chosen name is always the
+    credential, never agent-chosen, so the agent controls the name and not the
+    path or config it points at.
+  - `concurrent_runs_cannot_exceed_max_uses` 40/40 and the symlink-swap test
+    12/12 on this machine; no flake. Under extreme contention `record_use`'s
+    8 retries return `Internal` (fail closed, before any child) instead of
+    `Denied`; not reachable at 16 threads and not security-relevant.
+  - MCP.md is still an unimplemented contract (`request_claim` and friends),
+    and `SECURITY.md`'s "no audit record is written today" matches the code
+    (no audit module).
+- Gate: review only — no code change, so no full `cargo test` run. Targeted
+  runs of the prebuilt test binaries: `daemon_run` 40×
+  (`concurrent_runs_cannot_exceed_max_uses`) and 12×
+  (`a_symlink_swapped_after_the_allowlist_check_cannot_change_the_program`),
+  plus the in-range diff read in full and `tests/redaction_timing.rs` read
+  line by line.
+- **Next iteration must know:** the first unchecked item is still `R.36a`
+  (marker can complete a secret), then `R.37`/`R.38` (secret outliving the run
+  and the key), then this review's `R.55`/`R.56`.
+
 ## 2026-11-03 — Make redaction's holdback independent of the secret (TODO R.36)
 
 - `src/redact.rs::consume` used to keep only a tail that was a proper prefix
