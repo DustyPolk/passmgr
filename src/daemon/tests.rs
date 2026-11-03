@@ -298,6 +298,64 @@ fn grant_create_refuses_an_expired_request_without_spending_the_approval() {
     assert_eq!(approvals.take(&expired.digest(), Instant::now()), Ok(()));
 }
 
+/// TODO R.23: the daemon's pre-spend check also enforces the 30-day cap,
+/// not just "expires in the future". A request one hour past the cap is a
+/// `bad_request` and leaves the human's approval unspent; exactly 30 days is
+/// still accepted, so the boundary did not drift shut.
+#[test]
+fn grant_create_refuses_a_request_longer_than_thirty_days_without_spending_the_approval() {
+    use crate::grant::MAX_GRANT_LIFETIME_SECS;
+
+    let key = LockedKey::new(Zeroizing::new(vec![0x5Au8; KEY_LEN])).expect("key");
+    let token = SessionToken::generate().expect("token");
+    let mut challenges = presence::Challenges::new();
+    let mut approvals = presence::Approvals::new();
+    let now = unix_now().expect("clock");
+    // An hour over the cap, not one second over: the daemon reads its own
+    // clock, so a tick between this `now` and the daemon's must not make the
+    // test pass a request that is really over the limit. The exact one-second
+    // boundary is covered deterministically by `grant::validate_expiry`'s own
+    // tests.
+    let too_long = grant_request(now, MAX_GRANT_LIFETIME_SECS + 3_600);
+
+    assert_eq!(
+        prove_round_trip(
+            &token,
+            &key,
+            too_long.digest(),
+            &mut challenges,
+            &mut approvals
+        ),
+        Response::Proven
+    );
+    assert_eq!(
+        grant_create_round_trip(&token, &key, &too_long, &mut challenges, &mut approvals),
+        Response::Error(ResponseError::BadRequest)
+    );
+    // The writer would reject this on its expiry rule alone, so the approval
+    // must survive for a corrected request.
+    assert_eq!(approvals.pending(), 1);
+    assert_eq!(approvals.take(&too_long.digest(), Instant::now()), Ok(()));
+
+    // Exactly 30 days is the documented limit and must still be approved.
+    let boundary = grant_request(now, MAX_GRANT_LIFETIME_SECS);
+    assert_eq!(
+        prove_round_trip(
+            &token,
+            &key,
+            boundary.digest(),
+            &mut challenges,
+            &mut approvals
+        ),
+        Response::Proven
+    );
+    assert_eq!(
+        grant_create_round_trip(&token, &key, &boundary, &mut challenges, &mut approvals),
+        Response::GrantApproved
+    );
+    assert_eq!(approvals.pending(), 0);
+}
+
 /// TODO R.21: a frame whose command path carries terminal control characters
 /// is refused at decode, before the approval store is consulted. The human's
 /// approval for the request they actually saw is still spendable, and the

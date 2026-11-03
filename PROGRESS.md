@@ -1,3 +1,27 @@
+## 2026-11-03 — Prove the daemon's 30-day pre-spend refusal (TODO R.23)
+
+- New daemon unit test
+  `grant_create_refuses_a_request_longer_than_thirty_days_without_spending_the_approval`
+  (`src/daemon/tests.rs`): after a successful `prove` for a request one hour
+  past `MAX_GRANT_LIFETIME_SECS`, `grant_create` answers `bad_request`, the
+  approval is still pending and `Approvals::take` for that digest succeeds;
+  then a request exactly 30 days out is proved and answered `grant_approved`.
+- Sent one hour over the cap, not one second: the daemon reads its own clock,
+  so a tick between the test's `now` and the daemon's could otherwise turn a
+  refusal into an acceptance. The exact one-second boundary is already covered
+  deterministically by `Grant::create` (`tests/grant.rs:126`,
+  `NOW + MAX_GRANT_LIFETIME_SECS + 1`), so nothing is left unproven.
+- Verified the test fails without the behavior: deleting the 30-day branch in
+  `grant::validate_expiry` made it answer `GrantApproved` instead of
+  `BadRequest`.
+- No production code or doc change; MCP.md and DECISIONS.md already state the
+  rule. Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
+  and the full `cargo test` green (231 lib tests); `cargo audit` not installed,
+  skipped as the gate allows.
+- **Next iteration must know:** the next unchecked item is R.24 (fix the stale
+  nested `grant_create` wire example in TODO 3.4c and add the flat key list to
+  MCP.md), then 3.4d builds the CLI client from those docs.
+
 ## 2026-11-03 — Narrow the pre-spend claim and give the writer a capacity check (TODO R.22a)
 
 - `Vault::check_grant_writable(&Grant)` (`src/vault.rs`) runs the writer's own

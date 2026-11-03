@@ -323,7 +323,7 @@ Rules that apply to every item:
       stub socket, and assert `Approvals::pending() == 0`. Do not add
       `MAX_GRANTS` to `check_approvable`; tick this item when 3.4d lands.
 
-- [ ] **R.23 Nothing tests the 30-day branch of the pre-spend check, so the
+- [x] **R.23 Nothing tests the 30-day branch of the pre-spend check, so the
       30-day refusal could be dropped without a failure.**
       MCP.md:224-226 and DECISIONS.md promise that `grant_create` refuses a
       request whose expiry is past **or more than 30 days out** without
@@ -346,6 +346,14 @@ Rules that apply to every item:
       assert an `Approvals::take` for that exact digest still succeeds; keep
       the existing `now - 1` case and add `now + 30 * 86_400` (accepted) as the
       boundary.
+      Done: `grant_create_refuses_a_request_longer_than_thirty_days_without_spending_the_approval`
+      (`src/daemon/tests.rs`) proves the daemon's 30-day refusal, the unspent
+      approval and the exact-30-day acceptance. It sends one hour over the cap
+      rather than one second, because the daemon reads its own clock; the
+      exact one-second boundary is already covered deterministically by
+      `Grant::create` in `tests/grant.rs` (`NOW + MAX_GRANT_LIFETIME_SECS + 1`).
+      Verified the new test fails (`GrantApproved` instead of `BadRequest`)
+      with `validate_expiry`'s 30-day branch removed.
 
 - [ ] **R.24 TODO 3.4c still documents the `grant_create` request nested under
       a `request` key, so the only concrete wire shape in the docs is wrong.**
