@@ -725,7 +725,7 @@ Rules that apply to every item:
       allowlisted `/bin/sh` run with `-c 'echo "$0"'` must print the
       canonical path, not the link name.
 
-- [ ] **R.35 No test proves `pmd` enforces the grant's command allowlist,
+- [x] **R.35 No test proves `pmd` enforces the grant's command allowlist,
       scope or capability on `run`.**
       Every daemon and CLI `run` test sends an allowlisted command
       (`tests/support/mod.rs:96`, `tests/run.rs` `Daemon`), every fixture
@@ -744,6 +744,17 @@ Rules that apply to every item:
       grant without RUN answers `Denied`; an expired grant answers `Denied`;
       16 parallel runs on `max_uses=3` give exactly 3 exits; a second,
       existing, out-of-scope credential gets the R.31 answer.
+      Done: `tests/daemon_run.rs::run_enforces_the_command_allowlist_and_the_run_capability`
+      covers the direct unlisted program, a symlink to it under an innocent
+      name, and a grant whose allowlist is right but whose capabilities are
+      LIST-only; none spawns and no use is recorded. Mutating both daemon
+      call sites to authorize `grant.commands()[0]` makes it fail
+      (`Exit(Code(0))` from the unlisted program).
+      `concurrent_runs_cannot_exceed_max_uses` sends 16 simultaneous runs and
+      requires exactly 3 exits, 13 denials and 3 recorded uses. The expired,
+      exhausted, revoked and out-of-scope cases are already e2e in
+      `a_denied_run_does_not_reveal_whether_a_reference_exists` (R.31), so
+      they were not duplicated.
 
 - [ ] **R.36 Redaction holdback timing reveals the secret one byte at a
       time.**

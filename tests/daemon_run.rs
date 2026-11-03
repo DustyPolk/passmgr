@@ -571,3 +571,162 @@ fn a_symlink_swapped_after_the_allowlist_check_cannot_change_the_program() {
     );
     assert!(wait_for_exit(&mut child, WAIT).success());
 }
+
+/// R.35: `pmd` itself must enforce the grant's command allowlist and its
+/// `run` capability. Each case here fails if the daemon authorizes the
+/// grant's first allowed command (or any other command) instead of the
+/// program the request names.
+#[test]
+fn run_enforces_the_command_allowlist_and_the_run_capability() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+
+    // A program outside the grant's allowlist that leaves a marker if it
+    // runs, so a leak is visible even though every answer is a frame.
+    let marker = fixture.temp_path("unlisted-program-ran");
+    let program = fixture.temp_path("unlisted-program");
+    fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\nprintf ran > '{}'\n",
+            marker.to_str().expect("utf-8 path")
+        ),
+    )
+    .expect("write unlisted program");
+    fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .expect("chmod unlisted program");
+    let program = fs::canonicalize(&program).expect("canonical unlisted program");
+    let program = program.to_str().expect("utf-8 path").to_owned();
+
+    let (frames, _) = read_run(
+        &socket,
+        &fixture.token,
+        &fixture.run_request("API_KEY", &[&program]),
+    );
+    assert_eq!(
+        frames,
+        vec![RunFrame::Error(ResponseError::Denied)],
+        "an unlisted program must be denied"
+    );
+    assert!(!marker.exists(), "an unlisted program must not run");
+
+    // The same target under an innocent link name: the daemon canonicalizes
+    // the path before it consults the allowlist, so the name cannot smuggle
+    // the program in.
+    let innocent = fixture.temp_path("innocent");
+    std::os::unix::fs::symlink(&program, &innocent).expect("symlink to unlisted program");
+    let innocent = innocent.to_str().expect("utf-8 path").to_owned();
+    let (frames, _) = read_run(
+        &socket,
+        &fixture.token,
+        &fixture.run_request("API_KEY", &[&innocent]),
+    );
+    assert_eq!(
+        frames,
+        vec![RunFrame::Error(ResponseError::Denied)],
+        "a link to an unlisted program must be denied"
+    );
+    assert!(!marker.exists(), "a linked unlisted program must not run");
+
+    // A grant that allows the same programs but only the `list` capability
+    // must still refuse to run one of them.
+    let now = unix_now();
+    let (credentials, base_grant) = {
+        let vault = Vault::open_with_key(&fixture.vault, fixture.key.as_slice()).expect("open");
+        (vault.list().to_vec(), vault.grants()[0].clone())
+    };
+    let list_only = Grant::create(
+        GrantSpec {
+            label: "list only".into(),
+            scope: base_grant.scope().clone(),
+            commands: base_grant.commands().to_vec(),
+            capabilities: Capabilities::LIST,
+            expires_at: now + 3_600,
+            max_uses: None,
+        },
+        *base_grant.token_hash(),
+        now,
+    )
+    .expect("list-only grant");
+    rewrite_vault(&fixture, &credentials, std::slice::from_ref(&list_only));
+
+    let (frames, _) = read_run(
+        &socket,
+        &fixture.token,
+        &fixture.run_request(
+            "API_KEY",
+            &[
+                "/bin/sh",
+                "-c",
+                &format!("printf ran > '{}'", marker.display()),
+            ],
+        ),
+    );
+    assert_eq!(
+        frames,
+        vec![RunFrame::Error(ResponseError::Denied)],
+        "a grant without the run capability must be denied"
+    );
+    assert!(!marker.exists(), "a grant without RUN must not spawn");
+    let vault = Vault::open_with_key(&fixture.vault, fixture.key.as_slice()).expect("open vault");
+    assert_eq!(
+        vault.grants()[0].uses(),
+        0,
+        "a denied run must not record a use"
+    );
+    drop(vault);
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+/// R.35: use limits are enforced by the vault under its write lock, so
+/// concurrent runs cannot each pass the check against the same stale state.
+#[test]
+fn concurrent_runs_cannot_exceed_max_uses() {
+    let fixture = Fixture::with_max_uses(3);
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+
+    let mut readers = Vec::new();
+    for _ in 0..16 {
+        let socket = socket.clone();
+        let token = fixture.token.clone();
+        let run = fixture.run_request("API_KEY", &["/bin/true"]);
+        readers.push(std::thread::spawn(move || {
+            read_run(&socket, &token, &run).0
+        }));
+    }
+    let results: Vec<Vec<RunFrame>> = readers
+        .into_iter()
+        .map(|reader| reader.join().expect("run thread"))
+        .collect();
+
+    let ran = results
+        .iter()
+        .filter(|frames| frames.last() == Some(&RunFrame::Exit(RunExit::Code(0))))
+        .count();
+    let denied = results
+        .iter()
+        .filter(|frames| frames.as_slice() == [RunFrame::Error(ResponseError::Denied)])
+        .count();
+    assert_eq!(ran, 3, "exactly max_uses runs may spawn, got {results:?}");
+    assert_eq!(denied, 13, "every other run must be denied: {results:?}");
+
+    let vault = Vault::open_with_key(&fixture.vault, fixture.key.as_slice()).expect("open vault");
+    assert_eq!(vault.grants()[0].uses(), 3);
+    drop(vault);
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}

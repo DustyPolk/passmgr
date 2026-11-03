@@ -1,3 +1,29 @@
+## 2026-11-03 — Prove `pmd` enforces allowlist, capability and use limits (TODO R.35)
+
+- Tests only, no production change. `tests/daemon_run.rs` gains
+  `run_enforces_the_command_allowlist_and_the_run_capability`: a
+  non-allowlisted script is `Denied` and leaves no marker; a symlink to it
+  under an innocent name is `Denied` (the daemon canonicalizes first); a grant
+  that allows `/bin/sh` but holds only the `list` capability is `Denied` and
+  records no use.
+- `concurrent_runs_cannot_exceed_max_uses`: 16 simultaneous `run`s against a
+  `max_uses = 3` grant give exactly 3 `Exit(Code(0))`, 13 `Denied`, and 3 uses
+  in the vault (`mark_used` re-checks under the write lock).
+- Mutation check: replacing both `program` arguments in
+  `src/daemon/run.rs::record_use` with `grant.commands()[0]` makes the first
+  test fail with `Exit(Code(0))` from the unlisted program; the file was
+  restored and `git diff src/daemon/run.rs` is empty.
+- The expired/revoked/exhausted/out-of-scope cases from the item were already
+  e2e in `a_denied_run_does_not_reveal_whether_a_reference_exists` (R.31), so
+  they are not duplicated. No docs/decisions changed.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` pass (`cargo audit` not installed, skipped).
+- **Next iteration must know:** the first unchecked item is now **R.36** (the
+  redaction holdback timing oracle), which is a real code change in
+  `src/redact.rs`. `tests/daemon_run.rs` is now ~730 lines; the layout guard
+  still passes but the next addition there should consider splitting
+  (R.54 already tracks the fixtures).
+
 ## 2026-11-03 — Exec the canonical authorized program, not the request path (TODO R.34)
 
 - `src/runner.rs` `execute` now takes `program: &Path` separately from
