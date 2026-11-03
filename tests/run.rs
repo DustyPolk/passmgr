@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use passmgr::client;
 use passmgr::crypto::{self, KEY_LEN, KdfParams};
+use passmgr::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope};
 use passmgr::socket::RuntimePaths;
 use passmgr::store::{self, Credential};
 use passmgr::token::SessionToken;
@@ -34,10 +35,13 @@ struct Fixture {
     key: Zeroizing<Vec<u8>>,
     token: SessionToken,
     reference: String,
+    grant_file: PathBuf,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    /// A fixture whose run grant allows `/bin/sh`, `/bin/true` and `extra`.
+    /// Extra programs must already exist and be canonicalized by the caller.
+    fn with_commands(extra: &[PathBuf]) -> Self {
         let directory = tempfile::tempdir().expect("tempdir");
         let vault = directory.path().join("vault.dat");
         // `RuntimePaths::resolve()` under XDG_RUNTIME_DIR appends "passmgr".
@@ -50,7 +54,38 @@ impl Fixture {
         )
         .expect("credential");
         let reference = credential.reference();
-        let plaintext = store::encode(&[credential], &[]).expect("encode store");
+        let id = credential.id();
+
+        let sh = fs::canonicalize("/bin/sh").expect("canonical /bin/sh");
+        let truth = fs::canonicalize("/bin/true").expect("canonical /bin/true");
+        let mut commands = vec![sh, truth];
+        commands.extend(extra.iter().cloned());
+        let grant_token = GrantToken::generate().expect("grant token");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let scope = Scope::new(vec![id], Vec::new(), None).expect("scope");
+        let grant = Grant::create(
+            GrantSpec {
+                label: "run test grant".into(),
+                scope,
+                commands,
+                capabilities: Capabilities::RUN,
+                expires_at: now + 3600,
+                max_uses: None,
+            },
+            grant_token.hash(),
+            now,
+        )
+        .expect("create grant");
+        let grant_file = directory.path().join("grant.token");
+        fs::write(&grant_file, format!("{}\n", grant_token.to_hex().as_str()))
+            .expect("write grant file");
+        fs::set_permissions(&grant_file, fs::Permissions::from_mode(0o600))
+            .expect("chmod grant file");
+
+        let plaintext = store::encode(&[credential], &[grant]).expect("encode store");
         let container = crypto::encrypt(&plaintext, MASTER, KdfParams::new(8 * 1024, 1, 1))
             .expect("encrypt vault");
         fs::write(&vault, &container).expect("write vault");
@@ -66,6 +101,7 @@ impl Fixture {
             key,
             token: SessionToken::generate().expect("session token"),
             reference,
+            grant_file,
         }
     }
 
@@ -89,10 +125,18 @@ impl Daemon {
         Self::start_in(None, None)
     }
 
+    fn start_with_commands(commands: &[PathBuf]) -> Self {
+        Self::start_in_with(None, None, commands)
+    }
+
     /// Start `pmd` with a specific working directory and `PATH`, so a test can
     /// give the daemon a different cwd/PATH from the CLI that talks to it.
     fn start_in(cwd: Option<&Path>, path: Option<&Path>) -> Self {
-        let fixture = Fixture::new();
+        Self::start_in_with(cwd, path, &[])
+    }
+
+    fn start_in_with(cwd: Option<&Path>, path: Option<&Path>, commands: &[PathBuf]) -> Self {
+        let fixture = Fixture::with_commands(commands);
         let mut command = Command::new(env!("CARGO_BIN_EXE_pmd"));
         command
             .arg("--vault")
@@ -156,8 +200,9 @@ fn command_at(xdg_runtime_dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_passmgr"));
     command.env("XDG_RUNTIME_DIR", xdg_runtime_dir);
     // `run` refuses an exported PASSMGR_DB (see below); tests must not inherit
-    // one from the developer's shell.
+    // one from the developer's shell, and a grant comes only from a test.
     command.env_remove("PASSMGR_DB");
+    command.env_remove("PASSMGR_GRANT_FILE");
     for marker in passmgr::agent::AGENT_MARKERS {
         command.env_remove(marker);
     }
@@ -171,6 +216,7 @@ fn command_at(xdg_runtime_dir: &Path, args: &[&str]) -> Command {
 
 fn run(fixture: &Fixture, args: &[&str]) -> Output {
     command_at(fixture.xdg_runtime_dir(), args)
+        .env("PASSMGR_GRANT_FILE", &fixture.grant_file)
         .output()
         .expect("run passmgr")
 }
@@ -292,7 +338,8 @@ fn run_executes_relative_programs_in_the_callers_working_directory() {
     let caller_dir = tempfile::tempdir().expect("tempdir");
     write_program(daemon_dir.path(), "rel.sh", "printf daemon-directory");
     write_program(caller_dir.path(), "rel.sh", "printf caller-directory");
-    let daemon = Daemon::start_in(Some(daemon_dir.path()), None);
+    let caller_program = fs::canonicalize(caller_dir.path().join("rel.sh")).expect("canonical");
+    let daemon = Daemon::start_in_with(Some(daemon_dir.path()), None, &[caller_program]);
 
     let output = command_at(
         daemon.xdg_runtime_dir(),
@@ -304,6 +351,7 @@ fn run_executes_relative_programs_in_the_callers_working_directory() {
             "./rel.sh",
         ],
     )
+    .env("PASSMGR_GRANT_FILE", &daemon.grant_file)
     .current_dir(caller_dir.path())
     .output()
     .expect("run passmgr");
@@ -380,7 +428,8 @@ fn run_resolves_a_bare_command_through_the_callers_path() {
     let caller_bin = tempfile::tempdir().expect("tempdir");
     write_program(daemon_bin.path(), "pm-fake-tool", "printf daemon-path");
     write_program(caller_bin.path(), "pm-fake-tool", "printf caller-path");
-    let daemon = Daemon::start_in(None, Some(daemon_bin.path()));
+    let caller_tool = fs::canonicalize(caller_bin.path().join("pm-fake-tool")).expect("canonical");
+    let daemon = Daemon::start_in_with(None, Some(daemon_bin.path()), &[caller_tool]);
 
     let output = command_at(
         daemon.xdg_runtime_dir(),
@@ -392,6 +441,7 @@ fn run_resolves_a_bare_command_through_the_callers_path() {
             "pm-fake-tool",
         ],
     )
+    .env("PASSMGR_GRANT_FILE", &daemon.grant_file)
     .env("PATH", caller_bin.path())
     .output()
     .expect("run passmgr");
@@ -479,6 +529,7 @@ fn run_is_the_agent_surface_and_works_in_agent_mode() {
             r#"printf %s "$API_KEY""#,
         ],
     )
+    .env("PASSMGR_GRANT_FILE", &daemon.grant_file)
     .env("CLAUDECODE", "1")
     .output()
     .expect("run passmgr");
@@ -487,6 +538,52 @@ fn run_is_the_agent_surface_and_works_in_agent_mode() {
     assert_eq!(output.stdout, b"[REDACTED]");
     // stdin is /dev/null: a master-password prompt would fail, not hang.
     assert!(stderr_text(&output).is_empty(), "{output:?}");
+}
+
+#[test]
+fn run_requires_a_grant_and_refuses_a_readable_token_file() {
+    let daemon = Daemon::start();
+    let argv = [
+        "run",
+        "--env",
+        &env_argument(&daemon, "API_KEY"),
+        "--",
+        "/bin/true",
+    ];
+
+    // The session token alone reaches the daemon but does not authorize a
+    // use: no grant file is a refusal (exit 5), not a run.
+    let output = command_at(daemon.xdg_runtime_dir(), &argv)
+        .output()
+        .expect("run passmgr");
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("grant token"), "{stderr}");
+    assert!(!stderr.contains(SECRET), "{stderr}");
+
+    // The flag names the file explicitly.
+    let grant_file = daemon.grant_file.to_str().expect("utf-8 path");
+    let mut flagged = vec!["run", "--grant-file", grant_file];
+    flagged.extend_from_slice(&argv[1..]);
+    let output = command_at(daemon.xdg_runtime_dir(), &flagged)
+        .output()
+        .expect("run passmgr");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+
+    // A token file other users can read is not a secret store.
+    fs::set_permissions(&daemon.grant_file, fs::Permissions::from_mode(0o644))
+        .expect("chmod grant file");
+    let output = command_at(daemon.xdg_runtime_dir(), &flagged)
+        .output()
+        .expect("run passmgr");
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("grant"), "{stderr}");
+    assert!(
+        stderr.contains("0600") || stderr.contains("group"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains(SECRET), "{stderr}");
 }
 
 #[test]
@@ -561,7 +658,17 @@ fn run_rejects_a_malformed_spec_with_a_usage_exit_code() {
 
 #[test]
 fn run_maps_daemon_refusals_to_stable_exit_codes() {
-    let daemon = Daemon::start();
+    let unspawnable_dir = tempfile::tempdir().expect("tempdir");
+    let unspawnable_program = unspawnable_dir.path().join("unspawnable");
+    fs::write(&unspawnable_program, b"#!/bin/sh\nexit 0\n").expect("write program");
+    fs::set_permissions(&unspawnable_program, fs::Permissions::from_mode(0o755))
+        .expect("chmod program");
+    let unspawnable_program = fs::canonicalize(&unspawnable_program).expect("canonical");
+    let daemon = Daemon::start_with_commands(std::slice::from_ref(&unspawnable_program));
+    // Now make it non-executable: the path still resolves and is inside the
+    // grant, but `exec` fails, which is a spawn failure rather than a denial.
+    fs::set_permissions(&unspawnable_program, fs::Permissions::from_mode(0o644))
+        .expect("chmod program");
 
     let missing = run(
         &daemon,
@@ -586,7 +693,7 @@ fn run_maps_daemon_refusals_to_stable_exit_codes() {
             "--env",
             &env_argument(&daemon, "API_KEY"),
             "--",
-            "/nonexistent/passmgr-run-test",
+            unspawnable_program.to_str().expect("utf-8 path"),
         ],
     );
     assert_eq!(unspawnable.status.code(), Some(1), "{unspawnable:?}");

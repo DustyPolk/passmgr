@@ -69,6 +69,11 @@ pub(crate) fn command_run(options: super::RunOptions) -> Result<ExitCode, Error>
     let mut command = options.command;
     command[0] = program_text;
 
+    let grant_file = options
+        .grant_file
+        .clone()
+        .or_else(|| std::env::var_os("PASSMGR_GRANT_FILE").map(PathBuf::from));
+
     let paths = passmgr::socket::RuntimePaths::resolve();
     let token = match passmgr::session::load(&paths) {
         Ok(token) => token,
@@ -86,11 +91,29 @@ pub(crate) fn command_run(options: super::RunOptions) -> Result<ExitCode, Error>
         }
     };
 
+    // The session token gets the request to the daemon; the grant token is
+    // what authorizes the use. Refuse before connecting when there is no
+    // grant at all, so an agent never mistakes "the daemon is up" for
+    // permission to read a secret.
+    let Some(grant_file) = grant_file else {
+        return Err(Error::Refused(
+            "no grant token: pass --grant-file FILE or set PASSMGR_GRANT_FILE; \
+             ask the human who approved the grant for its token file"
+                .into(),
+        ));
+    };
+    let grant = passmgr::grant::read_grant_token(&grant_file).map_err(|error| {
+        Error::Refused(format!(
+            "{error}; ask the human who approved the grant for its token file"
+        ))
+    })?;
+
     let request = RunRequest {
         env: options.env,
         reference: options.reference.clone(),
         command,
         cwd: cwd_text,
+        grant,
     };
     let stdout = std::io::stdout();
     let stderr = std::io::stderr();
@@ -239,11 +262,14 @@ fn refusal(error: ResponseError, reference: &str) -> Error {
              wait for one to finish and try again (busy)"
                 .into(),
         ),
-        // `denied` can only be the answer to a `prove` request; a run is
-        // never refused that way. Keep the message truthful anyway.
-        ResponseError::Denied => {
-            Error::Refused("the unlock daemon refused the request (denied)".into())
-        }
+        // The daemon returns one generic `denied` for an unknown, expired,
+        // revoked, used-up or out-of-scope grant, so the message must cover
+        // all of them without becoming an oracle.
+        ResponseError::Denied => Error::Refused(
+            "the unlock daemon refused the run: the grant is missing, expired, revoked, \
+             used up, or does not cover this credential and command"
+                .into(),
+        ),
     }
 }
 

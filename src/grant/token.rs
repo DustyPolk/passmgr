@@ -14,6 +14,8 @@ use super::TokenHash;
 
 /// Bytes in a raw grant token.
 pub const GRANT_TOKEN_BYTES: usize = 32;
+/// Length of the token's lowercase hex encoding.
+pub const GRANT_TOKEN_HEX_CHARS: usize = GRANT_TOKEN_BYTES * 2;
 
 /// A raw grant token: 32 random bytes shown once to the human who creates the
 /// grant, and never stored in the vault (which keeps only its [`TokenHash`]).
@@ -40,6 +42,23 @@ impl GrantToken {
         &self.bytes
     }
 
+    /// Parse the lowercase hex form used on the wire and in a token file.
+    ///
+    /// Uppercase hex is rejected so a token has exactly one textual encoding.
+    /// The error never echoes `text`.
+    pub fn from_hex(text: &str) -> Result<Self> {
+        if text.len() != GRANT_TOKEN_HEX_CHARS {
+            return Err(invalid_hex());
+        }
+        let mut bytes = Zeroizing::new([0u8; GRANT_TOKEN_BYTES]);
+        for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
+            let high = hex_digit(pair[0]).ok_or_else(invalid_hex)?;
+            let low = hex_digit(pair[1]).ok_or_else(invalid_hex)?;
+            bytes[index] = (high << 4) | low;
+        }
+        Ok(Self { bytes })
+    }
+
     /// The SHA-256 hash the vault and protocol carry instead of the token.
     pub fn hash(&self) -> TokenHash {
         TokenHash::of(self.as_bytes())
@@ -57,6 +76,20 @@ impl GrantToken {
     }
 }
 
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn invalid_hex() -> Error {
+    Error::InvalidInput(format!(
+        "a grant token is exactly {GRANT_TOKEN_HEX_CHARS} lowercase hex characters"
+    ))
+}
+
 impl fmt::Debug for GrantToken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("GrantToken(<redacted>)")
@@ -66,6 +99,24 @@ impl fmt::Debug for GrantToken {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_round_trips_and_is_strict() {
+        let token = GrantToken::generate().expect("token");
+        let hex = token.to_hex();
+        let parsed = GrantToken::from_hex(&hex).expect("parse generated hex");
+        assert!(parsed.hash().matches(&token.hash()));
+
+        let uppercase = hex.to_uppercase();
+        let short = &hex[..GRANT_TOKEN_HEX_CHARS - 1];
+        let non_hex = "g".repeat(GRANT_TOKEN_HEX_CHARS);
+        for bad in [uppercase, short.to_owned(), non_hex] {
+            let error = GrantToken::from_hex(&bad).expect_err("must be rejected");
+            let text = error.to_string();
+            assert!(!text.contains(&bad), "error echoed the token: {text}");
+            assert!(!text.contains(&*hex), "error echoed the token: {text}");
+        }
+    }
 
     #[test]
     fn a_grant_token_never_renders_its_bytes() {

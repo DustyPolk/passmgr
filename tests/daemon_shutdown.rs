@@ -26,7 +26,7 @@ fn detached_output_run(fixture: &Fixture, pid_file: &Path) -> Request {
         "echo $$ > {}; exec >&- 2>&-; exec sleep 30",
         pid_file.display()
     );
-    run_request(&fixture.reference, "API_KEY", &["/bin/sh", "-c", &script])
+    fixture.run_request("API_KEY", &["/bin/sh", "-c", &script])
 }
 
 /// Poll until the child has written its pid to `path`.
@@ -145,11 +145,7 @@ fn a_run_in_flight_is_not_killed_by_the_idle_timeout() {
     // Let the idle deadline get close before starting a command that outlives
     // it by seconds.
     std::thread::sleep(Duration::from_millis(2_500));
-    let ask = run_request(
-        &fixture.reference,
-        "API_KEY",
-        &["/bin/sh", "-c", "sleep 5; printf done"],
-    );
+    let ask = fixture.run_request("API_KEY", &["/bin/sh", "-c", "sleep 5; printf done"]);
     let (frames, _) = read_run(&socket, &fixture.token, &ask);
 
     assert_eq!(
@@ -196,7 +192,7 @@ fn idle_timeout_removes_the_socket_and_session_file_and_refuses_a_reconnect() {
 /// `lock` and `SIGTERM` wait for the grandchild to exit.
 fn grandchild_output_run(fixture: &Fixture, pid_file: &Path) -> Request {
     let script = format!("sleep 30 & echo $! > {}", pid_file.display());
-    run_request(&fixture.reference, "API_KEY", &["/bin/sh", "-c", &script])
+    fixture.run_request("API_KEY", &["/bin/sh", "-c", &script])
 }
 
 /// Write this daemon's session file, as `passmgr unlock` does, and return its

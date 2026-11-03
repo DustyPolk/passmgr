@@ -8,7 +8,7 @@
 //! u32 length | length bytes of JSON
 //! ```
 //!
-//! The JSON envelope is `{"version":3,"token":"<64 hex>","request":{...}}`.
+//! The JSON envelope is `{"version":4,"token":"<64 hex>","request":{...}}`.
 //! The `token` is the unlock session token (see [`crate::token`]) and is
 //! required on every request; the daemon rejects a missing or mismatched one
 //! with `unauthorized`. The `request` object always has a `"type"` field; the
@@ -16,16 +16,17 @@
 //! and `grant_create`:
 //!
 //! ```json
-//! {"version":3,"token":"...","request":{"type":"ping"}}
-//! {"version":3,"token":"...","request":{"type":"lock"}}
-//! {"version":3,"token":"...","request":{"type":"run","env":"API_KEY",
+//! {"version":4,"token":"...","request":{"type":"ping"}}
+//! {"version":4,"token":"...","request":{"type":"lock"}}
+//! {"version":4,"token":"...","request":{"type":"run","env":"API_KEY",
 //!                         "ref":"pm://00112233445566778899aabbccddeeff",
+//!                         "grant":"<64 lowercase hex>",
 //!                         "command":["/usr/bin/curl","-s","https://example.test"],
 //!                         "cwd":"/home/alice/project"}}
-//! {"version":3,"token":"...","request":{"type":"challenge"}}
-//! {"version":3,"token":"...","request":{"type":"prove","nonce":"<64 hex>",
+//! {"version":4,"token":"...","request":{"type":"challenge"}}
+//! {"version":4,"token":"...","request":{"type":"prove","nonce":"<64 hex>",
 //!                         "digest":"<64 hex>","proof":"<64 hex>"}}
-//! {"version":3,"token":"...","request":{"type":"grant_create",
+//! {"version":4,"token":"...","request":{"type":"grant_create",
 //!                         "label":"deploy","refs":["pm://..."],"tags":[],
 //!                         "fields":["password"],"commands":["/usr/bin/gh"],
 //!                         "capabilities":2,"expires_at":1700003600,
@@ -101,7 +102,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::grant::{Capabilities, GrantId, GrantRequest, GrantSpec, Scope, TokenHash};
+use crate::grant::{Capabilities, GrantId, GrantRequest, GrantSpec, GrantToken, Scope, TokenHash};
 use crate::presence::{ChallengeNonce, Proof, RequestDigest};
 use crate::store::EntryId;
 use crate::token::SessionToken;
@@ -124,7 +125,11 @@ pub use response::{
 /// to be an absolute path. A version-2 daemon would ignore `cwd` and execute
 /// the program in its own working directory, so the bump turns a silent
 /// mismatch into a refusal that tells the human to restart the daemon.
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// Version 4 added the required `run.grant` field. A version-3 daemon would
+/// ignore it and authorize `run` with the session token alone, silently
+/// skipping the grant check, so the bump forces a restart instead.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Largest accepted frame body. 64 KiB is far more than any request needs and
 /// bounds the memory a peer can make the daemon allocate.
@@ -237,7 +242,12 @@ pub struct ProveRequest {
 /// runs the child there, so relative arguments mean what the caller meant.
 /// `command[0]` must be an absolute path: the daemon never resolves a program
 /// through its own `PATH`, which belongs to the shell that ran `unlock`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The session token in the envelope only gets the request this far. The
+/// daemon authorizes the actual use against `grant`: the raw token the human
+/// handed the agent, matched by its SHA-256 against the grant stored in the
+/// vault. Holding the session file is therefore not enough to use a secret.
+#[derive(Debug, Clone)]
 pub struct RunRequest {
     /// Environment variable name in the child process.
     pub env: String,
@@ -247,7 +257,25 @@ pub struct RunRequest {
     pub command: Vec<String>,
     /// Absolute working directory the child starts in (the caller's cwd).
     pub cwd: String,
+    /// The grant token this run presents. Never rendered; see [`GrantToken`].
+    pub grant: GrantToken,
 }
+
+// A manual implementation because [`GrantToken`] deliberately has no
+// `PartialEq`: compare the hashes, which is what authorization does anyway.
+// `Request` derives `PartialEq` for protocol tests and for callers that need
+// to compare two decoded requests.
+impl PartialEq for RunRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.env == other.env
+            && self.reference == other.reference
+            && self.command == other.command
+            && self.cwd == other.cwd
+            && self.grant.hash().matches(&other.grant.hash())
+    }
+}
+
+impl Eq for RunRequest {}
 
 /// The `grant_create` payload: the exact grant a human approved.
 ///

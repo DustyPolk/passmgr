@@ -40,7 +40,7 @@ fn grant_create_writes_a_scoped_grant_and_never_prints_the_token() {
             "--tag",
             "prod",
             "--command",
-            "/bin/true",
+            "/usr/bin/printenv",
             "--expires",
             "1h",
             "--max-uses",
@@ -66,13 +66,13 @@ fn grant_create_writes_a_scoped_grant_and_never_prints_the_token() {
         summary_at < confirm_at && confirm_at < password_at,
         "the request and confirmation must precede the password prompt: {stderr}"
     );
-    let canonical_true = fs::canonicalize("/bin/true").expect("canonical true");
-    let canonical_true = canonical_true.to_str().expect("path is UTF-8");
+    let canonical_printenv = fs::canonicalize("/usr/bin/printenv").expect("canonical printenv");
+    let canonical_printenv = canonical_printenv.to_str().expect("path is UTF-8");
     let expected = [
         "label: deploy prod".to_owned(),
         format!("refs: {}", fixture.reference),
         "tags: prod".to_owned(),
-        format!("    {canonical_true}"),
+        format!("    {canonical_printenv}"),
         "capabilities: run".to_owned(),
         "expires: ".to_owned(),
         "max uses: 2".to_owned(),
@@ -118,7 +118,7 @@ fn grant_create_writes_a_scoped_grant_and_never_prints_the_token() {
     assert!(grant.capabilities().contains(Capabilities::RUN));
     assert_eq!(
         grant.commands(),
-        [fs::canonicalize("/bin/true").expect("canonical true")]
+        [fs::canonicalize("/usr/bin/printenv").expect("canonical printenv")]
     );
     assert_eq!(grant.max_uses(), Some(2));
     let expected = TokenHash::of(&decode_hex(token_hex));
@@ -136,17 +136,20 @@ fn grant_create_writes_a_scoped_grant_and_never_prints_the_token() {
             "--env",
             &format!("TOKEN={}", fixture.reference),
             "--",
-            "/usr/bin/env",
+            "/usr/bin/printenv",
+            "TOKEN",
         ],
         "",
-        &[("XDG_RUNTIME_DIR", fixture.runtime_text())],
+        &[
+            ("XDG_RUNTIME_DIR", fixture.runtime_text()),
+            (
+                "PASSMGR_GRANT_FILE",
+                out.to_str().expect("utf-8 token path"),
+            ),
+        ],
     );
     assert_success(&run);
-    assert!(
-        stdout(&run).contains("TOKEN=[REDACTED]"),
-        "{}",
-        stdout(&run)
-    );
+    assert!(stdout(&run).contains("[REDACTED]"), "{}", stdout(&run));
     assert!(!stdout(&run).contains(SECRET));
 }
 
@@ -173,7 +176,7 @@ fn grant_create_refuses_to_overwrite_an_existing_token_file() {
             "--tag",
             "prod",
             "--command",
-            "/bin/true",
+            "/usr/bin/printenv",
             "--expires",
             "1h",
             "--out",
@@ -377,7 +380,7 @@ fn grant_create_is_refused_in_agent_context() {
             "--tag",
             "prod",
             "--command",
-            "/bin/true",
+            "/usr/bin/printenv",
             "--expires",
             "1h",
             "--out",

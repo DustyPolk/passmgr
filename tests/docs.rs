@@ -183,18 +183,18 @@ fn security_documents_that_redaction_is_not_a_sandbox() {
     );
 }
 
-/// Until TODO 3.6 lands, the session token is not an agent boundary. The
-/// disclosure must stay until grants replace it; updating this test is part of
-/// that change, not a way to silence it.
+/// The session token is not an agent boundary: `run` needs a grant token too.
+/// Keep the disclosure pinned so a future change cannot quietly drop it.
 #[test]
-fn security_discloses_the_transitional_session_token_gap() {
+fn security_keeps_the_session_token_and_grant_separation() {
+    let text = plain(SECURITY);
     assert!(
-        plain(SECURITY).contains("is not an agent/human boundary"),
-        "SECURITY.md must disclose the transitional session-token gap"
+        text.contains("requires a human-created grant token"),
+        "SECURITY.md must disclose that run needs a grant token"
     );
     assert!(
-        SECURITY.contains("TODO 3.6"),
-        "SECURITY.md must name the TODO that closes the gap"
+        text.contains("can never inject a secret by itself"),
+        "SECURITY.md must state that the session token alone cannot use a secret"
     );
 }
 

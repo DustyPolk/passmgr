@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn response_frames_have_a_fixed_shape_with_no_value_fields() {
         let pong = encode_response(&Response::Pong).expect("encode");
-        let pong_body = br#"{"response":{"type":"pong"},"version":3}"#;
+        let pong_body = br#"{"response":{"type":"pong"},"version":4}"#;
         assert_eq!(&pong[..4], &(pong_body.len() as u32).to_be_bytes());
         assert_eq!(&pong[4..], pong_body);
 
@@ -534,13 +534,13 @@ mod tests {
             .expect("nonce"),
         ))
         .expect("encode");
-        let challenge_body = br#"{"response":{"nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","type":"challenge"},"version":3}"#;
+        let challenge_body = br#"{"response":{"nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","type":"challenge"},"version":4}"#;
         assert_eq!(&challenge[4..], challenge_body);
 
         let error = encode_response(&Response::Error(ResponseError::BadRequest)).expect("encode");
         assert_eq!(
             &error[4..],
-            br#"{"response":{"code":"bad_request","type":"error"},"version":3}"#
+            br#"{"response":{"code":"bad_request","type":"error"},"version":4}"#
         );
 
         // The approval answer is a bare type: no token, hash, grant id or
@@ -548,7 +548,7 @@ mod tests {
         let approved = encode_response(&Response::GrantApproved).expect("encode");
         assert_eq!(
             &approved[4..],
-            br#"{"response":{"type":"grant_approved"},"version":3}"#
+            br#"{"response":{"type":"grant_approved"},"version":4}"#
         );
 
         // The revocation answer carries a count and nothing else: no id,
@@ -556,17 +556,17 @@ mod tests {
         let revoked = encode_response(&Response::GrantRevoked { revoked: 2 }).expect("encode");
         assert_eq!(
             &revoked[4..],
-            br#"{"response":{"revoked":2,"type":"grant_revoked"},"version":3}"#
+            br#"{"response":{"revoked":2,"type":"grant_revoked"},"version":4}"#
         );
     }
 
     #[test]
     fn grant_revoked_rejects_a_missing_or_invalid_count() {
         for body in [
-            r#"{"version":3,"response":{"type":"grant_revoked"}}"#,
-            r#"{"version":3,"response":{"type":"grant_revoked","revoked":-1}}"#,
-            r#"{"version":3,"response":{"type":"grant_revoked","revoked":"1"}}"#,
-            r#"{"version":3,"response":{"type":"grant_revoked","revoked":4294967296}}"#,
+            r#"{"version":4,"response":{"type":"grant_revoked"}}"#,
+            r#"{"version":4,"response":{"type":"grant_revoked","revoked":-1}}"#,
+            r#"{"version":4,"response":{"type":"grant_revoked","revoked":"1"}}"#,
+            r#"{"version":4,"response":{"type":"grant_revoked","revoked":4294967296}}"#,
         ] {
             assert!(
                 decode_response(&frame(body)).is_err(),
@@ -575,7 +575,7 @@ mod tests {
         }
         assert_eq!(
             decode_response(&frame(
-                r#"{"version":3,"response":{"type":"grant_revoked","revoked":1}}"#
+                r#"{"version":4,"response":{"type":"grant_revoked","revoked":1}}"#
             ))
             .expect("decode"),
             Response::GrantRevoked { revoked: 1 }
@@ -586,7 +586,7 @@ mod tests {
     fn unknown_response_types_and_codes_are_rejected() {
         let long = "x".repeat(MAX_TYPE_CHARS * 4);
         let unknown_type = frame(&format!(
-            r#"{{"version":3,"response":{{"type":"{long}"}}}}"#
+            r#"{{"version":4,"response":{{"type":"{long}"}}}}"#
         ));
         match decode_response(&unknown_type) {
             Err(ProtocolError::UnknownResponse(echoed)) => {
@@ -596,7 +596,7 @@ mod tests {
         }
 
         let unknown_code = frame(&format!(
-            r#"{{"version":3,"response":{{"type":"error","code":"{long}"}}}}"#
+            r#"{{"version":4,"response":{{"type":"error","code":"{long}"}}}}"#
         ));
         assert!(matches!(
             decode_response(&unknown_code),
@@ -609,12 +609,12 @@ mod tests {
         let cases = [
             frame(r#"{"version":1,"response":{"type":"pong"}}"#),
             frame(r#"{"response":{"type":"pong"}}"#),
-            frame(r#"{"version":3}"#),
-            frame(r#"{"version":3,"response":"pong"}"#),
-            frame(r#"{"version":3,"response":{}}"#),
-            frame(r#"{"version":3,"response":{"type":7}}"#),
-            frame(r#"{"version":3,"response":{"type":"error"}}"#),
-            frame(r#"{"version":3,"response":{"type":"error","code":7}}"#),
+            frame(r#"{"version":4}"#),
+            frame(r#"{"version":4,"response":"pong"}"#),
+            frame(r#"{"version":4,"response":{}}"#),
+            frame(r#"{"version":4,"response":{"type":7}}"#),
+            frame(r#"{"version":4,"response":{"type":"error"}}"#),
+            frame(r#"{"version":4,"response":{"type":"error","code":7}}"#),
             frame("not json"),
             vec![0, 0, 0, 10, b'{'],
         ];
@@ -640,7 +640,7 @@ mod tests {
         // error text never repeats them.
         let secret_like = "SUPER_SECRET_VALUE_123";
         let body = format!(
-            r#"{{"version":3,"response":{{"type":"error","code":"nope","value":"{secret_like}"}}}}"#
+            r#"{{"version":4,"response":{{"type":"error","code":"nope","value":"{secret_like}"}}}}"#
         );
         let error = decode_response(&frame(&body)).expect_err("unknown code");
         let text = error.to_string();
@@ -712,16 +712,16 @@ mod tests {
         }
 
         for body in [
-            r#"{"version":3,"response":{"type":"exit"}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"exit","code":256}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"exit","code":-1}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"exit","code":1.5}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"exit","code":"0"}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"exit","signal":0}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"exit","signal":128}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"exit","signal":-9}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"exit","code":0,"signal":9}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"exit","code":null}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"exit"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"exit","code":256}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"exit","code":-1}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"exit","code":1.5}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"exit","code":"0"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"exit","signal":0}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"exit","signal":128}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"exit","signal":-9}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"exit","code":0,"signal":9}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"exit","code":null}}"#.to_string(),
         ] {
             assert!(
                 decode_run_frame(&frame(&body)).is_err(),
@@ -749,7 +749,7 @@ mod tests {
         // The same bound applies to a peer-supplied frame, checked from the hex
         // text length before any decoding allocation.
         let body = format!(
-            r#"{{"version":3,"response":{{"type":"stderr","data":"{}"}}}}"#,
+            r#"{{"version":4,"response":{{"type":"stderr","data":"{}"}}}}"#,
             "00".repeat(MAX_CHUNK_BYTES + 1)
         );
         assert!(matches!(
@@ -763,25 +763,25 @@ mod tests {
     fn malformed_run_frames_are_rejected() {
         let cases = [
             // One-shot responses are not stream frames.
-            r#"{"version":3,"response":{"type":"pong"}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"locked"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"pong"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"locked"}}"#.to_string(),
             // Output frames need a string of lowercase hex digits.
-            r#"{"version":3,"response":{"type":"stdout"}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"stdout","data":7}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"stdout","data":"0"}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"stdout","data":"0g"}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"stdout","data":"AB"}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"stdout","data":null}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"stdout"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"stdout","data":7}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"stdout","data":"0"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"stdout","data":"0g"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"stdout","data":"AB"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"stdout","data":null}}"#.to_string(),
             // Unknown frame types, and missing/mistyped envelopes.
-            r#"{"version":3,"response":{"type":"password","data":"00"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"password","data":"00"}}"#.to_string(),
             r#"{"version":1,"response":{"type":"stdout","data":"00"}}"#.to_string(),
             r#"{"response":{"type":"stdout","data":"00"}}"#.to_string(),
-            r#"{"version":3,"response":[]}"#.to_string(),
-            r#"{"version":3,"response":{"type":7}}"#.to_string(),
+            r#"{"version":4,"response":[]}"#.to_string(),
+            r#"{"version":4,"response":{"type":7}}"#.to_string(),
             "not json".to_string(),
             // An error frame still needs a known code.
-            r#"{"version":3,"response":{"type":"error"}}"#.to_string(),
-            r#"{"version":3,"response":{"type":"error","code":"nope"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"error"}}"#.to_string(),
+            r#"{"version":4,"response":{"type":"error","code":"nope"}}"#.to_string(),
         ];
         for body in cases {
             assert!(

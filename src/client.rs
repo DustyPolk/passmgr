@@ -768,6 +768,7 @@ mod tests {
             reference: "pm://00112233445566778899aabbccddeeff".into(),
             command: vec!["/bin/true".into()],
             cwd: "/tmp".into(),
+            grant: crate::grant::GrantToken::from_hex(&"11".repeat(32)).expect("token"),
         }
     }
 

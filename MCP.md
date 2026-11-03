@@ -34,7 +34,8 @@ any time. Every use is audited.
   module. Add a test that greps the `mcp` module sources for
   `reveal`/`clipboard` calls, so a future change cannot quietly add one.
 - All credential work goes through `pmd` over the existing socket protocol,
-  authorized by a **grant token**.
+  authorized by a **grant token**. `run` carries that token in its request;
+  `pmd` checks it against the vault grant before reading any secret.
 - The daemon spawns child processes. Plaintext exists only in `pmd` memory and
   in the child's environment, stdin or temp file.
 
@@ -235,7 +236,7 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   at 1700003600 and limited to 2 uses:
 
   ```json
-  {"request":{"capabilities":2,"commands":["/usr/bin/gh"],"expires_at":1700003600,"fields":["password"],"label":"deploy prod","max_uses":2,"refs":[],"tags":["prod"],"token_hash":"6d2bfc0147054b3d0ad9dac8d06b6f65bf79270378498f8a20cb87db6f07e3b6","type":"grant_create"},"token":"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff","version":3}
+  {"request":{"capabilities":2,"commands":["/usr/bin/gh"],"expires_at":1700003600,"fields":["password"],"label":"deploy prod","max_uses":2,"refs":[],"tags":["prod"],"token_hash":"6d2bfc0147054b3d0ad9dac8d06b6f65bf79270378498f8a20cb87db6f07e3b6","type":"grant_create"},"token":"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff","version":4}
   ```
 
   Every key above is present in every frame, with `null` for an unset

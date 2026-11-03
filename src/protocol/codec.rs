@@ -17,7 +17,9 @@ use super::{
     MAX_BUFFERED_BYTES, MAX_MESSAGE_BYTES, MAX_TYPE_CHARS, PROTOCOL_VERSION, ProtocolError,
     ProveRequest, Request, RunRequest, validate_request,
 };
-use crate::grant::{Capabilities, GRANT_ID_BYTES, GrantId, TOKEN_HASH_BYTES, TokenHash};
+use crate::grant::{
+    Capabilities, GRANT_ID_BYTES, GrantId, GrantToken, TOKEN_HASH_BYTES, TokenHash,
+};
 use crate::presence::{ChallengeNonce, Proof, RequestDigest};
 use crate::store::EntryId;
 use crate::token::SessionToken;
@@ -187,6 +189,7 @@ fn encode_body(token: &SessionToken, request: &Request) -> Result<Vec<u8>, Proto
             "ref": run.reference,
             "command": run.command,
             "cwd": run.cwd,
+            "grant": run.grant.to_hex().as_str(),
         }),
         Request::Challenge => json!({ "type": "challenge" }),
         Request::Prove(prove) => json!({
@@ -270,6 +273,8 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
             reference: required_string(request, "ref")?,
             command: required_string_array(request, "command")?,
             cwd: required_string(request, "cwd")?,
+            grant: GrantToken::from_hex(&required_string(request, "grant")?)
+                .map_err(|_| invalid_grant_field())?,
         }),
         "challenge" => Request::Challenge,
         "prove" => Request::Prove(ProveRequest {
@@ -342,6 +347,10 @@ fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, Pro
         .as_str()
         .map(str::to_owned)
         .ok_or_else(|| ProtocolError::MalformedJson(format!("'{key}' must be a string")))
+}
+
+fn invalid_grant_field() -> ProtocolError {
+    ProtocolError::MalformedJson("'grant' must be 64 lowercase hex characters".into())
 }
 
 fn invalid_presence_field(field: &str) -> ProtocolError {

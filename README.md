@@ -168,9 +168,20 @@ password:
 
 ```bash
 passmgr unlock
-passmgr run --env GH_TOKEN=pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5 \
+passmgr grant create --label 'gh status' \
+    --ref pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5 \
+    --command /usr/bin/gh --expires 1h \
+    --out /run/user/1000/gh.token
+passmgr run --grant-file /run/user/1000/gh.token \
+    --env GH_TOKEN=pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5 \
     -- gh auth status
 ```
+
+`run` needs both the unlock session token and a grant token that covers the
+credential and command. The grant token is read from `--grant-file` or
+`PASSMGR_GRANT_FILE`, must be in a 0600 file, and never appears on the
+command line or in output. Without an active, in-scope grant, `run` exits 5
+without starting anything.
 
 The daemon decrypts the referenced credential, injects it as the named
 environment variable, and runs the command directly (argv, never a shell

@@ -19,11 +19,11 @@ today:
 - `passmgr run` is the agent-facing way to use a secret, and it prevents
   *accidental* exposure: the value never crosses the socket, and relayed child
   output is redacted before it leaves `pmd`.
-- `run` is **not** an agent/human boundary. A same-user process that can read
-  the session file can inject any stored credential into a command of its
-  choosing. TODO 3.6 makes human-created grant tokens mandatory for every
-  credential-touching request; the session token will then authorize only
-  `ping`, `lock`, `status` and `revoke`.
+- `run` requires a human-created grant token in addition to the session
+  token. The session token authorizes only `ping`, `lock`, `status`, `revoke`
+  and the approval handshake; it can never inject a secret by itself. A
+  same-user process that can read the session file still needs a grant token
+  file whose grant covers the credential and command.
 
 The MCP server (`pm mcp serve`, `MCP.md`) is a contract at this point, not
 implemented code. Once implemented it is a thin client of the same daemon and
@@ -63,13 +63,13 @@ inherits every limit below.
   Details are in `README.md` and `FORMAT.md`.
 - **No network.** passmgr makes no network calls and links no network-capable
   crate. MCP is stdio only.
-- **Planned, per `MCP.md`:** scoped, expiring, use-limited, revocable grants
+- **Grants, per `MCP.md`:** scoped, expiring, use-limited, revocable grants
   that a human approves with the master password at a TTY, and a hash-chained
   audit log that records every allowed and denied credential use without
   values or tokens. Grants can already be listed and revoked; revocation
   needs no password or TTY because it only removes access, and the daemon
-  persists it in the vault with the key it already holds. `run` does not yet
-  require a grant (TODO 3.6).
+  persists it in the vault with the key it already holds. `run` already
+  requires a grant token whose grant covers the credential and command.
 
 ## Known limits
 

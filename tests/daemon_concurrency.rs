@@ -28,8 +28,7 @@ const REFUSED_REQUESTS: usize = 64;
 /// The pid is the shell's, which `exec` turns into the sleeping process, so a
 /// test can prove the daemon killed and reaped every accepted run.
 fn sleeping_run(fixture: &Fixture, pid_file: &Path) -> Request {
-    run_request(
-        &fixture.reference,
+    fixture.run_request(
         "API_KEY",
         &[
             "/bin/sh",
@@ -41,9 +40,8 @@ fn sleeping_run(fixture: &Fixture, pid_file: &Path) -> Request {
     )
 }
 
-fn polite_run(reference: &str, marker: &Path) -> Request {
-    run_request(
-        reference,
+fn polite_run(fixture: &Fixture, marker: &Path) -> Request {
+    fixture.run_request(
         "API_KEY",
         &[
             "/bin/sh",
@@ -151,7 +149,7 @@ fn runs_past_the_cap_are_refused_busy_and_do_not_block_ping_or_lock() {
 
     // A burst well beyond the cap must be fully refused, quickly.
     let refused_requests = (0..REFUSED_REQUESTS)
-        .map(|_| polite_run(&fixture.reference, &marker))
+        .map(|_| polite_run(&fixture, &marker))
         .collect();
     let started = Instant::now();
     let refused = join_requests(spawn_runs(&socket, &fixture.token, refused_requests));

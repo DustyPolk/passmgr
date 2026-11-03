@@ -72,6 +72,8 @@
 //! 0600 file). Grants in TODO 3.1 are. The idle timeout still guarantees that
 //! a session left alone does not keep the key in memory indefinitely.
 
+mod run;
+
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -84,16 +86,14 @@ use zeroize::Zeroizing;
 use crate::crypto::KEY_LEN;
 use crate::grant::GrantId;
 use crate::presence;
-use crate::protocol::{
-    self, FrameDecoder, GrantRevokeRequest, ProtocolError, Request, Response, ResponseError,
-    RunFrame,
-};
-use crate::runner;
+use crate::protocol::{self, GrantRevokeRequest, Request, Response, ResponseError, RunFrame};
 use crate::session;
 use crate::socket::{DaemonSocket, RuntimePaths, SocketError};
-use crate::store::{EntryId, MAX_TIMESTAMP_UNIX};
+use crate::store::MAX_TIMESTAMP_UNIX;
 use crate::token::{SessionToken, TOKEN_BYTES};
 use crate::vault::Vault;
+
+use run::{read_request, serve_run};
 
 /// How long the accept loop sleeps between non-blocking accepts.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
@@ -115,10 +115,6 @@ pub const MAX_CONCURRENT_RUNS: usize = 16;
 
 /// How long a single client gets to send a complete request.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Read buffer for one connection. A request is bounded by
-/// [`protocol::MAX_MESSAGE_BYTES`].
-const READ_CHUNK: usize = 4096;
 
 /// Set from the `SIGTERM`/`SIGINT` handler, which may only touch atomics.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -799,122 +795,6 @@ fn write_run_frame(stream: &mut UnixStream, frame: &RunFrame) -> io::Result<()> 
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame is too large"))?;
     stream.write_all(&encoded)?;
     stream.flush()
-}
-
-/// Handle one `run`: decrypt, resolve, spawn, stream redacted output.
-///
-/// Runs on its own thread. Every failure becomes a terminal
-/// [`RunFrame::Error`] after the request has been authenticated; nothing here
-/// can kill the daemon, and the vault is closed again before the child starts.
-/// `cancel` is shared with the accept loop and is set by `lock`, a signal or
-/// the idle timeout; the runner kills and reaps the child when it observes it.
-fn serve_run(
-    mut stream: UnixStream,
-    request: &protocol::RunRequest,
-    vault_path: &Path,
-    key: &LockedKey,
-    cancel: &AtomicBool,
-) {
-    // The daemon may have started shutting down between accepting this
-    // request and spawning the worker. Decrypting and spawning after a
-    // `lock` was acknowledged would put the secret back in memory.
-    if cancel.load(Ordering::SeqCst) {
-        return;
-    }
-    // The protocol guarantees these, but the daemon must not rely on a
-    // client-side check for a security decision.
-    let Ok(id) = EntryId::parse_ref(&request.reference) else {
-        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::BadRequest));
-        return;
-    };
-    if runner::denied_env_name(&request.env) {
-        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::BadRequest));
-        return;
-    }
-
-    let vault = match Vault::open_with_key(vault_path, key.as_slice()) {
-        Ok(vault) => vault,
-        Err(_) => {
-            let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::Internal));
-            return;
-        }
-    };
-    let Some(credential) = vault.get_by_ref(id) else {
-        drop(vault);
-        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::NotFound));
-        return;
-    };
-    // Copy only the one value, then drop the decrypted vault (which zeroizes
-    // the rest) before the child can run.
-    let secret = Zeroizing::new(credential.password().to_owned());
-    drop(vault);
-
-    let inherited = runner::inherited_env(std::env::vars_os());
-    // Re-check after decrypting: a shutdown may have started while the vault
-    // was open, and no child may be spawned once the key is being wiped.
-    if cancel.load(Ordering::SeqCst) {
-        return;
-    }
-    let result = runner::execute(
-        &request.command,
-        &request.env,
-        secret.as_str(),
-        std::path::Path::new(&request.cwd),
-        &inherited,
-        cancel,
-        |frame| write_run_frame(&mut stream, &frame),
-    );
-    match result {
-        Ok(exit) => {
-            let _ = write_run_frame(&mut stream, &RunFrame::Exit(exit));
-        }
-        Err(runner::RunError::Spawn(_)) => {
-            let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::SpawnFailed));
-        }
-        // The caller vanished or the daemon is stopping: the child is gone
-        // and there is nobody left to tell.
-        Err(runner::RunError::Output(_) | runner::RunError::Cancelled) => {}
-    }
-}
-
-/// Read one framed request from a stream, without unbounded allocation.
-fn read_request(stream: &mut UnixStream) -> Result<protocol::AuthenticatedRequest, ProtocolError> {
-    let mut decoder = FrameDecoder::new();
-    let mut chunk = [0u8; READ_CHUNK];
-    loop {
-        if let Some(request) = decoder.next_request()? {
-            return Ok(request);
-        }
-        match stream.read(&mut chunk) {
-            Ok(0) => {
-                let buffered = decoder.buffered();
-                return Err(if buffered == 0 {
-                    ProtocolError::EmptyMessage
-                } else {
-                    ProtocolError::TruncatedFrame {
-                        expected: buffered,
-                        actual: buffered,
-                    }
-                });
-            }
-            Ok(read) => decoder.push(&chunk[..read])?,
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) =>
-            {
-                return Err(ProtocolError::TruncatedFrame {
-                    expected: decoder.buffered(),
-                    actual: decoder.buffered(),
-                });
-            }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => {
-                return Err(ProtocolError::EmptyMessage);
-            }
-        }
-    }
 }
 
 #[cfg(test)]

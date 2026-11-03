@@ -25,6 +25,11 @@ fn decode(frame: &[u8]) -> Result<Request, ProtocolError> {
     super::decode(frame).map(AuthenticatedRequest::into_request)
 }
 
+/// A fixed grant token, so the wire form and its hash stay pinned.
+fn grant_token() -> GrantToken {
+    GrantToken::from_hex(&"11".repeat(32)).expect("fixed token")
+}
+
 fn run_request() -> Request {
     Request::Run(RunRequest {
         env: "API_KEY".into(),
@@ -35,6 +40,7 @@ fn run_request() -> Request {
             "https://example.test".into(),
         ],
         cwd: "/tmp".into(),
+        grant: grant_token(),
     })
 }
 
@@ -129,7 +135,7 @@ fn grant_revoke_frames_name_exactly_one_target() {
 /// through `encode`, so a rejection is about the body and nothing else.
 fn request_frame(request: &str) -> Vec<u8> {
     frame(&format!(
-        r#"{{"version":3,"token":"{TOKEN_HEX}","request":{request}}}"#
+        r#"{{"version":4,"token":"{TOKEN_HEX}","request":{request}}}"#
     ))
 }
 
@@ -200,7 +206,7 @@ const MCP_GRANT_CREATE_BODY: &str = concat!(
     r#""token_hash":"6d2bfc0147054b3d0ad9dac8d06b6f65bf79270378498f8a20cb87db6f07e3b6","#,
     r#""type":"grant_create"},"#,
     r#""token":"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff","#,
-    r#""version":3}"#,
+    r#""version":4}"#,
 );
 
 #[test]
@@ -295,7 +301,7 @@ fn challenge_and_prove_frames_have_a_fixed_shape() {
 #[test]
 fn malformed_presence_fields_are_rejected() {
     let request = |fields: &str| {
-        format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"prove",{fields}}}}}"#)
+        format!(r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{"type":"prove",{fields}}}}}"#)
     };
     let valid = format!(
         r#""nonce":"{PROVE_NONCE_HEX}","digest":"{PROVE_DIGEST_HEX}","proof":"{PROVE_PROOF_HEX}""#
@@ -420,6 +426,7 @@ fn oversized_encoded_message_is_rejected() {
         reference: REF.into(),
         command,
         cwd: "/tmp".into(),
+        grant: grant_token(),
     });
     assert!(matches!(
         encode(&request),
@@ -429,7 +436,7 @@ fn oversized_encoded_message_is_rejected() {
 
 #[test]
 fn bad_versions_are_rejected() {
-    for version in ["0", "1", "2", "4", "99", "18446744073709551615"] {
+    for version in ["0", "1", "2", "3", "5", "99", "18446744073709551615"] {
         let body =
             format!(r#"{{"version":{version},"token":"{TOKEN_HEX}","request":{{"type":"ping"}}}}"#);
         let expected = version.parse::<u64>().expect("test version");
@@ -450,18 +457,18 @@ fn missing_or_mistyped_envelope_fields_are_rejected() {
         r#"{"version":"2","token":"x","request":{"type":"ping"}}"#.into(),
         r#"{"version":-1,"token":"x","request":{"type":"ping"}}"#.into(),
         r#"{"version":3.5,"token":"x","request":{"type":"ping"}}"#.into(),
-        r#"{"version":3}"#.into(),
-        format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":[]}}"#),
-        format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{}}}}"#),
-        format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":42}}}}"#),
+        r#"{"version":4}"#.into(),
+        format!(r#"{{"version":4,"token":"{TOKEN_HEX}","request":[]}}"#),
+        format!(r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{}}}}"#),
+        format!(r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{"type":42}}}}"#),
         format!(
-            r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x"}}}}"#
+            r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x"}}}}"#
         ),
         format!(
-            r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x","command":"true"}}}}"#
+            r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x","command":"true"}}}}"#
         ),
         format!(
-            r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x","command":[1]}}}}"#
+            r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x","command":[1]}}}}"#
         ),
     ];
     for body in bodies {
@@ -479,7 +486,7 @@ fn missing_or_mistyped_envelope_fields_are_rejected() {
 fn a_missing_or_malformed_token_is_rejected_on_every_request_type() {
     // No token at all.
     for request in [r#"{"type":"ping"}"#, r#"{"type":"lock"}"#] {
-        let body = format!(r#"{{"version":3,"request":{request}}}"#);
+        let body = format!(r#"{{"version":4,"request":{request}}}"#);
         assert!(
             matches!(
                 super::decode(&frame(&body)),
@@ -490,7 +497,7 @@ fn a_missing_or_malformed_token_is_rejected_on_every_request_type() {
     }
 
     // A token field that is not a string.
-    let body = r#"{"version":3,"token":7,"request":{"type":"ping"}}"#;
+    let body = r#"{"version":4,"token":7,"request":{"type":"ping"}}"#;
     assert!(matches!(
         super::decode(&frame(body)),
         Err(ProtocolError::MalformedJson(_))
@@ -502,7 +509,7 @@ fn a_missing_or_malformed_token_is_rejected_on_every_request_type() {
     let long = "a".repeat(crate::token::TOKEN_HEX_CHARS + 1);
     let non_hex = "g".repeat(crate::token::TOKEN_HEX_CHARS);
     for token in [uppercase, short, long, non_hex, String::new()] {
-        let body = format!(r#"{{"version":3,"token":"{token}","request":{{"type":"ping"}}}}"#);
+        let body = format!(r#"{{"version":4,"token":"{token}","request":{{"type":"ping"}}}}"#);
         match super::decode(&frame(&body)) {
             Err(ProtocolError::InvalidToken) => {}
             other => panic!("token {token:?} should be invalid, got {other:?}"),
@@ -538,7 +545,7 @@ fn unknown_request_types_are_rejected() {
     // none of them exist here, and none may ever be added.
     for kind in ["reveal", "get", "password", "export", "run ", "PING", ""] {
         let body =
-            format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"{kind}"}}}}"#);
+            format!(r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{"type":"{kind}"}}}}"#);
         assert!(
             matches!(decode(&frame(&body)), Err(ProtocolError::UnknownRequest(_))),
             "type {kind:?} should be unknown"
@@ -547,7 +554,7 @@ fn unknown_request_types_are_rejected() {
 
     // A huge type is echoed back only in truncated form.
     let long = "x".repeat(10_000);
-    let body = format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"{long}"}}}}"#);
+    let body = format!(r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{"type":"{long}"}}}}"#);
     match decode(&frame(&body)) {
         Err(ProtocolError::UnknownRequest(kind)) => {
             assert_eq!(kind.chars().count(), MAX_TYPE_CHARS)
@@ -589,7 +596,7 @@ fn requests_have_no_plaintext_field() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(keys, ["command", "cwd", "env", "ref", "type"]);
+    assert_eq!(keys, ["command", "cwd", "env", "grant", "ref", "type"]);
 }
 
 #[test]
@@ -618,6 +625,7 @@ fn run_fields_are_validated() {
         reference: REF.into(),
         command: vec!["/bin/true".into()],
         cwd: "/tmp".into(),
+        grant: grant_token(),
     };
     let cases = [
         RunRequest {
@@ -717,6 +725,30 @@ fn run_without_cwd_is_rejected_on_decode() {
 }
 
 #[test]
+fn run_without_a_grant_is_rejected_on_decode() {
+    let body = format!(
+        r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"K","ref":"{REF}","command":["/bin/true"],"cwd":"/tmp"}}}}"#
+    );
+    assert!(matches!(
+        decode(&frame(&body)),
+        Err(ProtocolError::MalformedJson(message)) if message.contains("grant")
+    ));
+}
+
+#[test]
+fn a_malformed_grant_is_rejected_without_echoing_it() {
+    // Uppercase hex is a different encoding of the same bytes, so it is not
+    // accepted; the error must not repeat the token.
+    let canary = "A".repeat(64);
+    let body = format!(
+        r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"K","ref":"{REF}","command":["/bin/true"],"cwd":"/tmp","grant":"{canary}"}}}}"#
+    );
+    let error = decode(&frame(&body)).expect_err("must reject uppercase grant");
+    let text = error.to_string();
+    assert!(!text.contains(&canary), "error echoed the grant: {text}");
+}
+
+#[test]
 fn decoder_reassembles_fragmented_frames() {
     let request = run_request();
     let encoded = encode(&request).expect("encode");
@@ -786,7 +818,8 @@ fn errors_do_not_echo_request_field_values() {
     // request type, but must never repeat a field value from the body.
     let secret_like = "SUPER_SECRET_VALUE_123";
     let body = format!(
-        r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"{secret_like}","ref":"x","command":["/bin/true"],"cwd":"/tmp"}}}}"#
+        r#"{{"version":4,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"{secret_like}","ref":"x","command":["/bin/true"],"cwd":"/tmp","grant":"{}"}}}}"#,
+        "11".repeat(32)
     );
     let error = decode(&frame(&body)).expect_err("invalid ref");
     let text = error.to_string();

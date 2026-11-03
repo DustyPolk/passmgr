@@ -1,3 +1,43 @@
+## 2026-11-03 — Daemon authorizes `run` by grant (TODO 3.6)
+
+- Protocol v4: `RunRequest.grant` is required. A v3 daemon would ignore the
+  new field and authorize with the session token alone, so the version bump is
+  a hard downgrade guard, not cosmetic. `GrantToken::from_hex` accepts exactly
+  64 lowercase hex characters and never echoes the input.
+- `pmd`: `serve_run`/`read_request` moved to `src/daemon/run.rs`. The daemon
+  canonicalizes `command[0]`, matches the token's SHA-256 against a grant,
+  re-checks active/scope/capability/command, then records `uses` and
+  `last_used` in the vault **before** copying the secret or spawning. The
+  read/check/write step retries up to 8 times on a changed or busy vault; any
+  final write failure is `internal`, so a use is never served unrecorded.
+- CLI: `pm run [--grant-file FILE]` (fallback `PASSMGR_GRANT_FILE`). New
+  `src/grant/file.rs` refuses symlinks, foreign owners, group/world-readable
+  modes and files over 128 bytes, opens `O_NOFOLLOW`, and zeroizes the hex
+  text. Missing or insecure token exits 5 before anything runs.
+- Denial is one opaque `denied`, including a command that cannot be
+  canonicalized, so the socket is not an allowlist oracle.
+- Decision: record the use before spawning, so a crash cannot exceed
+  `max_uses`; a spawn failure still consumes a use (conservative). `run` now
+  needs two independent things: the session token and a grant token.
+- Tests: protocol v4 round-trip, v3 rejection, missing/malformed grant; grant
+  file mode/symlink/oversize/uppercase canary; daemon wrong grant, no grant in
+  the frame, valid run, persisted use count and `last_used`, immediate
+  revocation, use-limited grant; CLI missing grant, explicit flag, 0644 file;
+  `grant_cli` proves the daemon's hot key still serves a run after the CLI
+  rewrites the vault. Run tests moved to `tests/daemon_run.rs`.
+- Docs: help + fixture, README run example, SECURITY, DECISIONS, MCP.md
+  protocol example (`version` 4).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  the full `cargo test` pass. `cargo audit` is not installed; skipped.
+- **Next iteration must know:** the next unchecked item is 3.7 (TTY-local
+  `pm run`). There is still no audit record (3.8); use counting happens before
+  spawn, so failed execs consume uses. `record_use` treats any vault-write
+  failure as retryable and ends in `internal`.
+- NEEDS HUMAN REVIEW: the canonicalize-then-exec window means a symlink can
+  be swapped after the grant check. This is the existing best-effort
+  command-allowlist limit (the child is spawned via the caller's path), not
+  new; it is documented in SECURITY.md.
+
 ## 2026-11-03 — Escape argv-supplied `--out` paths before echoing them (TODO R.29)
 
 - `src/cli/grant.rs`: new private `display_path(&Path) -> String` renders a path

@@ -687,12 +687,17 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       `grant_revoked`) and is the daemon's only vault write; it refuses
       `--db`/`PASSMGR_DB` like `run`. list/show read the vault locally with the
       master password. Enforcement of `revoked_at` by `run` is still 3.6.
-- [ ] **3.6 Daemon authorizes by grant.** `run` and every new
+- [x] **3.6 Daemon authorizes by grant.** `run` and every new
       credential-touching request require a grant token. The unlock session
       token (2.5) only authorizes `ping`, `lock`, `status` and `revoke`.
       Record this in `DECISIONS.md`: holding the session file is not enough
       to use secrets. Tests: session token refused for `run`, valid grant
       accepted, uses counted, last_used updated.
+      Done: protocol v4 makes `run.grant` mandatory; `pmd` canonicalizes
+      `command[0]`, matches the token hash against an active grant, re-checks
+      scope/capability/command, and records the use in the vault before it
+      copies the secret or spawns. `pm run` reads `--grant-file` or
+      `PASSMGR_GRANT_FILE` (regular, own uid, 0600/0400, `O_NOFOLLOW`).
 - [ ] **3.7 `pm run` for humans.** With `--grant-file FILE` it goes through
       the daemon. Without it, at a TTY, it prompts for the master password and
       runs locally (same redaction code). In agent context without a grant it

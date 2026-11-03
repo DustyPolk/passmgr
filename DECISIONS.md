@@ -231,8 +231,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Framing: 4-byte big-endian length prefix + JSON body, 64 KiB body cap
   checked before slicing, one request per connection, 5 s read/write timeout,
   200 ms accept poll.
-- Envelope: `{"version":3,"token":"<64 lowercase hex>","request":{...}}`. The
-  token is parsed before the request. Unknown envelope **fields** are
+- Envelope: `{"version":4,"token":"<64 lowercase hex>","request":{...}}`. The
+  token is parsed before the request. Version 4 added the required
+  `run.grant`; a version-3 daemon would ignore it and authorize with the
+  session token alone, so the bump is a hard downgrade guard. Unknown envelope **fields** are
   ignored; unknown versions and request types are hard errors. Requests are
   validated on encode *and* decode.
 - **No request type returns plaintext, ever.** Any same-user process can reach
@@ -271,14 +273,15 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   `$XDG_RUNTIME_DIR/passmgr/session`. Loading requires a regular 0600 file
   owned by the user, opened `O_NOFOLLOW`, at most 512 bytes; anything else is
   an error, never repaired.
-- The session token authorizes `ping`, `lock` and `run` today. It is **not** a
-  human/agent boundary and must never be enough to use a secret. TODO 3.6
-  makes `run` (and every credential-touching request) require a grant.
-  **Transitional gap (2.6c until 3.6):** `pmd` authorizes `run` with the
-  session token alone. Token checking and the no-plaintext response contract
-  are already in place, but any same-user process that can read the 0600
-  session file can inject a stored value into a command of its choosing. The
-  MCP server must not expose any `run`-equivalent tool before 3.6.
+- The session token alone authorizes `ping`, `lock`, `status`, `revoke` and
+  the human-presence handshake (`challenge`/`prove`/`grant_create`). It is
+  **not** a human/agent boundary and is never enough to use a secret.
+  `run` requires a second credential: a grant token whose SHA-256 matches an
+  active, in-scope, command-allowing grant in the vault (TODO 3.6). `pmd`
+  records the use in the vault before it copies the secret or spawns the
+  child, so a crash cannot exceed `max_uses`, and any vault-write failure
+  fails closed. A same-user process that can read the session file still
+  cannot use a secret without also obtaining a grant token file.
   `revoke` over the session token is an accepted DoS-at-worst trade-off.
 - `run` child policy (TODO 2.6c): argv only, never a shell string; stdin is
   `/dev/null`; the environment is built from scratch from `PATH`, `HOME`,
@@ -290,6 +293,13 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   redactor; frames are split at 16 KiB after redaction, so a value never
   straddles a frame. `internal` is the fixed code for "the daemon could not
   read its own vault"; it never names a path or value.
+- `run` authorization order (TODO 3.6): parse the ref/env/command, reject
+  loader variables, canonicalize `command[0]`, then match the grant token and
+  check active status, scope, capability and the canonical command. Any
+  failure — including a path that cannot be canonicalized — is the same
+  opaque `denied`. The use is written to the vault before the secret is copied
+  or the child is spawned; a spawn failure therefore still consumes a use.
+  This favors never exceeding `max_uses` over not charging a failed exec.
 - An `unauthorized` request does not refresh the idle timer.
 - Idle timeout: default 900 s (`pmd --idle-timeout SECS`,
   `passmgr unlock --idle-timeout SECS`); zero is refused. Activity means a
@@ -356,7 +366,7 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   ref). Field names are `[a-z0-9_-]{1,32}`.
 - Commands: a command must equal an allowlisted absolute path exactly
   (`Path` equality). `src/grant.rs` never touches the filesystem; the daemon
-  canonicalizes first (TODO 3.6/4.5) and hands the check a canonical path.
+  canonicalizes first (TODO 4.5) and hands the check a canonical path.
   A run-capable grant needs at least one command; a list-only grant may have
   none. Commands are sorted and deduplicated, max 32, each <= `MAX_PATH_BYTES`
   and valid UTF-8. A command path is untrusted text that the approval prompt
@@ -527,9 +537,9 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   grant's command allowlist immediately before spawning; a path it cannot
   canonicalize is refused. The MCP server resolves a bare/relative name for
   the agent's convenience, but the result is untrusted input: any same-user
-  process can call the daemon, so only a check inside `pmd` counts. Planned
-  with TODO 3.6/4.5; `src/protocol/mod.rs` today only requires an absolute
-  path.
+  process can call the daemon, so only a check inside `pmd` counts. The
+  protocol only requires an absolute path; canonicalization and the grant
+  check are the daemon's job (TODO 3.6, extended by 4.5).
 - A shell, interpreter or program runner in a command allowlist is refused
   unless the human passes `--allow-interpreter` (TODO 3.4d, R.25). Detection
   lives in `grant/validate.rs::is_program_runner` and is name-based on the

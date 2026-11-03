@@ -61,6 +61,9 @@ pub(crate) struct RunOptions {
     pub(crate) reference: String,
     /// argv for the child. Never joined into a shell string.
     pub(crate) command: Vec<String>,
+    /// 0600 file holding the grant token, or `None` to use
+    /// `PASSMGR_GRANT_FILE`.
+    pub(crate) grant_file: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -260,15 +263,18 @@ pub(crate) fn require_no_arguments(command: &str, args: &[OsString]) -> Result<(
     }
 }
 
-/// `run --env NAME=<ref> -- <command> [args...]`.
+/// `run [--grant-file FILE] --env NAME=<ref> -- <command> [args...]`.
 ///
 /// The command is everything after `--`; it is never re-parsed or joined into
 /// a shell string. Exactly one `--env` is accepted because the daemon protocol
-/// injects one secret per run.
+/// injects one secret per run. The grant token comes from `--grant-file` or,
+/// when the flag is absent, from `PASSMGR_GRANT_FILE`; the daemon checks it.
 pub(crate) fn parse_run(args: Vec<OsString>) -> Result<Command, String> {
-    const USAGE: &str = "'run' usage: passmgr run --env NAME=<ref> -- <command> [args...]";
+    const USAGE: &str =
+        "'run' usage: passmgr run [--grant-file FILE] --env NAME=<ref> -- <command> [args...]";
 
     let mut env_spec = None;
+    let mut grant_file = None;
     let mut index = 0;
     let command_start = loop {
         let Some(argument) = args.get(index) else {
@@ -288,6 +294,17 @@ pub(crate) fn parse_run(args: Vec<OsString>) -> Result<Command, String> {
         }
         if let Some(value) = text.strip_prefix("--env=") {
             set_run_env(&mut env_spec, value.to_owned())?;
+            index += 1;
+            continue;
+        }
+        if text == "--grant-file" {
+            let value = flag_value(&args, index, "--grant-file")?;
+            set_run_grant_file(&mut grant_file, value)?;
+            index += 2;
+            continue;
+        }
+        if let Some(value) = text.strip_prefix("--grant-file=") {
+            set_run_grant_file(&mut grant_file, value.to_owned())?;
             index += 1;
             continue;
         }
@@ -354,7 +371,18 @@ pub(crate) fn parse_run(args: Vec<OsString>) -> Result<Command, String> {
         env: env.to_owned(),
         reference: reference.to_owned(),
         command,
+        grant_file: grant_file.map(PathBuf::from),
     }))
+}
+
+fn set_run_grant_file(slot: &mut Option<String>, value: String) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("--grant-file must not be empty".to_owned());
+    }
+    if slot.replace(value).is_some() {
+        return Err("'run' accepts exactly one --grant-file".to_owned());
+    }
+    Ok(())
 }
 
 fn set_run_env(slot: &mut Option<String>, spec: String) -> Result<(), String> {
@@ -773,6 +801,7 @@ mod tests {
             env: "API_KEY".into(),
             reference: RUN_REF.into(),
             command: vec!["/bin/true".into()],
+            grant_file: None,
         })
     }
 

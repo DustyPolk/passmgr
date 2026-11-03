@@ -1,10 +1,12 @@
 //! Grants: the scoped, expiring authorization an agent uses to touch
 //! credentials.
 //!
-//! Nothing here performs I/O. A [`Grant`] is a plain value that the vault
+//! The model performs no I/O. A [`Grant`] is a plain value that the vault
 //! stores (see `store.rs`) and the daemon consults; [`Grant::authorizes`] is
 //! the single decision point, so every rule can be tested without a daemon, a
-//! socket, a token or a clock.
+//! socket, a token or a clock. [`read_grant_token`] is the one exception: it
+//! turns the 0600 token file an agent was given into a [`GrantToken`], with
+//! the same strict checks as the session-token loader.
 //!
 //! The token itself is never stored: the vault keeps [`TokenHash`] (SHA-256 of
 //! the raw 32 token bytes). Neither the token nor its hash is ever rendered;
@@ -921,11 +923,13 @@ impl fmt::Debug for Grant {
 }
 
 mod capabilities;
+mod file;
 mod request;
 mod token;
 mod validate;
 
 pub use capabilities::{Capabilities, Capability};
+pub use file::{GrantFileError, read_grant_token};
 pub use request::GrantRequest;
 pub use token::{GRANT_TOKEN_BYTES, GrantToken};
 pub use validate::escape_hidden;
