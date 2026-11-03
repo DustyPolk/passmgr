@@ -355,7 +355,7 @@ Rules that apply to every item:
       Verified the new test fails (`GrantApproved` instead of `BadRequest`)
       with `validate_expiry`'s 30-day branch removed.
 
-- [ ] **R.24 TODO 3.4c still documents the `grant_create` request nested under
+- [x] **R.24 TODO 3.4c still documents the `grant_create` request nested under
       a `request` key, so the only concrete wire shape in the docs is wrong.**
       Its protocol line (`TODO.md`, item 3.4c, the "Protocol request"
       paragraph under `### Phase 3`) shows
@@ -379,6 +379,17 @@ Rules that apply to every item:
       re-encoding reproduces the literal byte for byte (a nested example fails
       this), and have `tests/docs.rs` assert the key set in the example equals
       the encoder's key set.
+      Done: TODO 3.4c's spec line is now the flat shape and names MCP.md as
+      the home of the exact body (the old line also had an unterminated code
+      span). `MCP.md` ("The daemon never writes a grant") carries the full
+      frame body with every key, the `null` rule for `fields`/`max_uses`, and
+      a note that no credential value is in it; `src/protocol/mod.rs`'s
+      sketch now points there. Tests: `src/protocol/tests.rs::
+      mcp_documented_grant_create_body_is_the_wire_format` pins the literal,
+      decodes it to `grant_create()` and re-encodes to the same bytes;
+      `tests/docs.rs::mcp_grant_create_example_has_the_encoder_keys` extracts
+      the fenced block from MCP.md and compares envelope and request key sets
+      plus the whole value to the encoder (a nested example fails, verified).
 
 ## Phase 3 — grants and audit log
 
@@ -468,9 +479,11 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       container to copy the header from. Docs updated in `FORMAT.md` and
       `README.md`.
 - [x] **3.4c `grant_create` request and daemon handler (TODO R.15b).**
-      Protocol request `{type:"grant_create", request:{label, refs, tags,
-      fields?, commands, capabilities, expires_at, max_uses?, token_hash}}
-      and response `{type:"grant_approved"}` (no token, hash or grant id in
+      Protocol request `{type:"grant_create", label, refs, tags, fields?,
+      commands, capabilities, expires_at, max_uses?, token_hash}` — flat on
+      the request object like `run`, no nested `request` key; `MCP.md` ("The
+      daemon never writes a grant") holds the exact frame body — and response
+      `{type:"grant_approved"}` (no token, hash or grant id in
       any response; the CLI assigns the id when it writes). The daemon
       decodes and re-normalizes through `GrantRequest::new`, computes the
       digest, and calls `presence::Approvals::take` for it. The daemon does

@@ -229,6 +229,20 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   vault for this request: the approving CLI checks them against the vault it
   already decrypted (`MAX_GRANTS`, payload size) **before it asks for a
   proof**, so a full vault cannot consume an approval (TODO R.22).
+  The exact body of that frame (the 4-byte length prefix is omitted) for a
+  grant labelled `deploy prod`, scoped to the tag `prod` and the field
+  `password`, allowing `/usr/bin/gh` with capability `run` (bit 2), expiring
+  at 1700003600 and limited to 2 uses:
+
+  ```json
+  {"request":{"capabilities":2,"commands":["/usr/bin/gh"],"expires_at":1700003600,"fields":["password"],"label":"deploy prod","max_uses":2,"refs":[],"tags":["prod"],"token_hash":"6d2bfc0147054b3d0ad9dac8d06b6f65bf79270378498f8a20cb87db6f07e3b6","type":"grant_create"},"token":"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff","version":3}
+  ```
+
+  Every key above is present in every frame, with `null` for an unset
+  `fields` or `max_uses`; a scope needs at least one ref or tag, so `refs`
+  and `tags` are never both empty. The body carries no credential value:
+  `token` is the unlock session token and `token_hash` is the SHA-256 of the
+  grant token, never the token itself.
 - Interpreters and shells (`sh`, `bash`, `zsh`, `fish`, `dash`, `env`, `xargs`,
   `python*`, `node`, `perl`, `ruby`, `busybox`, …) in a command allowlist let
   the agent exfiltrate secrets in ways redaction cannot catch. Approval shows a

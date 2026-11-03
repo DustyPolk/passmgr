@@ -1,3 +1,37 @@
+## 2026-11-03 — One authoritative `grant_create` frame body (TODO R.24)
+
+- TODO 3.4c's spec line showed the fields nested under a `request` key; they
+  are flat like `run`. It now reads `{type:"grant_create", label, refs, tags,
+  fields?, commands, capabilities, expires_at, max_uses?, token_hash}` and
+  points at MCP.md for the exact body. (The old line was also missing its
+  closing backtick, which is why the first scripted edit did not match.)
+- `MCP.md` ("The daemon never writes a grant") now carries the exact frame
+  body in one fenced `json` block, with every key present, `null` for unset
+  `fields`/`max_uses`, the "at least one ref or tag" rule, and a note that
+  `token` is the unlock session token and `token_hash` is a SHA-256, so no
+  credential value is in the body. `src/protocol/mod.rs`'s illustrative sketch
+  now says MCP.md holds the exact bytes.
+- Decisions: the wire example lives in exactly one document and is pinned on
+  both sides, so a doc edit cannot silently change the contract (DECISIONS.md,
+  grant bullet). Ordering matters: the encoder's keys come out
+  alphabetically (serde_json's `Map` is a `BTreeMap` here), so the doc body is
+  the byte-for-byte encoder output.
+- Tests: `src/protocol/tests.rs::mcp_documented_grant_create_body_is_the_wire_format`
+  (literal decodes to `grant_create()`; re-encoding equals the literal byte
+  for byte) and `tests/docs.rs::mcp_grant_create_example_has_the_encoder_keys`
+  (extracts the fenced block, compares envelope + request key sets and the
+  whole value to the encoder). Both were verified to fail on a nested example.
+  The docs test's `fenced_json_after` helper returns `None` on a missing
+  marker or block, so deleting the example fails instead of passing vacuously.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` green (232 lib tests, docs 13); `cargo audit` not
+  installed, skipped as the gate allows.
+- **Next iteration must know:** 3.4d (the `pm grant create` CLI) is the next
+  unchecked item and builds its encoder from MCP.md's example. The example
+  uses the fixture token `0011…eeff` and the SHA-256 of `b"grant-token"`, so
+  changing either literal means changing MCP.md, the `src/protocol/tests.rs`
+  constant and the `tests/docs.rs` fixture together.
+
 ## 2026-11-03 — Prove the daemon's 30-day pre-spend refusal (TODO R.23)
 
 - New daemon unit test

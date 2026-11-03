@@ -313,3 +313,91 @@ fn docs_say_who_checks_vault_limits_before_the_proof() {
         "check_approvable's doc must say it covers the expiry rule only"
     );
 }
+
+/// First fenced ```json block after the line containing `marker`, with the
+/// fence lines stripped. `None` when either is missing, so deleting the
+/// example fails its contract instead of turning the contract vacuous.
+fn fenced_json_after(markdown: &str, marker: &str) -> Option<String> {
+    let mut lines = markdown.lines().skip_while(|line| !line.contains(marker));
+    lines
+        .by_ref()
+        .find(|line| line.trim_start().starts_with("```json"))?;
+    let mut block = Vec::new();
+    for line in lines {
+        if line.trim_start().starts_with("```") {
+            return Some(block.join("\n"));
+        }
+        block.push(line.trim().to_owned());
+    }
+    None
+}
+
+fn object_keys(value: &serde_json::Value) -> Vec<&str> {
+    value
+        .as_object()
+        .unwrap_or_else(|| panic!("expected a JSON object, got {value}"))
+        .keys()
+        .map(String::as_str)
+        .collect()
+}
+
+/// TODO R.24: `grant_create` has a flat wire shape, but TODO.md's spec line
+/// nested its fields under a `request` key, the implementation and its Done
+/// note were flat, and MCP.md described the fields in prose without naming a
+/// single key. MCP.md now carries the one concrete body, so its keys must be
+/// the encoder's keys. A nested `request` shape, an added key or a new value
+/// fails here before a client is written from it.
+#[test]
+fn mcp_grant_create_example_has_the_encoder_keys() {
+    let example = fenced_json_after(MCP, "The daemon never writes a grant")
+        .expect("MCP.md must carry the grant_create frame example");
+    let example: serde_json::Value =
+        serde_json::from_str(&example).expect("the MCP.md example must be JSON");
+
+    let token = passmgr::token::SessionToken::from_hex(
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+    )
+    .expect("example session token");
+    let scope = passmgr::grant::Scope::new(
+        Vec::new(),
+        vec!["prod".to_owned()],
+        Some(vec!["password".to_owned()]),
+    )
+    .expect("scope");
+    let request = passmgr::grant::GrantRequest::new(
+        passmgr::grant::GrantSpec {
+            label: "deploy prod".to_owned(),
+            scope,
+            commands: vec!["/usr/bin/gh".into()],
+            capabilities: passmgr::grant::Capabilities::RUN,
+            expires_at: 1_700_003_600,
+            max_uses: Some(2),
+        },
+        passmgr::grant::TokenHash::of(b"grant-token"),
+    )
+    .expect("grant request");
+    let frame = passmgr::protocol::encode(
+        &token,
+        &passmgr::protocol::Request::GrantCreate(
+            passmgr::protocol::GrantCreateRequest::from_grant_request(&request),
+        ),
+    )
+    .expect("encode");
+    let encoded: serde_json::Value =
+        serde_json::from_slice(&frame[4..]).expect("encoded body is JSON");
+
+    assert_eq!(
+        object_keys(&example),
+        object_keys(&encoded),
+        "MCP.md's example envelope must have the encoder's keys"
+    );
+    assert_eq!(
+        object_keys(&example["request"]),
+        object_keys(&encoded["request"]),
+        "MCP.md's example request must have the encoder's keys (flat, not nested)"
+    );
+    assert_eq!(
+        example, encoded,
+        "MCP.md's example must be the encoder's body; fix the example, not the decoder"
+    );
+}

@@ -503,8 +503,11 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   (TODO R.22). That pre-check is advisory against a concurrent writer; the
   write lock still refuses a lost update. The wire fields
   are flat like `run` (no nested `request` object) and `grant_approved`
-  carries nothing but its type. The daemon still never writes; the CLI in
-  3.4d owns the vault write.
+  carries nothing but its type. `MCP.md` carries the exact body the encoder
+  emits for this request; `src/protocol/tests.rs` pins it as a literal and
+  `tests/docs.rs` compares the document's example to the encoder, so the
+  example cannot drift from the wire again (TODO R.24). The daemon still
+  never writes; the CLI in 3.4d owns the vault write.
 - The daemon canonicalizes `command[0]` itself (symlinks resolved), requires
   the result to stay absolute, and checks that canonical path against the
   grant's command allowlist immediately before spawning; a path it cannot

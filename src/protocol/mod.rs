@@ -32,6 +32,9 @@
 //!                         "max_uses":2,"token_hash":"<64 hex>"}}
 //! ```
 //!
+//! The sketch above is illustrative; the exact `grant_create` body, byte for
+//! byte, is pinned in `MCP.md` ("The daemon never writes a grant").
+//!
 //! `grant_create` asks the daemon to accept a grant a human just approved. It
 //! carries no secret value, only the token's SHA-256, and the daemon answers
 //! `grant_approved` without touching the vault: the CLI that holds the raw

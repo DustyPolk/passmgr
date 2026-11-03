@@ -125,6 +125,36 @@ fn grant_create_frames_carry_only_the_approved_fields() {
     assert!(debug.contains("<redacted>"), "{debug}");
 }
 
+/// The exact `grant_create` frame body published in `MCP.md` ("The daemon
+/// never writes a grant"), pinned as a literal (TODO R.24). It is one wire
+/// line; the `concat!` splits are only for readability.
+///
+/// The fields are flat on the request object, like `run`. Nesting them under
+/// a `request` key -- the shape TODO 3.4c once documented -- fails to decode
+/// here, and `tests/docs.rs` fails if the document stops matching this shape.
+const MCP_GRANT_CREATE_BODY: &str = concat!(
+    r#"{"request":{"capabilities":2,"commands":["/usr/bin/gh"],"#,
+    r#""expires_at":1700003600,"fields":["password"],"label":"deploy prod","#,
+    r#""max_uses":2,"refs":[],"tags":["prod"],"#,
+    r#""token_hash":"6d2bfc0147054b3d0ad9dac8d06b6f65bf79270378498f8a20cb87db6f07e3b6","#,
+    r#""type":"grant_create"},"#,
+    r#""token":"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff","#,
+    r#""version":3}"#,
+);
+
+#[test]
+fn mcp_documented_grant_create_body_is_the_wire_format() {
+    let decoded = decode(&frame(MCP_GRANT_CREATE_BODY)).expect("MCP.md example must decode");
+    assert_eq!(decoded, grant_create());
+
+    let encoded = encode(&grant_create()).expect("encode");
+    assert_eq!(
+        std::str::from_utf8(&encoded[4..]).expect("frame body is UTF-8"),
+        MCP_GRANT_CREATE_BODY,
+        "MCP.md's example must be the encoder's body byte for byte"
+    );
+}
+
 /// A decoded payload is re-normalized through the same constructor the
 /// approving CLI used, so a corrupted body cannot reach the approval store as
 /// a digest for something the human never saw.
