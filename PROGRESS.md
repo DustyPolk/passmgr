@@ -1,3 +1,36 @@
+## 2026-11-03 — Canonical grant-create request and digest (TODO 3.4a)
+
+- `TODO.md`: split 3.4 into 3.4a–3.4d (canonical request, key-preserving
+  save, daemon approval request, CLI). This iteration did 3.4a only.
+- New `src/grant/request.rs`: `GrantRequest::new(GrantSpec, TokenHash)`
+  applies the clock-free rules of `Grant::create` (label, commands,
+  capabilities, RUN needs a command, non-zero max-uses, expiry bound) and
+  normalizes scope/commands; `digest()` returns the
+  `presence::RequestDigest` of a length-prefixed, big-endian encoding with
+  domain `passmgr-grant-create-v1`; `create_grant(now)` rebuilds the
+  `GrantSpec` and calls `Grant::create`, so the written fields are exactly
+  the digested ones. Exported as `passmgr::grant::GrantRequest`.
+- Decided the digest covers the token hash (one approval cannot write a
+  different token) but not the id or `created` (assigned at write time;
+  neither widens access). Duplicated normalization in `new` cannot drift:
+  `create_grant` re-runs `Grant::create`.
+- Revised the write plan after finding a trap: `Vault::save(master_password)`
+  takes a new salt, which would invalidate the running daemon's key. Grant
+  writes will be done by the CLI with `encrypt_with_key` reusing the salt
+  (3.4b); `pmd` will only spend the approval and has no grant-write request
+  (3.4c). `DECISIONS.md` and TODO 3.4b–d updated; no 3.4a code changes.
+- Tests: 7 unit tests in `request.rs` (normalization, every field changes the
+  digest, length-prefix boundaries, pinned hex vector, invalid shapes,
+  `create_grant` field fidelity, redacting `Debug`) plus a public-API round
+  trip in `tests/grant.rs`.
+- Gate: `fmt`, `clippy -D warnings` and full `cargo test` green (lib 216,
+  grant 23, docs 11, plus the existing cli/daemon/run/unlock suites).
+- **Next iteration must know:** start 3.4b. `crypto::encrypt_with_key` must
+  authenticate the template **before** reusing its header, or a wrong key
+  could replace the vault with an unopenable file. Do not call
+  `Vault::save(master_password)` from the grant path. 3.4d needs a running
+  daemon (`pm run` also does not auto-unlock).
+
 ## 2026-11-03 — One spelling for the forbidden label classes (TODO R.18)
 
 - `src/grant/validate.rs`: kept the full rejection table (all variation

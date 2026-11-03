@@ -923,8 +923,10 @@ impl fmt::Debug for Grant {
     }
 }
 
+mod request;
 mod validate;
 
+pub use request::GrantRequest;
 pub use validate::{LABEL_FORBIDDEN_CLASSES, validate_field_name};
 
 #[cfg(test)]

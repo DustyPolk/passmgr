@@ -440,6 +440,43 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   - The protocol version stays 3: the two request types are additive, so old
     clients keep working and an old daemon answers `bad_request` to a newer
     client rather than misinterpreting it.
+- A grant write is authorized by a digest of the canonical request (TODO
+  3.4a, `src/grant/request.rs`). `GrantRequest::new` applies the same shape
+  rules as `Grant::create` and stores the normalized form; `digest()` is
+  SHA-256 over a length-prefixed encoding with the domain string
+  `passmgr-grant-create-v1`. It covers the label, refs, tags, optional field
+  names, canonical commands, capability bits, absolute expiry, optional
+  max-uses and the token hash. The grant id and `created` are assigned by the
+  CLI at write time and are **not** covered: neither can widen what the
+  human approved. The token hash **is** covered, so an approval for a request
+  that writes one token can never write another. Every variable-length field
+  is length-prefixed, so two different field assignments cannot produce the
+  same byte stream. The digest is public and collision-resistant, not a MAC;
+  the presence proof binds it to the vault key (TODO 3.3). A change to the
+  encoding must bump `DIGEST_DOMAIN`; approvals live 60 s, so no migration is
+  needed. A pinned digest test fails if the bytes change silently.
+- Grant writes happen in the human's CLI, **not** in `pmd` (TODO 3.4b/3.4c).
+  The daemon holds the derived key and could re-encrypt, but giving it a
+  write request would mean a bug on the agent-reachable socket could mint a
+  grant. Instead `pmd` only spends the digest-bound approval
+  (`grant_create` -> `grant_approved`) and has no request type that writes a
+  grant; the CLI, which has the password, opens the vault, takes the write
+  lock and saves. The approval still binds the exact request (TODO 3.4a), and
+  the CLI cannot be driven by an agent (TTY + password + no agent context).
+  The CLI must **not** use `Vault::save(master_password)`: a fresh salt would
+  invalidate the running daemon's key on its next request. It saves with
+  `crypto::encrypt_with_key(plaintext, key, template_container)`, which first
+  authenticates the template with the key (a wrong key never writes an
+  unopenable vault) and then reuses the header's salt and KDF parameters with
+  a fresh random 96-bit nonce and the same AEAD AAD. Keeping the salt is safe
+  because the nonce is fresh; the GCM random-nonce birthday bound (~2^32
+  writes for one key) is far beyond a local vault's lifetime. The file stays
+  readable by the master password, the daemon's key stays valid, and `pm add`
+  (which does take a new salt, and is run while no daemon is unlocked) still
+  works. `lock_for_update` byte-compares the container the CLI read before
+  saving, so a concurrent human write becomes `VaultChanged`, not a lost
+  update. Interpreters are refused at approval time (`--allow-interpreter`),
+  not by the digest: the CLI enforces it before proving the request.
 - The daemon canonicalizes `command[0]` itself (symlinks resolved), requires
   the result to stay absolute, and checks that canonical path against the
   grant's command allowlist immediately before spawning; a path it cannot

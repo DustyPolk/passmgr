@@ -171,19 +171,72 @@ approval flow", "Audit"). Follow it.
       `challenge`/`prove` requests, `client::challenge`/`client::prove`; the
       nonce is spent by any attempt and all failures answer `denied`. The
       master-password prompt and the request digest arrive with 3.4.
-- [ ] **3.4 `pm grant create`** (TTY + master password via the proof, refused
-      in agent context with exit 5). Flags: `--label`, `--ref`/`--tag`
+**3.4 `pm grant create`** needs four steps (it was too large for one
+iteration: TTY proof, canonical request, daemon write, token file). Ordered:
+- [x] **3.4a Canonical grant-create request and digest.** New pure module
+      `src/grant/request.rs`: `GrantRequest::new(GrantSpec, TokenHash)`
+      normalizes every field exactly as `Grant::create` will (label, scope,
+      commands, capabilities, expiry shape, max-uses), and `digest()` returns
+      the `presence::RequestDigest` of a length-prefixed encoding
+      (`b"passmgr-grant-create-v1"`, then label, refs, tags, optional fields,
+      commands, capability bits, expiry, optional max-uses, token hash) with a
+      domain separator and big-endian lengths. `create_grant(now)` builds the
+      `Grant` from the normalized fields. The digest covers only what the
+      request writes; id and `created` are assigned at write time and cannot
+      widen access. Tests: reordered/duplicated refs, tags, fields and
+      commands give the same digest; changing any field or the token hash
+      changes it; length-prefix boundaries cannot be shifted (`ab`+`c` vs
+      `a`+`bc`); the canonical form has a pinned hex vector; a RUN request
+      without commands, empty capabilities, `max_uses == 0`, a too-large
+      expiry and a non-UTF-8 command are refused; `create_grant` writes
+      exactly the requested fields; `Debug` redacts the token hash. Done:
+      `src/grant/request.rs`; 7 unit tests plus a public-API test in
+      `tests/grant.rs`; `GrantRequest` is re-exported from `passmgr::grant`.
+- [ ] **3.4b Re-encrypt with the unlocked key (no re-salt).**
+      `Vault::save(master_password)` takes a fresh salt, which would make the
+      running daemon's derived key stale after any grant write. Add
+      `crypto::encrypt_with_key(plaintext, key, template_container)`: it first
+      authenticates the template with `key` (so a wrong key can never produce
+      an unopenable vault), then reuses the template header's salt and KDF
+      params with a fresh random nonce and the same AAD. Add
+      `Vault::save_with_key(&self, key)` (refuses a read-only vault; requires
+      the source container; writes atomically). Tests: the result decrypts
+      with the original password, keeps salt/params, uses a new nonce;
+      a wrong key returns `AuthenticationFailed` and writes nothing;
+      `save_with_key` refuses a read-only vault; a grant survives a reopen;
+      the daemon's key still decrypts the saved container.
+- [ ] **3.4c `grant_create` request and daemon handler (TODO R.15b).**
+      Protocol request `{type:"grant_create", request:{label, refs, tags,
+      fields?, commands, capabilities, expires_at, max_uses?, token_hash}}
+      and response `{type:"grant_approved"}` (no token, hash or grant id in
+      any response; the CLI assigns the id when it writes). The daemon
+      decodes and re-normalizes through `GrantRequest::new`, computes the
+      digest, and calls `presence::Approvals::take` for it. The daemon does
+      not open or write the vault: no request type in `pmd` can create a
+      grant, so an agent that reaches the socket cannot mint one even if an
+      approval were forged. A digest mismatch, an unspent approval, an
+      expired/out-of-range expiry or >30 d lifetime answers
+      `denied`/`bad_request` and writes nothing. Tests: `prove(A)` then
+      `grant_create(B)` is refused; `prove(A)` then `grant_create(A)`
+      succeeds exactly once and a replay is refused; the vault is byte-identical
+      after both; response JSON has no secret material.
+- [ ] **3.4d `pm grant create` CLI** (TTY + master password via the proof,
+      refused in agent context with exit 5). Flags: `--label`, `--ref`/`--tag`
       (repeatable), `--command PATH` (repeatable; resolved to a canonical
       path at creation), `--expires 1h|30m|7d` (required, max 30 d),
-      `--max-uses N`, `--allow-interpreter`. The token is written **only** to
-      `--out FILE` (created 0600 with `O_EXCL`), never to stdout. The create
-      request (or, if the CLI writes the vault itself, the approval it mints)
-      must spend the digest-bound approval with `presence::Approvals::take`
-      for the canonical digest of exactly the fields it writes, before the
-      write; a digest mismatch writes nothing and is refused (TODO R.15b).
-      Tests: the token is absent from stdout/stderr, the file mode is 0600,
-      interpreter commands are refused without the flag, and R.15b's
-      A-then-B / A-then-A-exactly-once cases.
+      `--max-uses N`, `--allow-interpreter`, `--out FILE`. The CLI builds a
+      `GrantRequest` with a fresh 32-byte token, derives the key once from the
+      password, proves its digest, sends `grant_create`, and only after
+      success opens the vault with that same key (`open_with_key` +
+      `lock_for_update` + `save_with_key`) and writes the grant; it then
+      writes the raw token to `--out` with `O_EXCL` and mode 0600, never to
+      stdout. Requires a running daemon (`pm unlock` first); it does not
+      auto-unlock in this item. Refuse interpreter commands (a shared pure
+      list in `grant/validate.rs`) without `--allow-interpreter`. Tests: the
+      token is absent from stdout/stderr, the file mode is 0600, an existing
+      `--out` is refused without overwriting, interpreter commands are
+      refused without the flag, agent/TTY refusal exits 5, and the daemon is
+      still usable after the write (its key was not invalidated).
 - [ ] **3.5 `pm grant list|show|revoke` (+ `--json`).** list/show print
       metadata only, never tokens or hashes. revoke needs no password and takes
       effect on the next request. `revoke --all` exists. Tests for each.

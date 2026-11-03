@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use passmgr::grant::{
-    AccessRequest, Capabilities, Capability, Denied, Grant, GrantId, GrantSpec,
+    AccessRequest, Capabilities, Capability, Denied, Grant, GrantId, GrantRequest, GrantSpec,
     LABEL_FORBIDDEN_CLASSES, MAX_GRANT_LIFETIME_SECS, MAX_LABEL_BYTES, Scope, StoredGrant, Target,
     TokenHash, UpdateError, validate_field_name,
 };
@@ -777,4 +777,37 @@ fn stored_grants_are_revalidated() {
     let mut absurd_revoked = stored_grant();
     absurd_revoked.revoked_at = Some(MAX_TIMESTAMP_UNIX + 1);
     assert!(Grant::from_stored(absurd_revoked).is_err());
+}
+
+#[test]
+fn grant_request_binds_its_digest_to_normalized_fields_and_the_token() {
+    let token = TokenHash::of(b"canary-integration-grant-request-token");
+    let mut first = spec(Capabilities::RUN);
+    first.scope =
+        Scope::new(vec![ref_id(1), ref_id(1)], tags(&["prod", "prod"]), None).expect("scope");
+    first.commands = vec![PathBuf::from("/usr/bin/gh"), PathBuf::from("/usr/bin/gh")];
+    let mut second = first.clone();
+    second.commands = vec![PathBuf::from("/usr/bin/gh")];
+
+    let request = GrantRequest::new(first, token).expect("request");
+    assert_eq!(
+        request.digest().to_hex(),
+        GrantRequest::new(second, token)
+            .expect("request")
+            .digest()
+            .to_hex()
+    );
+    assert_ne!(
+        request.digest().to_hex(),
+        GrantRequest::new(spec(Capabilities::RUN), TokenHash::of(b"other token"))
+            .expect("request")
+            .digest()
+            .to_hex()
+    );
+
+    let grant = request.create_grant(NOW).expect("grant");
+    assert_eq!(grant.scope().refs(), [ref_id(1)]);
+    assert_eq!(grant.scope().tags(), ["prod"]);
+    assert_eq!(grant.commands(), [PathBuf::from("/usr/bin/gh")]);
+    assert!(grant.token_hash().matches(&token));
 }
