@@ -1,3 +1,35 @@
+## 2026-11-03 — Split the protocol frame codec from the request model (TODO R.20c)
+
+- `src/protocol/mod.rs` 1,317 -> 444 lines: request/response types,
+  `ProtocolError`, the request field validation (`validate_request`,
+  `validate_absolute_path`, `valid_env_name`) and the `response` re-exports.
+  The frame and body codec moved unchanged to `src/protocol/codec.rs` (304):
+  `encode`, `decode`, `FrameDecoder`, `read_length`, `check_length`,
+  `split_frame`, `encode_body`, `decode_body` and the JSON field helpers.
+- The ~590-line inline test module moved to `src/protocol/tests.rs` (590), the
+  `src/x.rs` + `src/x/` layout R.20a/R.20b used. `mod.rs` still re-exports
+  `encode`/`decode`/`FrameDecoder`, so `client`, `daemon` and the CLI are
+  unchanged; `split_frame` stays shared with `response.rs` through a private
+  `use codec::split_frame;` (no new public surface).
+- The move is mechanical: a normalized diff against `HEAD:src/protocol/mod.rs`
+  shows the codec body byte-identical and the test body identical apart from
+  the module wrapper, with only indentation, one `serde_json::Value` import
+  and rustfmt re-wrapping different. `serde_json` is no longer imported by
+  `mod.rs`; `tests.rs` imports `serde_json::Value` directly.
+- `tests/layout.rs`: `PENDING_SPLITS` is now only `tests/cli.rs`; both guard
+  tests pass.
+- No behavior, wire-format or protocol-version change.
+- Gate: `fmt --check`, `clippy --all-targets -D warnings`, full `cargo test`
+  green (lib 223 of which protocol 40, cli 30, daemon 20, docs 11, grant 23,
+  layout 2, run 13, unlock 8, main 34, plus concurrency/shutdown/single).
+  `cargo audit` not installed; skipped per instructions.
+- **Next iteration must know:** R.20d is the last split (`tests/cli.rs`,
+  1,463): move the PTY/reveal/agent-marker tests and their helpers into
+  `tests/cli_reveal.rs` with shared setup in e.g. `tests/cli_support/mod.rs`,
+  then empty `PENDING_SPLITS` (do not delete the list or its second test).
+  After that the next unchecked item is 3.4c (`grant_create` request and
+  daemon handler, which also discharges R.15b).
+
 ## 2026-11-03 — Split the vault write lock from the vault lifecycle (TODO R.20b)
 
 - `src/vault.rs` 1,271 -> 358 lines: only the `Vault` lifecycle, `read_container`

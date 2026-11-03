@@ -206,7 +206,7 @@ Rules that apply to every item:
       (`write_lock_is_exclusive_private_and_released_on_drop`,
       `write_lock_refuses_a_symlink`) moved into `lock.rs`'s own test module;
       the other 22 are unchanged apart from indentation and one import.
-- [ ] **R.20c Split `src/protocol/mod.rs` (1,317 lines).**
+- [x] **R.20c Split `src/protocol/mod.rs` (1,317 lines).**
       Move the frame and body codec (`encode`, `decode`, `FrameDecoder`,
       `read_length`, `check_length`, `encode_body`, `decode_body`) into
       `src/protocol/codec.rs`, keep the request types and validation in
@@ -215,6 +215,16 @@ Rules that apply to every item:
       `PENDING_SPLITS`.
       Test: the layout guard passes without that entry; the protocol unit
       tests and `tests/daemon.rs` still pass unchanged.
+      Done: `src/protocol/mod.rs` is 444 lines (request/response types,
+      `ProtocolError`, field validation, `valid_env_name`); `codec.rs` is 304
+      (`encode`, `decode`, `FrameDecoder`, `read_length`, `check_length`,
+      `split_frame`, the body codec and its JSON helpers); `tests.rs` is 590.
+      `mod.rs` re-exports `encode`/`decode`/`FrameDecoder`, and the private
+      `use codec::split_frame;` keeps `response.rs`'s `super::split_frame`
+      working without widening it. The moved code is byte-identical to
+      `HEAD:src/protocol/mod.rs` apart from the module wrapper; only
+      indentation, the two relocated imports and rustfmt's re-wrapping
+      differ. Lib test count unchanged at 223 (40 in `protocol::tests`).
 - [ ] **R.20d Split `tests/cli.rs` (1,463 lines).**
       Move the PTY/reveal/agent-marker tests and their helpers (`run_on_pty`,
       `read_pty`, the serial guard where needed) into a second test binary
