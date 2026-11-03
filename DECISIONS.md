@@ -328,6 +328,11 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   opaque `denied`. The use is written to the vault before the secret is copied
   or the child is spawned; a spawn failure therefore still consumes a use.
   This favors never exceeding `max_uses` over not charging a failed exec.
+- `run` authorization reads the clock **after** the vault write lock is
+  acquired, and re-reads it on every retry (TODO R.45). The wait can last up
+  to the 30 s lock timeout per attempt, so a time read before it would
+  authorize a grant that expired while waiting. Expiry is always decided
+  against the vault the use is recorded in.
 - Grant progress is monotonic while one `pmd` serves (TODO R.44). The vault
   is an ordinary file and a same-user process can put an older copy back;
   that copy still opens with the daemon's key. `pmd` keeps an in-memory,

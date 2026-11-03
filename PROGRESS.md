@@ -1,3 +1,36 @@
+## 2026-11-03 — Authorize a run with the clock read after the lock (TODO R.45)
+
+- `src/daemon/run.rs`: `record_use` no longer takes a `now`; it reads
+  `unix_now()` immediately after `Vault::open_with_key_for_update` (and again
+  on every `USE_RECORD_ATTEMPTS` retry) and uses that value for
+  `check_grant_for_run`, `grant.authorizes` and `mark_used`. The clock read in
+  `serve_run` before `record_use` is removed.
+- Why: the vault write lock can block for 30 s per attempt (3 attempts on a
+  failed save), so a time read before the wait authorized grants that had
+  already expired. Expiry is now decided against the vault the use is recorded
+  in. Added a DECISIONS bullet under "Daemon and protocol".
+- Tests: new `a_run_is_denied_when_its_grant_expires_during_the_lock_wait` in
+  `tests/daemon_run.rs` holds `vault.dat.lock` with `flock` before sending a
+  run on a grant expiring in 3 s, waits until the daemon's `chmod` of the lock
+  is observable (so the old code had read its clock), sleeps until one whole
+  second past expiry, releases the lock and requires
+  `RunFrame::Error(ResponseError::Denied)` and no secret bytes. A guard
+  assertion fails the test if the daemon reached the lock after expiry, so it
+  cannot pass vacuously. Proved it fails on the old shape (temporary
+  `stale = unix_now()` before the open): it answered `Exit(Code(0))`.
+- Fixture: `tests/support/mod.rs` gained `with_grant_expiring_in(seconds)` and
+  a `grant_expires_at` field; `with_secret_and_uses` now delegates to a shared
+  `build(secret, max_uses, expires_in)` with the old 3600 s default. The
+  `wait_until_the_lock_is_open` helper moved from inside the R.38 symlink test
+  to module scope in `tests/daemon_run.rs` so both tests use it.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  the full `cargo test` pass. `cargo audit` skipped (not installed).
+- **Next iteration must know:** R.46 is next. `record_use`'s signature lost its
+  `now` argument; the only clock read for a run now happens under the vault
+  lock. The new test adds ~3-4 s to `daemon_run`. `revoke_grants` still reads
+  `now` before its lock (it is used only for the write timestamp, not for an
+  expiry decision), so it is untouched.
+
 ## 2026-11-03 — Refuse a rolled-back vault while pmd serves (TODO R.44)
 
 - New `src/daemon/watermark.rs`: `GrantWatermarks` keeps, per grant id and

@@ -1002,7 +1002,7 @@ Rules that apply to every item:
       so the kill switch still works. The mark is not persisted; `SECURITY.md`
       limit 7 (out of scope is now 8) documents the restart residual.
 
-- [ ] **R.45 Grant expiry is checked with a `now` read before the vault-lock
+- [x] **R.45 Grant expiry is checked with a `now` read before the vault-lock
       wait.**
       `src/daemon/run.rs:87` reads the clock once; `record_use`
       (`:152-187`) then authorizes and `mark_used(now)` after
@@ -1014,6 +1014,12 @@ Rules that apply to every item:
       Fix: read the clock again after the lock is acquired and authorize
       with that.
       Test: the scenario above answers `Denied`.
+      Done: `record_use` no longer takes a `now`; it reads the clock right
+      after `open_with_key_for_update` and again on every retry, and uses that
+      value for `check_grant_for_run`, `authorizes` and `mark_used`. The
+      pre-lock read in `serve_run` is gone. Test
+      `a_run_is_denied_when_its_grant_expires_during_the_lock_wait` in
+      `tests/daemon_run.rs` (fixture `with_grant_expiring_in`).
 
 - [ ] **R.46 At the payload size limit a revocation cannot be saved.**
       Revoking or recording a use adds 8 bytes to a grant record

@@ -93,12 +93,7 @@ pub(super) fn serve_run(
         let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::Denied));
         return;
     };
-    let Some(now) = unix_now() else {
-        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::Internal));
-        return;
-    };
-
-    let secret = match record_use(vault_path, key, watermarks, request, id, &program, now) {
+    let secret = match record_use(vault_path, key, watermarks, request, id, &program) {
         Ok(secret) => secret,
         Err(RecordError::Denied) => {
             let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::Denied));
@@ -189,6 +184,11 @@ fn client_closed(fd: RawFd) -> bool {
 /// rollback cannot resurrect a spent use or a cleared revocation while this
 /// daemon is serving (TODO R.44). The mark is only raised after a successful
 /// save, so a failed write does not claim a use the vault never recorded.
+///
+/// The clock is read **after** the write lock is acquired, never before: the
+/// wait can last up to the lock timeout (and is repeated on a failed save), so
+/// a time read earlier would authorize a grant that has since expired (TODO
+/// R.45).
 fn record_use(
     vault_path: &Path,
     key: &LockedKey,
@@ -196,12 +196,16 @@ fn record_use(
     request: &protocol::RunRequest,
     id: EntryId,
     program: &Path,
-    now: u64,
 ) -> Result<Zeroizing<String>, RecordError> {
     let token_hash = request.grant.hash();
     for _ in 0..USE_RECORD_ATTEMPTS {
         let mut vault = Vault::open_with_key_for_update(vault_path, key.as_slice())
             .map_err(|_| RecordError::Internal)?;
+        // Authorize with the time the vault was actually read, not with a
+        // time from before the lock wait.
+        let Some(now) = unix_now() else {
+            return Err(RecordError::Internal);
+        };
         if watermarks.check(vault.grants()).is_err() {
             // Fail closed without consuming anything: the file on disk has
             // regressed, so the daemon cannot trust its grant state.

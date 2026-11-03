@@ -43,6 +43,8 @@ pub struct Fixture {
     /// An executable copy of `/bin/true` that is inside the grant scope. A
     /// test chmods it to prove a spawn failure is reported distinctly.
     pub spawn_fail_program: PathBuf,
+    /// When the fixture's grant expires (Unix seconds).
+    pub grant_expires_at: u64,
 }
 
 impl Fixture {
@@ -59,7 +61,16 @@ impl Fixture {
         Self::with_secret_and_uses(SECRET, Some(max_uses))
     }
 
+    /// A fixture whose grant expires `seconds` after it is created.
+    pub fn with_grant_expiring_in(seconds: u64) -> Self {
+        Self::build(SECRET, None, seconds)
+    }
+
     fn with_secret_and_uses(secret: &str, max_uses: Option<u32>) -> Self {
+        Self::build(secret, max_uses, 3600)
+    }
+
+    fn build(secret: &str, max_uses: Option<u32>, expires_in: u64) -> Self {
         let directory = tempfile::tempdir().expect("tempdir");
         // tempfile creates the directory 0700, which is exactly what the
         // runtime directory check requires.
@@ -91,13 +102,14 @@ impl Fixture {
             .expect("clock")
             .as_secs();
         let scope = Scope::new(vec![id], Vec::new(), None).expect("scope");
+        let grant_expires_at = now + expires_in;
         let grant = Grant::create(
             GrantSpec {
                 label: "daemon test run grant".into(),
                 scope,
                 commands: vec![sh, truth, spawn_fail_program.clone()],
                 capabilities: Capabilities::RUN,
-                expires_at: now + 3600,
+                expires_at: grant_expires_at,
                 max_uses,
             },
             grant_token.hash(),
@@ -129,6 +141,7 @@ impl Fixture {
             grant: grant_token,
             grant_file,
             spawn_fail_program,
+            grant_expires_at,
         }
     }
 

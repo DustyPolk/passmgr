@@ -561,6 +561,31 @@ fn the_child_is_spawned_as_the_canonical_program_not_the_request_path() {
     assert!(wait_for_exit(&mut child, WAIT).success());
 }
 
+/// Wait until `pmd` has opened the vault lock and narrowed its mode.
+///
+/// The daemon is non-dumpable, so `/proc/<pid>/fd` is not readable; the
+/// unconditional `chmod` in `acquire_write_lock` updates the lock file's
+/// ctime, which is the first observable step after the vault is read and
+/// authorized. The caller compares against a ctime captured before the run.
+fn wait_until_the_lock_is_open(lock: &std::path::Path, before: (i64, i64)) {
+    use std::os::unix::fs::MetadataExt;
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Ok(metadata) = fs::metadata(lock) {
+            if (metadata.ctime(), metadata.ctime_nsec()) != before {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pmd never opened the vault lock file"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// A link swapped after the allowlist check must not redirect the exec.
 ///
 /// The run authorized `/bin/true` through `tool`. While the daemon waits for
@@ -577,29 +602,6 @@ fn the_child_is_spawned_as_the_canonical_program_not_the_request_path() {
 fn a_symlink_swapped_after_the_allowlist_check_cannot_change_the_program() {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
     use std::os::unix::io::AsRawFd;
-    use std::time::{Duration, Instant};
-
-    /// Wait until `pmd` has opened the vault lock and narrowed its mode. The
-    /// daemon is non-dumpable, so `/proc/<pid>/fd` is not readable; the
-    /// unconditional `chmod` in `acquire_write_lock` updates the lock file's
-    /// ctime, which is the first observable step after the vault is read and
-    /// authorized.
-    fn wait_until_the_lock_is_open(lock: &std::path::Path, before: (i64, i64)) {
-        let deadline = Instant::now() + WAIT;
-        loop {
-            let metadata = fs::metadata(lock);
-            if let Ok(metadata) = metadata {
-                if (metadata.ctime(), metadata.ctime_nsec()) != before {
-                    return;
-                }
-            }
-            assert!(
-                Instant::now() < deadline,
-                "pmd never opened the vault lock file"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
 
     let fixture = Fixture::new();
     let mut child = fixture.start();
@@ -651,6 +653,76 @@ fn a_symlink_swapped_after_the_allowlist_check_cannot_change_the_program() {
         "the swapped program ran and captured the injected secret"
     );
     assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert!(
+        !raw.windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+/// R.45: a grant that expires while the run waits for the vault write lock
+/// must be denied. The daemon used to read the clock once, before the lock
+/// wait, and then authorize with it up to the lock timeout later.
+#[test]
+fn a_run_is_denied_when_its_grant_expires_during_the_lock_wait() {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::io::AsRawFd;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    let fixture = Fixture::with_grant_expiring_in(3);
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+
+    // Hold the vault write lock before the request is sent, so the daemon can
+    // only authorize after this test releases it.
+    let lock_path = passmgr::vault::lock_path(&fixture.vault);
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .expect("open vault lock");
+    // SAFETY: `as_raw_fd` is a valid descriptor owned by `lock`.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let before = fs::metadata(&lock_path)
+        .map(|metadata| (metadata.ctime(), metadata.ctime_nsec()))
+        .expect("lock metadata");
+
+    let run_request = fixture.run_request("API_KEY", &["/bin/true"]);
+    let token = fixture.token.clone();
+    let run_socket = socket.clone();
+    let reader = std::thread::spawn(move || read_run(&run_socket, &token, &run_request));
+
+    // The daemon opens (and `chmod`s) the lock before it can authorize, so
+    // once that is observable the old code had already read its clock. Guard
+    // that this happened before expiry, or the test would pass vacuously.
+    wait_until_the_lock_is_open(&lock_path, before);
+    let observed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_secs();
+    assert!(
+        observed < fixture.grant_expires_at,
+        "the daemon read the clock after the grant expired; the test proves nothing"
+    );
+
+    // Wait until the grant is at least one whole second past expiry, so the
+    // daemon's fresh read cannot land in the same second as `expires_at`.
+    let expired = UNIX_EPOCH + Duration::from_secs(fixture.grant_expires_at + 1);
+    if let Ok(remaining) = expired.duration_since(SystemTime::now()) {
+        std::thread::sleep(remaining);
+    }
+    drop(lock);
+
+    let (frames, raw) = reader.join().expect("run thread");
+    assert_eq!(frames, vec![RunFrame::Error(ResponseError::Denied)]);
     assert!(
         !raw.windows(SECRET.len())
             .any(|window| window == SECRET.as_bytes())
