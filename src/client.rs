@@ -652,7 +652,8 @@ mod tests {
         protocol::RunRequest {
             env: "API_KEY".into(),
             reference: "pm://00112233445566778899aabbccddeeff".into(),
-            command: vec!["true".into()],
+            command: vec!["/bin/true".into()],
+            cwd: "/tmp".into(),
         }
     }
 

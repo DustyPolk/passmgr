@@ -145,7 +145,9 @@ Rules, enforced by the **daemon** (the MCP server is untrusted plumbing):
   (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `TERM`),
   then `plain_env`, then the secrets. Never inherit the agent's full env.
 - Resolve `command[0]` through the child's `PATH` to a canonical absolute
-  path, then check it against the grant's command allowlist.
+  path, then check it against the grant's command allowlist. The daemon
+  requires an absolute `cwd` and an absolute `command[0]` and never resolves
+  either itself; the MCP server does the resolving, as `passmgr run` does.
 - Every injected secret is redacted from stdout and stderr: the exact bytes,
   plus best-effort encodings (lower/upper hex, standard and URL-safe base64
   of the value, percent-encoding). Redaction is streaming, with an overlap

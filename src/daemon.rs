@@ -567,6 +567,7 @@ fn serve_run(
         &request.command,
         &request.env,
         secret.as_str(),
+        std::path::Path::new(&request.cwd),
         &inherited,
         cancel,
         |frame| write_run_frame(&mut stream, &frame),

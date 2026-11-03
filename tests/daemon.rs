@@ -249,6 +249,7 @@ fn run_request(reference: &str, env: &str, command: &[&str]) -> Request {
         env: env.into(),
         reference: reference.into(),
         command: command.iter().map(|arg| (*arg).to_string()).collect(),
+        cwd: "/".into(),
     })
 }
 
@@ -316,7 +317,7 @@ fn malformed_oversized_and_unknown_requests_are_rejected_without_a_crash() {
     // Unknown request type.
     let token = fixture.token.to_hex();
     let body = format!(
-        r#"{{"version":2,"token":"{}","request":{{"type":"steal"}}}}"#,
+        r#"{{"version":3,"token":"{}","request":{{"type":"steal"}}}}"#,
         token.as_str()
     );
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
@@ -327,7 +328,7 @@ fn malformed_oversized_and_unknown_requests_are_rejected_without_a_crash() {
     );
 
     // A well-formed frame whose token is not 64 lowercase hex characters.
-    let body = br#"{"version":2,"token":"nope","request":{"type":"ping"}}"#;
+    let body = br#"{"version":3,"token":"nope","request":{"type":"ping"}}"#;
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
     frame.extend_from_slice(body);
     assert_eq!(
@@ -343,7 +344,8 @@ fn malformed_oversized_and_unknown_requests_are_rejected_without_a_crash() {
         &Request::Run(RunRequest {
             env: "API_KEY".into(),
             reference: "pm://00112233445566778899aabbccddeeff".into(),
-            command: vec!["true".into()],
+            command: vec!["/bin/true".into()],
+            cwd: "/".into(),
         }),
     );
     assert_eq!(frames, vec![RunFrame::Error(ResponseError::NotFound)]);
@@ -541,7 +543,8 @@ fn the_secret_never_reaches_output_arguments_environment_or_the_socket() {
         Request::Run(RunRequest {
             env: "API_KEY".into(),
             reference: "pm://00112233445566778899aabbccddeeff".into(),
-            command: vec!["sh".into(), "-c".into(), "true".into()],
+            command: vec!["/bin/sh".into(), "-c".into(), "true".into()],
+            cwd: "/".into(),
         }),
     ] {
         let mut stream = UnixStream::connect(&socket).expect("connect");
@@ -621,7 +624,7 @@ fn the_session_token_never_reaches_socket_traffic_or_daemon_output() {
     let wrong = SessionToken::generate().expect("wrong token");
     let wrong_hex = wrong.to_hex();
     let body = format!(
-        r#"{{"version":2,"token":"{}","request":{{"type":"ping"}}}}"#,
+        r#"{{"version":3,"token":"{}","request":{{"type":"ping"}}}}"#,
         wrong_hex.as_str()
     );
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();

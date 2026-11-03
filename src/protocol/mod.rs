@@ -8,23 +8,27 @@
 //! u32 length | length bytes of JSON
 //! ```
 //!
-//! The JSON envelope is `{"version":2,"token":"<64 hex>","request":{...}}`.
+//! The JSON envelope is `{"version":3,"token":"<64 hex>","request":{...}}`.
 //! The `token` is the unlock session token (see [`crate::token`]) and is
 //! required on every request; the daemon rejects a missing or mismatched one
 //! with `unauthorized`. The `request` object always has a `"type"` field; the
 //! types this version knows are `ping`, `lock` and `run`:
 //!
 //! ```json
-//! {"version":2,"token":"...","request":{"type":"ping"}}
-//! {"version":2,"token":"...","request":{"type":"lock"}}
-//! {"version":2,"token":"...","request":{"type":"run","env":"API_KEY",
+//! {"version":3,"token":"...","request":{"type":"ping"}}
+//! {"version":3,"token":"...","request":{"type":"lock"}}
+//! {"version":3,"token":"...","request":{"type":"run","env":"API_KEY",
 //!                         "ref":"pm://00112233445566778899aabbccddeeff",
-//!                         "command":["curl","-s","https://example.test"]}}
+//!                         "command":["/usr/bin/curl","-s","https://example.test"],
+//!                         "cwd":"/home/alice/project"}}
 //! ```
 //!
 //! Version 2 added the required `token` field, so it is not backward
 //! compatible with version 1 (a version-1 peer would be treated as an
-//! unsigned request). Older versions are refused with `unsupported_version`.
+//! unsigned request). Version 3 added the required `run.cwd` field and
+//! requires `run.command[0]` to be an absolute path, so a version-2 daemon
+//! would run the child in the wrong directory. Older versions are refused
+//! with `unsupported_version`.
 //!
 //! # There is no plaintext request type
 //!
@@ -87,7 +91,12 @@ pub use response::{
 
 /// The protocol version carried in every envelope. Bump it when a change is
 /// not backward compatible.
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// Version 3 added the required `run.cwd` field and requires `run.command[0]`
+/// to be an absolute path. A version-2 daemon would ignore `cwd` and execute
+/// the program in its own working directory, so the bump turns a silent
+/// mismatch into a refusal that tells the human to restart the daemon.
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Largest accepted frame body. 64 KiB is far more than any request needs and
 /// bounds the memory a peer can make the daemon allocate.
@@ -107,6 +116,8 @@ pub const MAX_ENV_NAME_BYTES: usize = 128;
 pub const MAX_REFERENCE_BYTES: usize = 128;
 /// Longest accepted single argument in a `run` command.
 pub const MAX_ARG_BYTES: usize = 4096;
+/// Longest accepted `run.cwd` (the caller's absolute working directory).
+pub const MAX_PATH_BYTES: usize = 4096;
 /// Most arguments accepted in a `run` command (including `argv[0]`).
 pub const MAX_ARGS: usize = 256;
 /// Largest raw payload carried by one `stdout`/`stderr` frame. Hex encoding
@@ -136,14 +147,21 @@ pub enum Request {
 }
 
 /// The `run` payload: inject `reference`'s value as `env` for `command`.
+///
+/// `cwd` is the **caller's** working directory, not the daemon's. The daemon
+/// runs the child there, so relative arguments mean what the caller meant.
+/// `command[0]` must be an absolute path: the daemon never resolves a program
+/// through its own `PATH`, which belongs to the shell that ran `unlock`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunRequest {
     /// Environment variable name in the child process.
     pub env: String,
     /// `pm://<32 hex chars>` reference of the credential to inject.
     pub reference: String,
-    /// Argument vector; `command[0]` is the program.
+    /// Argument vector; `command[0]` is an absolute path to the program.
     pub command: Vec<String>,
+    /// Absolute working directory the child starts in (the caller's cwd).
+    pub cwd: String,
 }
 
 /// A request together with the session token that authorized it.
@@ -429,6 +447,7 @@ fn encode_body(token: &SessionToken, request: &Request) -> Result<Vec<u8>, Proto
             "env": run.env,
             "ref": run.reference,
             "command": run.command,
+            "cwd": run.cwd,
         }),
     };
     let token = token.to_hex();
@@ -484,6 +503,7 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
             env: required_string(request, "env")?,
             reference: required_string(request, "ref")?,
             command: required_string_array(request, "command")?,
+            cwd: required_string(request, "cwd")?,
         }),
         other => {
             return Err(ProtocolError::UnknownRequest(
@@ -548,6 +568,7 @@ fn validate_request(request: &Request) -> Result<(), ProtocolError> {
             "run.ref is not a valid pm:// reference".into(),
         ));
     }
+    validate_absolute_path("run.cwd", &run.cwd)?;
     if run.command.is_empty() {
         return Err(ProtocolError::InvalidRequest(
             "run.command must not be empty".into(),
@@ -564,11 +585,37 @@ fn validate_request(request: &Request) -> Result<(), ProtocolError> {
                 "run.command[{index}] exceeds {MAX_ARG_BYTES} bytes"
             )));
         }
-        if index == 0 && argument.is_empty() {
-            return Err(ProtocolError::InvalidRequest(
-                "run.command[0] must not be empty".into(),
-            ));
+        if index == 0 {
+            // Never let the daemon resolve a program through its own PATH:
+            // that PATH belongs to the shell that started `unlock`, not to the
+            // caller that named the command.
+            validate_absolute_path("run.command[0]", argument)?;
         }
+    }
+    Ok(())
+}
+
+/// Require a non-empty, NUL-free absolute path within [`MAX_PATH_BYTES`].
+fn validate_absolute_path(field: &str, value: &str) -> Result<(), ProtocolError> {
+    if value.is_empty() {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if value.len() > MAX_PATH_BYTES {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{field} exceeds {MAX_PATH_BYTES} bytes"
+        )));
+    }
+    if value.contains('\0') {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{field} must not contain a NUL byte"
+        )));
+    }
+    if !value.starts_with('/') {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{field} must be an absolute path"
+        )));
     }
     Ok(())
 }
@@ -642,7 +689,12 @@ mod tests {
         Request::Run(RunRequest {
             env: "API_KEY".into(),
             reference: REF.into(),
-            command: vec!["curl".into(), "-s".into(), "https://example.test".into()],
+            command: vec![
+                "/usr/bin/curl".into(),
+                "-s".into(),
+                "https://example.test".into(),
+            ],
+            cwd: "/tmp".into(),
         })
     }
 
@@ -734,7 +786,7 @@ mod tests {
     #[test]
     fn oversized_encoded_message_is_rejected() {
         // Each argument is within MAX_ARG_BYTES, but the body is over 64 KiB.
-        let mut command = vec!["prog".to_string()];
+        let mut command = vec!["/bin/prog".to_string()];
         for _ in 0..20 {
             command.push("x".repeat(4096));
         }
@@ -742,6 +794,7 @@ mod tests {
             env: "API_KEY".into(),
             reference: REF.into(),
             command,
+            cwd: "/tmp".into(),
         });
         assert!(matches!(
             encode(&request),
@@ -751,7 +804,7 @@ mod tests {
 
     #[test]
     fn bad_versions_are_rejected() {
-        for version in ["0", "1", "3", "99", "18446744073709551615"] {
+        for version in ["0", "1", "2", "4", "99", "18446744073709551615"] {
             let body = format!(
                 r#"{{"version":{version},"token":"{TOKEN_HEX}","request":{{"type":"ping"}}}}"#
             );
@@ -772,19 +825,19 @@ mod tests {
             r#"{"request":{"type":"ping"}}"#.into(),
             r#"{"version":"2","token":"x","request":{"type":"ping"}}"#.into(),
             r#"{"version":-1,"token":"x","request":{"type":"ping"}}"#.into(),
-            r#"{"version":2.5,"token":"x","request":{"type":"ping"}}"#.into(),
-            r#"{"version":2}"#.into(),
-            format!(r#"{{"version":2,"token":"{TOKEN_HEX}","request":[]}}"#),
-            format!(r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{}}}}"#),
-            format!(r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":42}}}}"#),
+            r#"{"version":3.5,"token":"x","request":{"type":"ping"}}"#.into(),
+            r#"{"version":3}"#.into(),
+            format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":[]}}"#),
+            format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{}}}}"#),
+            format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":42}}}}"#),
             format!(
-                r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x"}}}}"#
+                r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x"}}}}"#
             ),
             format!(
-                r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x","command":"true"}}}}"#
+                r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x","command":"true"}}}}"#
             ),
             format!(
-                r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x","command":[1]}}}}"#
+                r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"A","ref":"x","command":[1]}}}}"#
             ),
         ];
         for body in bodies {
@@ -802,7 +855,7 @@ mod tests {
     fn a_missing_or_malformed_token_is_rejected_on_every_request_type() {
         // No token at all.
         for request in [r#"{"type":"ping"}"#, r#"{"type":"lock"}"#] {
-            let body = format!(r#"{{"version":2,"request":{request}}}"#);
+            let body = format!(r#"{{"version":3,"request":{request}}}"#);
             assert!(
                 matches!(
                     super::decode(&frame(&body)),
@@ -813,7 +866,7 @@ mod tests {
         }
 
         // A token field that is not a string.
-        let body = r#"{"version":2,"token":7,"request":{"type":"ping"}}"#;
+        let body = r#"{"version":3,"token":7,"request":{"type":"ping"}}"#;
         assert!(matches!(
             super::decode(&frame(body)),
             Err(ProtocolError::MalformedJson(_))
@@ -825,7 +878,7 @@ mod tests {
         let long = "a".repeat(crate::token::TOKEN_HEX_CHARS + 1);
         let non_hex = "g".repeat(crate::token::TOKEN_HEX_CHARS);
         for token in [uppercase, short, long, non_hex, String::new()] {
-            let body = format!(r#"{{"version":2,"token":"{token}","request":{{"type":"ping"}}}}"#);
+            let body = format!(r#"{{"version":3,"token":"{token}","request":{{"type":"ping"}}}}"#);
             match super::decode(&frame(&body)) {
                 Err(ProtocolError::InvalidToken) => {}
                 other => panic!("token {token:?} should be invalid, got {other:?}"),
@@ -861,7 +914,7 @@ mod tests {
         // none of them exist here, and none may ever be added.
         for kind in ["reveal", "get", "password", "export", "run ", "PING", ""] {
             let body =
-                format!(r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"{kind}"}}}}"#);
+                format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"{kind}"}}}}"#);
             assert!(
                 matches!(decode(&frame(&body)), Err(ProtocolError::UnknownRequest(_))),
                 "type {kind:?} should be unknown"
@@ -871,7 +924,7 @@ mod tests {
         // A huge type is echoed back only in truncated form.
         let long = "x".repeat(10_000);
         let body =
-            format!(r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"{long}"}}}}"#);
+            format!(r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"{long}"}}}}"#);
         match decode(&frame(&body)) {
             Err(ProtocolError::UnknownRequest(kind)) => {
                 assert_eq!(kind.chars().count(), MAX_TYPE_CHARS)
@@ -913,7 +966,7 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        assert_eq!(keys, ["command", "env", "ref", "type"]);
+        assert_eq!(keys, ["command", "cwd", "env", "ref", "type"]);
     }
 
     #[test]
@@ -937,56 +990,82 @@ mod tests {
 
     #[test]
     fn run_fields_are_validated() {
+        let base = RunRequest {
+            env: "OK".into(),
+            reference: REF.into(),
+            command: vec!["/bin/true".into()],
+            cwd: "/tmp".into(),
+        };
         let cases = [
             RunRequest {
                 env: String::new(),
-                reference: REF.into(),
-                command: vec!["true".into()],
+                ..base.clone()
             },
             RunRequest {
                 env: "1BAD".into(),
-                reference: REF.into(),
-                command: vec!["true".into()],
+                ..base.clone()
             },
             RunRequest {
                 env: "BAD-NAME".into(),
-                reference: REF.into(),
-                command: vec!["true".into()],
+                ..base.clone()
             },
             RunRequest {
                 env: "A".repeat(MAX_ENV_NAME_BYTES + 1),
-                reference: REF.into(),
-                command: vec!["true".into()],
+                ..base.clone()
             },
             RunRequest {
-                env: "OK".into(),
                 reference: String::new(),
-                command: vec!["true".into()],
+                ..base.clone()
             },
             RunRequest {
-                env: "OK".into(),
                 reference: "not-a-reference".into(),
-                command: vec!["true".into()],
+                ..base.clone()
             },
             RunRequest {
-                env: "OK".into(),
-                reference: REF.into(),
                 command: vec![],
+                ..base.clone()
             },
             RunRequest {
-                env: "OK".into(),
-                reference: REF.into(),
                 command: vec![String::new()],
+                ..base.clone()
+            },
+            // A bare program name would be resolved through the daemon's own
+            // PATH, which belongs to the shell that ran `unlock`.
+            RunRequest {
+                command: vec!["true".into()],
+                ..base.clone()
             },
             RunRequest {
-                env: "OK".into(),
-                reference: REF.into(),
-                command: vec!["true".into(); MAX_ARGS + 1],
+                command: vec!["bin/true".into()],
+                ..base.clone()
             },
             RunRequest {
-                env: "OK".into(),
-                reference: REF.into(),
-                command: vec!["true".into(), "x".repeat(MAX_ARG_BYTES + 1)],
+                command: vec!["/bin/true".into(); MAX_ARGS + 1],
+                ..base.clone()
+            },
+            RunRequest {
+                command: vec!["/bin/true".into(), "x".repeat(MAX_ARG_BYTES + 1)],
+                ..base.clone()
+            },
+            RunRequest {
+                cwd: String::new(),
+                ..base.clone()
+            },
+            RunRequest {
+                cwd: "tmp".into(),
+                ..base.clone()
+            },
+            RunRequest {
+                cwd: "./tmp".into(),
+                ..base.clone()
+            },
+            RunRequest {
+                cwd: "/tmp/\0/x".into(),
+                ..base.clone()
+            },
+            RunRequest {
+                cwd: format!("/{}", "x".repeat(MAX_PATH_BYTES)),
+                ..base.clone()
             },
         ];
         for run in cases {
@@ -998,6 +1077,20 @@ mod tests {
                 "should reject {run:?}"
             );
         }
+        // The baseline itself is valid, so the cases above fail for the
+        // intended reason rather than a mistake in the fixture.
+        assert!(encode(&Request::Run(base)).is_ok());
+    }
+
+    #[test]
+    fn run_without_cwd_is_rejected_on_decode() {
+        let body = format!(
+            r#"{{"version":{PROTOCOL_VERSION},"token":"{TOKEN_HEX}","request":{{"type":"run","env":"K","ref":"{REF}","command":["/bin/true"]}}}}"#
+        );
+        assert!(matches!(
+            decode(&frame(&body)),
+            Err(ProtocolError::MalformedJson(_))
+        ));
     }
 
     #[test]
@@ -1070,7 +1163,7 @@ mod tests {
         // request type, but must never repeat a field value from the body.
         let secret_like = "SUPER_SECRET_VALUE_123";
         let body = format!(
-            r#"{{"version":2,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"{secret_like}","ref":"x","command":["true"]}}}}"#
+            r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"run","env":"{secret_like}","ref":"x","command":["/bin/true"],"cwd":"/tmp"}}}}"#
         );
         let error = decode(&frame(&body)).expect_err("invalid ref");
         let text = error.to_string();

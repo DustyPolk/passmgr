@@ -190,7 +190,7 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Framing: 4-byte big-endian length prefix + JSON body, 64 KiB body cap
   checked before slicing, one request per connection, 5 s read/write timeout,
   200 ms accept poll.
-- Envelope: `{"version":2,"token":"<64 lowercase hex>","request":{...}}`. The
+- Envelope: `{"version":3,"token":"<64 lowercase hex>","request":{...}}`. The
   token is parsed before the request. Unknown envelope **fields** are
   ignored; unknown versions and request types are hard errors. Requests are
   validated on encode *and* decode.
@@ -210,6 +210,13 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   both; "killed by signal N" stays distinct from exit code 128+N.
 - `not_found` also covers a reference outside the caller's scope, so a client
   cannot use the daemon as an existence oracle for refs it may not use.
+- `run` carries the caller's absolute `cwd`, and `command[0]` must be an
+  absolute path. The CLI resolves a bare name through **its own** `PATH` and
+  a relative program through **its own** cwd before sending the request; the
+  daemon never resolves a program through its own cwd/`PATH` (those belong to
+  the shell that ran `unlock`) and starts the child in the requested `cwd`.
+  An unresolvable program is a CLI usage error (exit 2). This is why the
+  protocol version is 3: a version-2 daemon would silently ignore `cwd`.
 - Protocol code layout: `src/protocol/mod.rs` owns framing, requests and
   errors; `src/protocol/response.rs` owns one-shot responses and the `run`
   stream. `crate::protocol::*` re-exports the public API unchanged.

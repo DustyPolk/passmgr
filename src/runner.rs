@@ -25,6 +25,7 @@
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
@@ -125,6 +126,10 @@ enum Message {
 /// polled while the child runs; when it becomes true the child is killed and
 /// [`RunError::Cancelled`] is returned.
 ///
+/// `cwd` is the caller's working directory. The child starts there, so a
+/// relative argument means what the caller meant; the daemon never runs a
+/// child in its own (unlock-time) directory.
+///
 /// `emit` is called on this thread only, in output order per stream, and must
 /// write the frame before returning. Exactly one [`RunFrame::Exit`] is emitted
 /// on success; an error is returned instead when the run could not finish.
@@ -133,6 +138,7 @@ pub fn execute<F>(
     argv: &[String],
     env_name: &str,
     secret: &str,
+    cwd: &Path,
     inherited: &[(OsString, OsString)],
     cancel: &AtomicBool,
     mut emit: F,
@@ -157,6 +163,7 @@ where
 
     let mut command = Command::new(program);
     command.args(&argv[1..]);
+    command.current_dir(cwd);
     command.env_clear();
     for (name, value) in inherited {
         command.env(name, value);
@@ -388,10 +395,18 @@ mod tests {
         let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
         let cancel = AtomicBool::new(false);
         let mut frames = Vec::new();
-        let result = execute(&argv, env_name, secret, &inherited(), &cancel, |frame| {
-            frames.push(frame);
-            Ok(())
-        });
+        let result = execute(
+            &argv,
+            env_name,
+            secret,
+            Path::new("/"),
+            &inherited(),
+            &cancel,
+            |frame| {
+                frames.push(frame);
+                Ok(())
+            },
+        );
         (frames, result)
     }
 
@@ -549,6 +564,32 @@ mod tests {
     }
 
     #[test]
+    fn the_child_starts_in_the_callers_working_directory() {
+        // A relative argument must resolve against `cwd`, not against the
+        // process's own directory: this is the difference between running the
+        // caller's script and an unrelated file in the daemon's cwd.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("marker.txt"), b"from-the-cwd").expect("write marker");
+        let argv = ["/bin/cat".to_string(), "marker.txt".to_string()];
+        let cancel = AtomicBool::new(false);
+        let mut frames = Vec::new();
+        let result = execute(
+            &argv,
+            "PM_TEST",
+            "secret-1234",
+            dir.path(),
+            &inherited(),
+            &cancel,
+            |frame| {
+                frames.push(frame);
+                Ok(())
+            },
+        );
+        assert_eq!(result.expect("run"), RunExit::Code(0));
+        assert_eq!(stdout_bytes(&frames), b"from-the-cwd");
+    }
+
+    #[test]
     fn an_invalid_environment_name_is_refused_before_spawning() {
         let cancel = AtomicBool::new(false);
         let argv = ["/bin/true".to_string()];
@@ -556,6 +597,7 @@ mod tests {
             &argv,
             "BAD=NAME",
             "secret-1234",
+            Path::new("/"),
             &inherited(),
             &cancel,
             |_| Ok(()),
@@ -585,6 +627,7 @@ mod tests {
             &argv,
             "PM_TEST",
             "secret-1234",
+            Path::new("/"),
             &inherited(),
             &cancel,
             |_| Err(io::Error::new(io::ErrorKind::BrokenPipe, "gone")),
@@ -598,6 +641,7 @@ mod tests {
             &argv,
             "PM_TEST",
             "secret-1234",
+            Path::new("/"),
             &inherited(),
             &cancel,
             |_| Ok(()),

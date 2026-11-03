@@ -168,13 +168,19 @@ passmgr run --env GH_TOKEN=pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5 \
 
 The daemon decrypts the referenced credential, injects it as the named
 environment variable, and runs the command directly (argv, never a shell
-string). The child receives a small fixed environment (`PATH`, `HOME`, `USER`,
-`LOGNAME`, `LANG`, `TZ`, `TMPDIR`, `TERM`, `LC_*`) plus that one variable. Its
-stdout and stderr are relayed with the secret (and common encodings) replaced
-by `[REDACTED]`, and `passmgr` exits with the child's status, or 128+N when the
-child was killed by signal N. Loader and shell-hook names (`PATH`, `LD_*`,
-`BASH_ENV`, ...) are refused with exit code 5. The secret never crosses the
-socket to the CLI: only references and already-redacted output do.
+string). The program is resolved the way the caller meant it: a relative path
+is relative to the caller's working directory, a bare name is searched in the
+caller's `PATH` (never the daemon's, which belongs to the shell that ran
+`unlock`), and the child starts in the caller's working directory. An
+unresolvable program is refused with exit code 2 before the daemon is asked to
+run anything. The child receives a small fixed environment (`PATH`, `HOME`,
+`USER`, `LOGNAME`, `LANG`, `TZ`, `TMPDIR`, `TERM`, `LC_*`) plus that one
+variable. Its stdout and stderr are relayed with the secret (and common
+encodings) replaced by `[REDACTED]`, and `passmgr` exits with the child's
+status, or 128+N when the child was killed by signal N. Loader and shell-hook
+names (`PATH`, `LD_*`, `BASH_ENV`, ...) are refused with exit code 5. The
+secret never crosses the socket to the CLI: only references and
+already-redacted output do.
 
 `run` is the supported way to give an agent a credential. The agent supplies
 the reference (from `list --json`) and a command, never the value.

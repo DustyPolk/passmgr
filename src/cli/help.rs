@@ -82,6 +82,12 @@ Commands:
                              shell string; it receives a small fixed inherited
                              environment (PATH, HOME, USER, LOGNAME, LANG,
                              TZ, TMPDIR, TERM, LC_*) plus NAME.
+                             A relative program or argument is resolved against
+                             the caller's working directory and PATH, never the
+                             daemon's (which belong to the shell that ran
+                             'unlock'), and the child starts in the caller's
+                             working directory. An unresolvable program is a
+                             usage error (exit 2).
   help                       Show this help.
   version                    Show version information.
 

@@ -45,7 +45,7 @@ Phase 3: R.1 breaks a containment guarantee that the design already claims.
       that kills and reaps the child (the `Relay::Finished` path polls
       `try_wait` every 100 ms). The idle-timeout e2e test uses 2 s, not 1 s, so
       it is not timing-sensitive; it still proves the child is killed.
-- [ ] **R.2 `run` resolves the command in `pmd`'s cwd and `PATH`, not the
+- [x] **R.2 `run` resolves the command in `pmd`'s cwd and `PATH`, not the
       caller's.** `src/runner.rs:158-159` builds `Command::new(program)` and
       `command.args(&argv[1..])` with no `current_dir`, `src/cli/run.rs` sends
       no cwd, and `pmd` inherits the cwd of the terminal that ran `passmgr
@@ -65,6 +65,12 @@ Phase 3: R.1 breaks a containment guarantee that the design already claims.
       Test: daemon cwd A, CLI cwd B, both containing `rel.sh`; assert the run
       executes B's script or is refused before spawn, never A's; add a unit
       test for a relative `command[0]`.
+      Done: `RunRequest.cwd` (protocol v3) and `command[0]` must be absolute;
+      the CLI resolves the program against its own cwd/`PATH` and the daemon
+      runs the child with `current_dir`. A bare name that cannot be resolved
+      is a usage error (exit 2); an absolute nonexistent path still reaches
+      the daemon and fails as `spawn_failed` (exit 1). E2E tests cover both the
+      cwd and the `PATH` split; `tests/daemon.rs` now runs in `/`.
 - [ ] **R.3 README and `--help` promise encoded-secret redaction that does
       not exist.** `README.md:173-174` says stdout/stderr are relayed with
       "the secret (and common encodings)" replaced by `[REDACTED]`, and

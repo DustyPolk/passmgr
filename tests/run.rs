@@ -86,6 +86,12 @@ struct Daemon {
 
 impl Daemon {
     fn start() -> Self {
+        Self::start_in(None, None)
+    }
+
+    /// Start `pmd` with a specific working directory and `PATH`, so a test can
+    /// give the daemon a different cwd/PATH from the CLI that talks to it.
+    fn start_in(cwd: Option<&Path>, path: Option<&Path>) -> Self {
         let fixture = Fixture::new();
         let mut command = Command::new(env!("CARGO_BIN_EXE_pmd"));
         command
@@ -96,6 +102,12 @@ impl Daemon {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
         let mut child = command.spawn().expect("spawn pmd");
         let mut stdin = child.stdin.take().expect("piped stdin");
         stdin.write_all(fixture.key.as_slice()).expect("send key");
@@ -169,6 +181,13 @@ fn stderr_text(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// Write an executable shell script into `dir`.
+fn write_program(dir: &Path, name: &str, body: &str) {
+    let path = dir.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write program");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod program");
+}
+
 #[test]
 fn run_injects_a_secret_and_redacts_both_streams() {
     let daemon = Daemon::start();
@@ -199,6 +218,92 @@ fn run_injects_a_secret_and_redacts_both_streams() {
                 .any(|w| w == SECRET.as_bytes()),
         "the canary reached the CLI output"
     );
+}
+
+#[test]
+fn run_executes_relative_programs_in_the_callers_working_directory() {
+    // The daemon was started from a directory that also contains `rel.sh`.
+    // Running the daemon's copy instead of the caller's would hand the secret
+    // to a different script, so this is a security property, not a nicety.
+    let daemon_dir = tempfile::tempdir().expect("tempdir");
+    let caller_dir = tempfile::tempdir().expect("tempdir");
+    write_program(daemon_dir.path(), "rel.sh", "printf daemon-directory");
+    write_program(caller_dir.path(), "rel.sh", "printf caller-directory");
+    let daemon = Daemon::start_in(Some(daemon_dir.path()), None);
+
+    let output = command_at(
+        daemon.xdg_runtime_dir(),
+        &[
+            "run",
+            "--env",
+            &env_argument(&daemon, "API_KEY"),
+            "--",
+            "./rel.sh",
+        ],
+    )
+    .current_dir(caller_dir.path())
+    .output()
+    .expect("run passmgr");
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stdout, b"caller-directory", "{output:?}");
+    assert!(
+        !stderr_text(&output).contains("daemon-directory"),
+        "the daemon's working directory must not be used: {output:?}"
+    );
+}
+
+#[test]
+fn run_resolves_a_bare_command_through_the_callers_path() {
+    // `pmd` keeps the PATH of the shell that ran `unlock`. A bare program name
+    // must still resolve against the caller's PATH, or `run` would execute a
+    // same-named binary the human never approved.
+    let daemon_bin = tempfile::tempdir().expect("tempdir");
+    let caller_bin = tempfile::tempdir().expect("tempdir");
+    write_program(daemon_bin.path(), "pm-fake-tool", "printf daemon-path");
+    write_program(caller_bin.path(), "pm-fake-tool", "printf caller-path");
+    let daemon = Daemon::start_in(None, Some(daemon_bin.path()));
+
+    let output = command_at(
+        daemon.xdg_runtime_dir(),
+        &[
+            "run",
+            "--env",
+            &env_argument(&daemon, "API_KEY"),
+            "--",
+            "pm-fake-tool",
+        ],
+    )
+    .env("PATH", caller_bin.path())
+    .output()
+    .expect("run passmgr");
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stdout, b"caller-path", "{output:?}");
+}
+
+#[test]
+fn run_refuses_an_unresolvable_command_with_a_usage_error() {
+    let daemon = Daemon::start();
+    let output = run(
+        &daemon,
+        &[
+            "run",
+            "--env",
+            &env_argument(&daemon, "API_KEY"),
+            "--",
+            "passmgr-no-such-program",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("cannot find the command"), "{stderr}");
+    assert!(
+        stderr.contains("passmgr-no-such-program"),
+        "the caller must learn which program was missing: {stderr}"
+    );
+    // The refusal happened before the daemon was asked to run anything.
+    assert!(client::ping(&daemon.paths(), &daemon.token).is_ok());
 }
 
 #[test]
@@ -276,7 +381,7 @@ fn run_without_a_daemon_is_a_clear_runtime_error() {
             "--env",
             "API_KEY=pm://00112233445566778899aabbccddeeff",
             "--",
-            "true",
+            "/bin/true",
         ],
     )
     .output()
@@ -347,7 +452,7 @@ fn run_maps_daemon_refusals_to_stable_exit_codes() {
             "--env",
             "API_KEY=pm://00000000000000000000000000000000",
             "--",
-            "true",
+            "/bin/true",
         ],
     );
     assert_eq!(missing.status.code(), Some(3), "{missing:?}");

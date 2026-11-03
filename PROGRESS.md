@@ -1,3 +1,44 @@
+## 2026-11-02 — Run children in the caller's cwd and resolve commands client-side (TODO R.2)
+
+- `src/protocol/mod.rs`: protocol version 3. `RunRequest` gains a required
+  absolute `cwd`; `run.command[0]` must be an absolute path, and both are
+  validated on encode and decode (`validate_absolute_path`: non-empty, no NUL,
+  at most `MAX_PATH_BYTES`, leading `/`). A version-2 daemon would ignore
+  `cwd`, so the bump turns a silent wrong-directory run into an
+  `unsupported_version` refusal.
+- `src/runner.rs`: `execute` takes the caller's cwd and sets
+  `Command::current_dir`, so relative arguments resolve where the caller meant.
+- `src/cli/run.rs`: resolves `command[0]` before contacting the daemon — a
+  bare name through the **caller's** `PATH` (empty entries skipped, regular
+  executable files only), a name containing `/` against the caller's cwd, and
+  an absolute path as given. Unresolvable bare names are a usage error (exit
+  2) before the daemon is asked to run anything; an absolute nonexistent path
+  still reaches the daemon and is reported as `spawn_failed` (exit 1), which
+  keeps the existing refusal mapping. `cwd` is sent as the caller's absolute
+  directory.
+- Tests: runner unit test proves a relative argument resolves in the given cwd;
+  protocol tests cover relative `command[0]`, relative/empty/NUL/overlong
+  `cwd`, a missing `cwd`, and the new field set. E2E (`tests/run.rs`): a daemon
+  started in A and a CLI in B, both with `rel.sh`, runs B's script; a bare
+  name resolves through the CLI's `PATH`, not the daemon's; an unresolvable
+  name is exit 2 and the daemon stays healthy. `tests/daemon.rs` fixtures now
+  send `cwd: "/"` and absolute programs.
+- Docs: `DECISIONS.md` (protocol v3 + run cwd/PATH policy), `README.md`,
+  `src/cli/help.rs` and its golden fixture, `MCP.md` (the MCP server, not the
+  daemon, resolves the program and sends `cwd`).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass. `cargo audit` is not installed; skipped.
+- **Next iteration must know:** a child that itself execs a bare helper name
+  still resolves that helper through the daemon's inherited `PATH` (the fixed
+  allowlist), not the caller's — only `command[0]` is resolved client-side.
+  That is consistent with `MCP.md` ("child's PATH") but surprising; if it
+  matters, R.3/R.4 can document it or the daemon can be given the caller's
+  `PATH` for the child later (do not widen the allowlist without a decision).
+- NEEDS HUMAN REVIEW: the daemon trusts the caller-supplied absolute `cwd`
+  and program path. That grants no new privilege (the token holder can already
+  name any absolute program), but a grant-scoped allowlist in 3.6/4.x must
+  match on this resolved absolute path, not on the agent's original text.
+
 ## 2026-11-02 — Serve runs concurrently and cancel them on lock/signal/idle (TODO R.1)
 
 - `src/daemon.rs`: `run` is decoded and authenticated on the accept thread,
