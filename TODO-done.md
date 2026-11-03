@@ -451,3 +451,95 @@ come before Phase 3.
       today only requires an absolute path). `tests/docs.rs` gains two MCP.md
       contracts; both fail on the old text.
 
+## Phase R — review findings (fix first)
+
+From the review of `533b68d..92448ed` (2026-11-03). Fix these before
+continuing Phase 3; each names the test that must prove the fix.
+
+- [x] **R.11 A list request can carry an out-of-scope target and still be
+      authorized.** `Grant::authorizes` (`src/grant.rs:635`) returns `Ok(())`
+      for `Capability::List` without reading `request.target` or
+      `request.field`; `AccessRequest`'s fields are public
+      (`src/grant.rs:389-393`) and `AccessRequest::list()` (`src/grant.rs:397`)
+      leaves both `None`. So the "single decision point" (TODO 3.2a) cannot
+      enforce scope for `list`/`describe`: 4.4 must remember a separate
+      `scope_allows` call, and nothing forces it. `tests/grant.rs:346` only
+      asserts `Ok(())` for `list()`; there is no test with a target. Failure
+      (latent: no caller until 4.4): `describe_credential` builds
+      `AccessRequest { capability: List, target: Some(out_of_scope), .. }`,
+      gets `Ok(())`, and returns metadata for a credential outside the grant
+      (and, once 6.1 exposes fields, its value). Fix: give list/describe a
+      target and enforce `scope_allows` in `authorizes` (keep `list()` only
+      for the enumeration path, if the caller is then forced to filter).
+      Test: a list-only grant scoped to ref A must deny a List request with
+      `target = B` (`OutOfScope`) and allow `target = A`; a field-restricted
+      grant must deny `field: None` and a different field.
+      Done: `AccessRequest` is now an enum; `List`/`Run` both carry the
+      `Target`, `authorizes` scope-checks both, and `list()` (target-less) is
+      gone. `Denied::MissingTarget`/`MissingCommand` removed with it.
+- [x] **R.12 A run's relay reaps the process-group leader, so `terminate` can
+      signal a recycled group.** `src/runner.rs:316-318` calls
+      `let _ = child.try_wait();` on every relay timeout, which reaps the
+      leader as soon as it exits while a grandchild still holds a pipe.
+      `terminate` (`src/runner.rs:349-357`) then signals `-child.id()`, but
+      its comment (`src/runner.rs:347-348`) promises the leader is
+      "deliberately not reaped ... so the group signal can never hit an
+      unrelated group". Once the group is empty and the pid is reused, a
+      later `lock`/SIGTERM/SIGINT sends SIGTERM then SIGKILL to an unrelated
+      same-uid process group; the window is unbounded until cancel. Failure:
+      a run whose leader exits immediately while a grandchild keeps
+      stdout/stderr open (e.g. `sh -c 'echo $$ >pid; (sleep 600) &'`) leaves
+      a reaped pid behind; minutes later `passmgr lock` can kill the user's
+      editor if it took that pid. Fix: remove the `try_wait` from `relay`
+      (the `Finished` loop at `src/runner.rs:241-260` already reaps), or
+      never derive the pgid after a reap. Test: run that command; after more
+      than `CANCEL_POLL`, assert `/proc/<pid>/stat` still shows state `Z`
+      (not reaped), then cancel and assert both processes are gone. This test
+      fails today.
+      Done: `relay` no longer takes the `Child`, so it cannot reap; the
+      timeout arm only checks the cancel flag. Test
+      `a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes`
+      proves the zombie survives three poll slices and is reaped only by the
+      cancel path.
+- [x] **R.13 `TokenHash` exposes a non-constant-time `==`.** `src/grant.rs:127`
+      derives `PartialEq, Eq` on `TokenHash`, while `SessionToken` documents
+      the opposite convention ("deliberately no `PartialEq` implementation
+      that could be used by accident", `src/token.rs:27-31`) and
+      `DECISIONS.md:341` states `TokenHash::matches` is constant-time. No
+      caller uses `==` today, so this is latent, but the next store lookup
+      (3.2b/3.6) can compare hashes with an early-exit comparison and turn a
+      secret-derived digest into a timing oracle. Fix: drop `PartialEq`/`Eq`
+      (keep `matches` the only comparison), as `SessionToken` does. Test: a
+      compile-fail UI case (trybuild) proving `TokenHash == TokenHash` does
+      not compile; if a new dev-dependency is refused, a source-guard test
+      that parses the `TokenHash` derive list and fails if `PartialEq`/`Eq`
+      returns.
+      Done: the derive is `Clone, Copy` only; `matches` is the sole
+      comparison. A `compile_fail` doctest in `src/grant.rs` proves `==` does
+      not compile, and its companion doctest proves `matches` does. Chose a
+      doctest over `trybuild`/a source guard: no new dependency and the
+      compiler, not a text parse, is the oracle.
+- [x] **R.14 Grant labels accept bidi and zero-width characters.**
+      `validate_label` (`src/grant.rs:699-713`) rejects only
+      `char::is_control` (`src/grant.rs:708`), which is Unicode Cc. Verified:
+      U+202E RIGHT-TO-LEFT OVERRIDE and U+200B ZERO WIDTH SPACE both pass.
+      The label is stored unchanged and is rendered by the future
+      `pm grant list`/`show` (`MCP.md`), and 4.9 may take it from an approved
+      agent request (unconfirmed: label provenance until 4.9), so
+      agent-supplied text can reach a human terminal without the bidi
+      stripping `PROMPT.md` requires. Failure: a label containing `\u{202E}`
+      reorders the rest of the line, e.g. making the scope or expiry read
+      backwards or hiding text; `\u{200B}` hides a character. Fix: reject (or
+      strip) the Unicode bidi-control and zero-width/format sets in
+      `validate_label` before storing. Test: `Grant::create` with
+      `label: "prod\u{202E}nimda"`, `"a\u{200B}b"` and `"a\u{2066}b"` must
+      be rejected (or sanitized to the visible characters), and a rendering
+      test asserts `pm grant list` output contains none of those code points.
+      Done: `validate_label` rejects Cc plus the Unicode format (`Cf`),
+      line/paragraph separator and variation-selector sets via
+      `is_hidden_or_reordering`; the whole label is refused (not stripped) so
+      it always matches what a human approved. Tested with a test-local
+      table of 29 code points (independent of the module's table); the
+      `pm grant list` half waits for 3.5, so the rendering test proves the
+      accepted label and its `Debug` rendering hold no such code point.
+
