@@ -43,6 +43,12 @@ code does not implement yet.
   implements it and `tests/redaction_timing.rs` proves a correct and a wrong
   prefix are held identically. Do not go back to holding only a *matching*
   prefix.
+- The redaction marker is `[REDACTED]` only when it is safe; `marker_is_safe`
+  rejects it if the marker contains the secret, the secret contains the
+  marker, the marker starts with a proper suffix of the secret, or the secret
+  starts with a proper suffix of the marker (output around a substitution can
+  supply the missing part). Otherwise the marker is a run of a byte absent
+  from the secret (R.36a). A future marker change must keep this rule.
 
 ## Crypto
 

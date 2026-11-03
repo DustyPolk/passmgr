@@ -784,7 +784,7 @@ Rules that apply to every item:
       pause, and both arrive in order afterwards). `SECURITY.md` limit 3 and
       `DECISIONS.md` note the fixed window and its small latency cost.
 
-- [ ] **R.36a The default marker can complete a secret that starts with one
+- [x] **R.36a The default marker can complete a secret that starts with one
       of its suffixes.**
       `src/redact.rs::choose_marker` avoids a marker that *contains* the
       secret, but not a marker whose suffix is a prefix of it. With secret
@@ -798,6 +798,19 @@ Rules that apply to every item:
       suffix of it is a prefix of the secret. Test: extend
       `the_marker_never_contains_the_value` with such secrets and assert the
       redacted output does not contain the value.
+      Done differently: the audit for this item found two more shapes that
+      leak with the same default marker — the secret containing the marker
+      (`xx[REDACTED]yy`), and a suffix of the secret being a prefix of the
+      marker (`zz[REDACTED`). `marker_is_safe` now rejects all four shapes
+      (marker contains secret; secret contains marker; marker starts with a
+      proper secret suffix; secret starts with a proper marker suffix), and
+      `choose_marker` falls back to a run of a byte absent from the secret
+      (a run longer than the secret of a byte at neither end when the secret
+      uses all 256 byte values). `the_marker_never_contains_the_value` is
+      unchanged; the new
+      `redact::tests::the_marker_never_combines_with_surrounding_output`
+      covers one input per shape, whole-buffer and byte-at-a-time, and fails
+      on the old rule.
 
 - [ ] **R.37 A run whose client disconnects keeps running and holds the key
       past the idle timeout.**

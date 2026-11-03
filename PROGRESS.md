@@ -1,3 +1,42 @@
+## 2026-11-03 — Pick a redaction marker that cannot spell the value (TODO R.36a)
+
+- `src/redact.rs::choose_marker` only rejected a default marker that
+  *contained* the secret. The marker is substituted for a value, so the raw
+  text around the substitution can supply the rest: `redact(b"TED]X",
+  b"TED]XX")` gave `[REDACTED]X`. Auditing for the item found two more shapes
+  the old rule missed: the secret containing the marker (`xx[REDACTED]yy`)
+  and a suffix of the secret being a prefix of the marker (`zz[REDACTED`).
+- New `marker_is_safe(marker, secret)` rules out all four shapes: marker
+  contains secret, secret contains marker, marker starts with a proper secret
+  suffix, secret starts with a proper marker suffix. `choose_marker` keeps the
+  readable `[REDACTED]` when it is safe and otherwise uses a run of a
+  printable byte absent from the secret (10 bytes); when the secret uses all
+  256 byte values it uses a run longer than the secret of a byte that is
+  neither its first nor its last byte. Both fallbacks are provably safe
+  (the absent byte cannot be part of the secret; the longer run cannot be
+  contained and the end bytes rule out both boundary shapes).
+- Tests: `the_marker_never_combines_with_surrounding_output` has one
+  adversarial input per shape (including `TED]XX`), runs it whole-buffer and
+  byte-at-a-time, and asserts the accumulated output never contains the
+  secret. `a_secret_using_every_byte_value_still_gets_a_safe_marker` covers
+  the degenerate branch. Mutation check: reinstating the old condition makes
+  the new test fail with `marker leaked [84, 69, 68, 93, 88] in
+  [91, 82, 69, 68, 65, 67, 84, 69, 68, 93, 88]` (`TED]X` in
+  `[REDACTED]X`); the file was restored afterwards. Ordinary secrets still
+  get `[REDACTED]`, asserted by `the_marker_never_contains_the_value`.
+- `DECISIONS.md` records the marker rule. No README/SECURITY change: both
+  already say "an exact, contiguous occurrence replaced by `[REDACTED]`" as
+  the typical case and `tests/docs.rs` does not pin the literal marker.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` pass (`cargo audit` not installed, skipped).
+- NEEDS HUMAN REVIEW: the safety argument assumes the child cannot make a
+  marker and raw text combine in a way not covered by the four shapes; the
+  two boundary shapes were enumerated by hand, not proved. The fallback
+  marker is a visible run of one byte (e.g. `!!!!!!!!!!`), which no current
+  test treats as a contract.
+- **Next iteration must know:** the first unchecked item is now **R.37**
+  (a run whose client disconnects keeps the child and the key alive).
+
 ## 2026-11-03 — Review of 2208a50..a14dc54
 
 - Range: 10 commits (`03b7a31` argv escaping, `ce0a4b7` grant existence

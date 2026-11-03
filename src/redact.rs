@@ -26,8 +26,11 @@
 //!
 //! The value is copied into a private buffer, never exposed through `Debug` or
 //! `Display`, and zeroized on drop together with the pending overlap. The
-//! redaction marker is chosen so it cannot itself contain the value (a secret
-//! such as `"[REDACTED]"` gets a different marker).
+//! redaction marker is chosen so it cannot spell the value together with the
+//! raw text around a substitution: it must not contain the value, must not be
+//! contained in it, and no suffix of either may be a prefix of the other. A
+//! secret such as `"[REDACTED]"` or `"TED]X"` therefore gets a different
+//! marker.
 //!
 //! # Limit
 //!
@@ -186,29 +189,66 @@ pub fn redact(secret: &[u8], data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Pick a marker that does not itself contain `secret`.
+/// Pick a marker that cannot spell `secret` together with the text around it.
 ///
-/// The default is readable and almost always safe. When the secret is a
-/// substring of it (a password like `"[REDACTED]"` or `"ACT"`), a run of a
-/// byte that is absent from the secret is used instead. Such a marker cannot
-/// contain the secret, and a secret cannot span the marker boundary because
-/// none of its bytes occur in the marker.
+/// The default marker is readable and almost always safe. When it is not, a
+/// run of a byte that is absent from the secret is used instead. Such a marker
+/// contains none of the secret's bytes, so the secret can neither contain the
+/// marker nor cross it, and the marker can neither start nor complete an
+/// occurrence.
 fn choose_marker(secret: &[u8]) -> Vec<u8> {
-    if secret.is_empty() || !contains_subslice(DEFAULT_MARKER, secret) {
+    if secret.is_empty() || marker_is_safe(DEFAULT_MARKER, secret) {
         return DEFAULT_MARKER.to_vec();
     }
 
-    // Fallback only runs when the secret is a substring of the 10-byte default
-    // marker, so `secret` is short.
-    let byte = (b'!'..=b'~')
+    // A byte the secret does not use makes the marker unbuildable into it.
+    if let Some(byte) = (b'!'..=b'~')
         .find(|candidate| !secret.contains(candidate))
         .or_else(|| (0..=u8::MAX).find(|candidate| !secret.contains(candidate)))
-        // Only possible when the secret contains every byte value, in which
-        // case it is not a run of any single byte and the marker below still
-        // cannot equal it.
-        .unwrap_or(secret[0]);
-    let length = secret.len().saturating_add(1).max(DEFAULT_MARKER.len());
-    vec![byte; length]
+    {
+        let marker = vec![byte; DEFAULT_MARKER.len()];
+        debug_assert!(marker_is_safe(&marker, secret));
+        return marker;
+    }
+
+    // The secret contains every byte value, so no run is free of its bytes.
+    // A run longer than the secret cannot be contained in it, and a byte that
+    // is neither the secret's first nor its last byte can be neither the start
+    // of a suffix of the secret nor the completion of its prefix.
+    let first = secret[0];
+    let last = secret[secret.len() - 1];
+    let byte = (0..=u8::MAX)
+        .find(|candidate| *candidate != first && *candidate != last)
+        .expect("256 byte values, at most two excluded");
+    let marker = vec![byte; secret.len() + 1];
+    debug_assert!(marker_is_safe(&marker, secret));
+    marker
+}
+
+/// Whether `marker` can replace `secret` without the relayed output ever
+/// spelling `secret` around the substitution.
+///
+/// Raw output before a marker can end with any proper prefix of the secret,
+/// and raw output after it can start with any proper suffix, so four shapes
+/// have to be ruled out:
+///
+/// * the marker itself contains the secret;
+/// * the secret contains the marker, so the text around one substitution can
+///   supply the remainder;
+/// * the marker starts with a proper suffix of the secret (the prefix comes
+///   from output emitted just before it);
+/// * the secret starts with a proper suffix of the marker (the marker supplies
+///   the start, and output after it completes the value).
+///
+/// A marker with a byte the secret does not contain satisfies all four.
+fn marker_is_safe(marker: &[u8], secret: &[u8]) -> bool {
+    if secret.is_empty() || marker.is_empty() {
+        return true;
+    }
+    !contains_subslice(marker, secret)
+        && !contains_subslice(secret, marker)
+        && !(1..secret.len()).any(|offset| marker.starts_with(&secret[offset..]))
+        && !(1..marker.len()).any(|offset| secret.starts_with(&marker[offset..]))
 }
 
 fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
@@ -404,6 +444,63 @@ mod tests {
         }
         // Ordinary values still get the readable marker.
         assert_eq!(redact(b"hunter2", b"hunter2"), DEFAULT_MARKER);
+    }
+
+    /// R.36a: the marker is substituted for the value, so the text around it
+    /// must not combine with it into the value. Each pair is a secret and an
+    /// input that leaked `secret` under the old marker rule.
+    #[test]
+    fn the_marker_never_combines_with_surrounding_output() {
+        let cases: &[(&[u8], &[u8])] = &[
+            // A suffix of the marker is a prefix of the secret: the marker
+            // supplies `TED]` and the following byte completes `TED]X`.
+            (b"TED]X", b"TED]XX"),
+            // The secret contains the marker: output before and after one
+            // substitution supplies the pieces around it.
+            (b"xx[REDACTED]yy", b"xxxx[REDACTED]yyyy"),
+            // A suffix of the secret is a prefix of the marker: output emitted
+            // just before the marker supplies `zz`, the marker `[REDACTED`.
+            (b"zz[REDACTED", b"zzzz[REDACTED"),
+            // Two substitutions next to each other: the first marker's suffix
+            // and the second marker start the secret.
+            (b"CTED][REDACT", b"CTED][REDACTCTED][REDACT"),
+        ];
+        for (secret, input) in cases {
+            let out = redact(secret, input);
+            assert!(
+                !contains_subslice(&out, secret),
+                "marker leaked {secret:?} in {out:?}"
+            );
+
+            // The same must hold byte at a time, so a chunk boundary cannot
+            // assemble what whole-buffer redaction catches.
+            let mut redactor = Redactor::new(secret);
+            let mut streamed = Vec::new();
+            for byte in *input {
+                streamed.extend_from_slice(&redactor.push(&[*byte]));
+                assert!(
+                    !contains_subslice(&streamed, secret),
+                    "streaming leaked {secret:?} in {streamed:?}"
+                );
+            }
+            streamed.extend_from_slice(&redactor.finish());
+            assert!(
+                !contains_subslice(&streamed, secret),
+                "streaming leaked {secret:?} in {streamed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_secret_using_every_byte_value_still_gets_a_safe_marker() {
+        // The fallback cannot find an absent byte here; a run longer than the
+        // secret of a byte at neither end is still safe.
+        let mut secret: Vec<u8> = (0..=u8::MAX).rev().collect();
+        secret.extend_from_slice(b"[REDACTED]");
+        let marker = choose_marker(&secret);
+        assert!(marker_is_safe(&marker, &secret), "unsafe marker");
+        let out = redact(&secret, &secret);
+        assert!(!contains_subslice(&out, &secret));
     }
 
     #[test]
