@@ -1,3 +1,45 @@
+## 2026-11-03 — Human-presence proof in the daemon (TODO 3.3)
+
+- New `src/presence.rs`: `ChallengeNonce` (32 random bytes, hex on the wire),
+  `RequestDigest` (public 32-byte commitment to the request being approved)
+  and `Proof` (`HMAC-SHA256(key, "passmgr-approve-v1" || nonce || digest)`),
+  plus a `Challenges` store with single-use, 60 s expiry and a 16-nonce cap.
+- Protocol: additive `challenge` request (answer `challenge` with the nonce)
+  and `prove` request (answer `proven` or the new `denied` error code). No
+  secret crosses the socket: nonce and digest are public, the MAC is
+  key-derived and single-use. `client::challenge` / `client::prove` are the
+  client half; no CLI command uses them yet.
+- Daemon: `challenges` lives in `run` and is passed to `handle_connection`
+  together with the key. A nonce is spent **before** the MAC is checked, so
+  one issue allows exactly one attempt; unknown, expired, spent and
+  wrong-MAC all answer `denied` (not an oracle), and a denial does not
+  refresh the idle timer.
+- Decisions (also in `DECISIONS.md`): `hmac` 0.12 (shares `digest` 0.10 with
+  `sha2`; 0.13 would duplicate the tree) and `verify_slice` for the
+  constant-time tag check. `Proof` zeroizes and renders `Proof(<redacted>)`;
+  its `PartialEq` *is* the constant-time `matches`. Protocol version stays 3
+  because the request types are additive. `client::prove` takes a
+  `ProveRequest`, so 3.4 only has to build the digest and prompt.
+- Tests: pinned HMAC-SHA256 vector from Python's `hmac` (proves domain, field
+  order and hash), binding to key/nonce/digest, hex strictness, single use,
+  60 s expiry (59 s accepted, 60 s refused, expiry spends the nonce), unknown
+  nonce, the 16-nonce cap and pruning, redacted `Debug`; protocol
+  round-trip/exact frames/malformed prove fields; client round trip and
+  denial; end-to-end daemon acceptance, replay refusal, wrong-key/wrong-
+  digest/unknown-nonce/burned-nonce denials, token requirement, and the MAC
+  absent from `pmd` stdout/stderr.
+- Gate: fmt and clippy `-D warnings` clean; full `cargo test` green (202 lib
+  tests, 18 daemon tests). `cargo audit` not installed; skipped.
+- **Next iteration must know:** 3.4 must reuse `presence::Challenges` — add
+  the proof to the grant-create request and verify it inside the same
+  request that writes the grant, or a proof consumed by a separate `prove`
+  can no longer authorize the write. `RequestDigest` has no canonical
+  constructor for grant fields yet; define it in 3.4 together with the
+  exact bytes both sides hash. Do not add a daemon request that *computes*
+  a MAC; only the CLI may do that.
+  `src/protocol/mod.rs` is now 1,313 lines (about half tests), over the
+  ~1,000-line guide; splitting it is a Refill candidate, not part of 3.3.
+
 ## 2026-11-03 — Persist grants in store version 5 (TODO 3.2b)
 
 - `src/store.rs`: store version 5 = the v4 credential records, byte for byte,

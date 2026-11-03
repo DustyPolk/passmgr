@@ -16,9 +16,15 @@
 //!
 //! Every request is untrusted and any same-user process can connect. The
 //! daemon therefore has no request type that returns a secret; see
-//! [`crate::protocol`]. It answers `ping` and `lock`, and `run` streams the
-//! child's already-redacted output plus an exit status (TODO 2.6c). There is
-//! no request that returns a value.
+//! [`crate::protocol`]. It answers `ping`, `lock`, `challenge` and `prove`,
+//! and `run` streams the child's already-redacted output plus an exit status
+//! (TODO 2.6c). There is no request that returns a value.
+//!
+//! `challenge`/`prove` implement the human-presence proof (TODO 3.3, see
+//! [`crate::presence`]): the daemon issues a single-use 60-second nonce and
+//! accepts a key-derived MAC over it once. Nothing here can mint or widen a
+//! grant on its own; the daemon only ever *checks* a proof, it never computes
+//! one for a caller.
 //!
 //! # Lifetime
 //!
@@ -62,6 +68,7 @@ use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 use crate::crypto::KEY_LEN;
+use crate::presence;
 use crate::protocol::{
     self, FrameDecoder, ProtocolError, Request, Response, ResponseError, RunFrame,
 };
@@ -403,6 +410,11 @@ pub fn run(
     let socket = DaemonSocket::bind_at(RuntimePaths::at(runtime_dir))?;
     socket.listener().set_nonblocking(true)?;
 
+    // Unspent presence challenges. In memory on purpose: a nonce is only
+    // useful for the lifetime of this process, and persisting one would add
+    // a file to protect for no security benefit.
+    let mut challenges = presence::Challenges::new();
+
     let mut last_activity = Instant::now();
     // A `lock` connection whose answer is deferred until the key is gone.
     let mut lock_ack: Option<UnixStream> = None;
@@ -440,7 +452,7 @@ pub fn run(
                 Ok((stream, _peer)) => {
                     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
                     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
-                    match handle_connection(stream, token) {
+                    match handle_connection(stream, token, key, &mut challenges) {
                         // `lock`: stop accepting, but answer only after the
                         // workers are joined and the key is zeroized below.
                         Handled::Locked(stream) => {
@@ -557,7 +569,12 @@ enum Handled {
 /// Nothing here can panic on attacker input: every parse failure becomes
 /// `bad_request`, and write failures (client vanished) are ignored so one
 /// aborted client cannot take the daemon down.
-fn handle_connection(mut stream: UnixStream, token: &SessionToken) -> Handled {
+fn handle_connection(
+    mut stream: UnixStream,
+    token: &SessionToken,
+    key: &LockedKey,
+    challenges: &mut presence::Challenges,
+) -> Handled {
     let authorized = match read_request(&mut stream) {
         Ok(authorized) => authorized,
         Err(_) => return reject(&mut stream, ResponseError::BadRequest),
@@ -573,6 +590,40 @@ fn handle_connection(mut stream: UnixStream, token: &SessionToken) -> Handled {
             Handled::Served
         }
         Request::Lock => Handled::Locked(stream),
+        Request::Challenge => {
+            let response = match challenges.issue(Instant::now()) {
+                Ok(nonce) => Response::Challenge(nonce),
+                // Too many unspent nonces: the bounded store is full. Nothing
+                // was issued, and this is not activity.
+                Err(_) => Response::Error(ResponseError::Busy),
+            };
+            let _ = write_response(&mut stream, &response);
+            if matches!(response, Response::Challenge(_)) {
+                Handled::Served
+            } else {
+                Handled::Rejected
+            }
+        }
+        Request::Prove(prove) => {
+            // Spend the nonce before checking the MAC: one issue allows
+            // exactly one attempt, so a peer cannot test many candidate
+            // proofs against the same challenge. Unknown, expired and
+            // already-spent nonces are all answered `denied` below, exactly
+            // like a MAC mismatch, so the response is not an oracle.
+            let fresh = challenges
+                .verify_and_consume(&prove.nonce, Instant::now())
+                .is_ok();
+            if fresh
+                && prove
+                    .proof
+                    .verify(key.as_slice(), &prove.nonce, &prove.digest)
+            {
+                let _ = write_response(&mut stream, &Response::Proven);
+                Handled::Served
+            } else {
+                reject(&mut stream, ResponseError::Denied)
+            }
+        }
         Request::Run(request) => Handled::Run(stream, request),
     }
 }

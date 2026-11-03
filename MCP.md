@@ -200,12 +200,14 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   `run`, later `create`), `expires_at`, optional `max_uses`, `created`,
   `revoked_at` and `last_used`.
 - **Creating or approving a grant needs proof that a human with the master
-  password is present.** The daemon sends a random nonce. The CLI, at a TTY,
-  prompts for the master password, derives the key and replies with
+  password is present.** The daemon sends a random nonce in answer to a
+  `challenge` request. The CLI, at a TTY, prompts for the master password,
+  derives the key and answers `prove` with
   `HMAC-SHA256(vault_key, "passmgr-approve-v1" || nonce || request_digest)`.
-  The daemon verifies that before it writes the grant. A same-user process
-  without the password cannot mint or approve grants. Revoking needs no proof,
-  because it only removes access.
+  The nonce is accepted once and only within 60 seconds, and the daemon
+  verifies the MAC before it writes the grant. Every bad nonce or MAC gets the
+  same `denied` answer. A same-user process without the password cannot mint
+  or approve grants. Revoking needs no proof, because it only removes access.
 - Interpreters and shells (`sh`, `bash`, `zsh`, `fish`, `dash`, `env`, `xargs`,
   `python*`, `node`, `perl`, `ruby`, `busybox`, …) in a command allowlist let
   the agent exfiltrate secrets in ways redaction cannot catch. Approval shows a

@@ -235,6 +235,11 @@ fn refusal(error: ResponseError, reference: &str) -> Error {
              wait for one to finish and try again (busy)"
                 .into(),
         ),
+        // `denied` can only be the answer to a `prove` request; a run is
+        // never refused that way. Keep the message truthful anyway.
+        ResponseError::Denied => {
+            Error::Refused("the unlock daemon refused the request (denied)".into())
+        }
     }
 }
 

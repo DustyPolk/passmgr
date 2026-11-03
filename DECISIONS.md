@@ -381,6 +381,30 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Creating or approving a grant requires the master password at a TTY, proved
   with `HMAC-SHA256(vault_key, "passmgr-approve-v1" || nonce || digest)` using
   a single-use 60 s nonce, compared in constant time. Revoking needs no proof.
+- The presence proof is implemented in `src/presence.rs` (TODO 3.3). The MAC
+  message is `DOMAIN || nonce || digest`, all fixed length, so the fields
+  cannot be shifted into one another. The daemon issues nonces through the
+  `challenge` request and checks them through `prove`; both requests carry
+  only public values (nonce, digest) plus the MAC. Design choices:
+  - The nonce is spent **before** the MAC is checked. One issue therefore
+    allows exactly one attempt, so a peer cannot test many candidate proofs
+    against one challenge. A typo means asking for a new challenge, which is
+    cheap for a human and costly for a guesser.
+  - Every rejection is `denied`: unknown, expired and already-spent nonces
+    answer identically to a wrong MAC, so the socket is not an oracle for
+    which part of a guess was right.
+  - At most 16 unspent nonces are held (in memory, never persisted);
+    requesting one when full answers `busy`. Expired nonces are pruned on the
+    next issue, so the window is one minute.
+  - `Proof` zeroizes, `Debug` renders `Proof(<redacted>)`, and equality is
+    implemented as the constant-time `matches` (there is no early-exit `==`).
+    The nonce and digest are public and may appear in `Debug`/errors.
+  - `hmac` 0.12 (RustCrypto) is the dependency added by 3.3; it shares
+    `digest` 0.10 with `sha2`, unlike 0.13. Its `verify_slice` is the
+    constant-time tag check.
+  - The protocol version stays 3: the two request types are additive, so old
+    clients keep working and an old daemon answers `bad_request` to a newer
+    client rather than misinterpreting it.
 - The daemon canonicalizes `command[0]` itself (symlinks resolved), requires
   the result to stay absolute, and checks that canonical path against the
   grant's command allowlist immediately before spawning; a path it cannot

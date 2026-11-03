@@ -17,12 +17,15 @@ use support::*;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use passmgr::crypto::KEY_LEN;
+use passmgr::presence::{ChallengeNonce, Proof, RequestDigest};
 use passmgr::protocol::{
-    self, MAX_CHUNK_BYTES, Request, Response, ResponseError, RunExit, RunFrame, RunRequest,
+    self, MAX_CHUNK_BYTES, ProveRequest, Request, Response, ResponseError, RunExit, RunFrame,
+    RunRequest,
 };
 use passmgr::token::SessionToken;
 #[test]
@@ -432,6 +435,183 @@ fn the_session_token_never_reaches_socket_traffic_or_daemon_output() {
         assert!(!text.contains(token_hex.as_str()));
         assert!(!text.contains(SECRET));
     }
+}
+
+/// Ask for a challenge nonce, failing loudly on anything else.
+fn challenge(socket: &Path, token: &SessionToken) -> ChallengeNonce {
+    match request(socket, token, &Request::Challenge) {
+        Response::Challenge(nonce) => nonce,
+        other => panic!("expected a challenge, got {other:?}"),
+    }
+}
+
+fn present(socket: &Path, token: &SessionToken, proof: ProveRequest) -> Response {
+    request(socket, token, &Request::Prove(proof))
+}
+
+/// A correct proof is accepted, and only once: the daemon spends the nonce.
+/// The MAC itself must never reach the daemon's own output.
+#[test]
+fn a_presence_proof_is_accepted_once_and_stays_out_of_daemon_output() {
+    let fixture = Fixture::new();
+    let child = fixture.start();
+    let socket = fixture.socket();
+    let digest = RequestDigest::new([0x42; 32]);
+
+    let nonce = challenge(&socket, &fixture.token);
+    let proof = Proof::compute(fixture.key.as_slice(), &nonce, &digest).expect("compute proof");
+    let proof_hex = proof.to_hex();
+    let proven = ProveRequest {
+        nonce,
+        digest,
+        proof: proof.clone(),
+    };
+    assert_eq!(
+        present(&socket, &fixture.token, proven.clone()),
+        Response::Proven
+    );
+
+    // Replaying the identical proof is refused: the nonce is gone.
+    assert_eq!(
+        present(&socket, &fixture.token, proven),
+        Response::Error(ResponseError::Denied)
+    );
+
+    // A fresh challenge still works, so the refusal above was about the
+    // nonce, not a broken daemon.
+    let nonce = challenge(&socket, &fixture.token);
+    let digest = RequestDigest::new([0x43; 32]);
+    let proof = Proof::compute(fixture.key.as_slice(), &nonce, &digest).expect("compute proof");
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce,
+                digest,
+                proof,
+            }
+        ),
+        Response::Proven
+    );
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    let output = child.wait_with_output().expect("wait for pmd");
+    assert!(output.status.success());
+    for stream in [&output.stdout, &output.stderr] {
+        assert!(
+            !String::from_utf8_lossy(stream).contains(proof_hex.as_str()),
+            "the presence proof must never be written to daemon output"
+        );
+    }
+}
+
+/// Every way a proof can be wrong is refused with the same answer, the nonce
+/// is spent by the attempt, and the daemon keeps serving.
+#[test]
+fn a_bad_presence_proof_is_denied_and_the_daemon_keeps_serving() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let socket = fixture.socket();
+    let digest = RequestDigest::new([0x11; 32]);
+
+    // A proof made with the wrong key.
+    let nonce = challenge(&socket, &fixture.token);
+    let proof = Proof::compute(&[0u8; 32], &nonce, &digest).expect("compute proof");
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce,
+                digest,
+                proof,
+            }
+        ),
+        Response::Error(ResponseError::Denied)
+    );
+
+    // A proof for one digest cannot approve a different one.
+    let nonce = challenge(&socket, &fixture.token);
+    let proof = Proof::compute(fixture.key.as_slice(), &nonce, &digest).expect("compute proof");
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce,
+                digest: RequestDigest::new([0x12; 32]),
+                proof,
+            }
+        ),
+        Response::Error(ResponseError::Denied)
+    );
+
+    // A nonce that was never issued.
+    let unknown = ChallengeNonce::from_hex(&"ab".repeat(32)).expect("nonce");
+    let proof = Proof::compute(fixture.key.as_slice(), &unknown, &digest).expect("compute proof");
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce: unknown,
+                digest,
+                proof,
+            }
+        ),
+        Response::Error(ResponseError::Denied)
+    );
+
+    // A bad attempt spends the nonce, so the same challenge cannot then be
+    // answered correctly.
+    let nonce = challenge(&socket, &fixture.token);
+    let bad = Proof::compute(&[1u8; 32], &nonce, &digest).expect("compute proof");
+    let good = Proof::compute(fixture.key.as_slice(), &nonce, &digest).expect("compute proof");
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce,
+                digest,
+                proof: bad,
+            }
+        ),
+        Response::Error(ResponseError::Denied)
+    );
+    assert_eq!(
+        present(
+            &socket,
+            &fixture.token,
+            ProveRequest {
+                nonce,
+                digest,
+                proof: good,
+            }
+        ),
+        Response::Error(ResponseError::Denied)
+    );
+
+    // The session token still guards both presence requests.
+    let wrong = SessionToken::generate().expect("wrong token");
+    assert_eq!(
+        request(&socket, &wrong, &Request::Challenge),
+        Response::Error(ResponseError::Unauthorized)
+    );
+
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Ping),
+        Response::Pong
+    );
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(&mut child, WAIT).success());
 }
 
 #[test]

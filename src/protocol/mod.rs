@@ -12,7 +12,8 @@
 //! The `token` is the unlock session token (see [`crate::token`]) and is
 //! required on every request; the daemon rejects a missing or mismatched one
 //! with `unauthorized`. The `request` object always has a `"type"` field; the
-//! types this version knows are `ping`, `lock` and `run`:
+//! types this version knows are `ping`, `lock`, `run`, `challenge` and
+//! `prove`:
 //!
 //! ```json
 //! {"version":3,"token":"...","request":{"type":"ping"}}
@@ -21,7 +22,14 @@
 //!                         "ref":"pm://00112233445566778899aabbccddeeff",
 //!                         "command":["/usr/bin/curl","-s","https://example.test"],
 //!                         "cwd":"/home/alice/project"}}
+//! {"version":3,"token":"...","request":{"type":"challenge"}}
+//! {"version":3,"token":"...","request":{"type":"prove","nonce":"<64 hex>",
+//!                         "digest":"<64 hex>","proof":"<64 hex>"}}
 //! ```
+//!
+//! `challenge`/`prove` are the human-presence proof (TODO 3.3): the daemon
+//! issues a single-use nonce and accepts a key-derived MAC over it exactly
+//! once. Neither request carries a secret value; see [`crate::presence`].
 //!
 //! Version 2 added the required `token` field, so it is not backward
 //! compatible with version 1 (a version-1 peer would be treated as an
@@ -79,6 +87,7 @@ use std::fmt;
 
 use serde_json::{Map, Value, json};
 
+use crate::presence::{ChallengeNonce, Proof, RequestDigest};
 use crate::store::EntryId;
 use crate::token::SessionToken;
 
@@ -136,6 +145,8 @@ pub(super) const MAX_TYPE_CHARS: usize = 32;
 ///
 /// None of these variants carries a secret value; `run` names the reference to
 /// inject and the command to run, and the daemon resolves the value itself.
+/// `challenge`/`prove` carry only a public nonce, a public digest and a MAC;
+/// see [`crate::presence`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     /// Liveness check. The daemon answers without touching the vault.
@@ -144,6 +155,27 @@ pub enum Request {
     Lock,
     /// Spawn `command` with `env` set to the value of `reference`.
     Run(RunRequest),
+    /// Issue a single-use nonce for a human-presence proof. Answer: [`Response::Challenge`](crate::protocol::Response::Challenge).
+    Challenge,
+    /// Present a proof of vault-key knowledge for a challenge.
+    /// Answer: `proven`, or `denied` for every bad nonce or MAC.
+    Prove(ProveRequest),
+}
+
+/// The `prove` payload: a MAC over a nonce and the digest of the request the
+/// human is approving.
+///
+/// The proof is key-derived, so its `Debug` is redacted and equality is
+/// constant-time (see [`crate::presence::Proof`]). The nonce and digest are
+/// public values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProveRequest {
+    /// The nonce the daemon issued and has not yet spent.
+    pub nonce: ChallengeNonce,
+    /// Digest of the request the human is approving.
+    pub digest: RequestDigest,
+    /// `HMAC-SHA256(vault_key, DOMAIN || nonce || digest)`.
+    pub proof: Proof,
 }
 
 /// The `run` payload: inject `reference`'s value as `env` for `command`.
@@ -449,6 +481,13 @@ fn encode_body(token: &SessionToken, request: &Request) -> Result<Vec<u8>, Proto
             "command": run.command,
             "cwd": run.cwd,
         }),
+        Request::Challenge => json!({ "type": "challenge" }),
+        Request::Prove(prove) => json!({
+            "type": "prove",
+            "nonce": prove.nonce.to_hex(),
+            "digest": prove.digest.to_hex(),
+            "proof": prove.proof.to_hex().as_str(),
+        }),
     };
     let token = token.to_hex();
     let envelope = json!({
@@ -505,6 +544,15 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
             command: required_string_array(request, "command")?,
             cwd: required_string(request, "cwd")?,
         }),
+        "challenge" => Request::Challenge,
+        "prove" => Request::Prove(ProveRequest {
+            nonce: ChallengeNonce::from_hex(&required_string(request, "nonce")?)
+                .ok_or_else(|| invalid_presence_field("nonce"))?,
+            digest: RequestDigest::from_hex(&required_string(request, "digest")?)
+                .ok_or_else(|| invalid_presence_field("digest"))?,
+            proof: Proof::from_hex(&required_string(request, "proof")?)
+                .ok_or_else(|| invalid_presence_field("proof"))?,
+        }),
         other => {
             return Err(ProtocolError::UnknownRequest(
                 other.chars().take(MAX_TYPE_CHARS).collect(),
@@ -522,6 +570,13 @@ fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, Pro
         .as_str()
         .map(str::to_owned)
         .ok_or_else(|| ProtocolError::MalformedJson(format!("'{key}' must be a string")))
+}
+
+fn invalid_presence_field(field: &str) -> ProtocolError {
+    ProtocolError::InvalidRequest(format!(
+        "prove.{field} must be {} lowercase hex characters",
+        crate::presence::NONCE_BYTES * 2
+    ))
 }
 
 fn required_string_array(
@@ -698,6 +753,22 @@ mod tests {
         })
     }
 
+    const PROVE_NONCE_HEX: &str =
+        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const PROVE_DIGEST_HEX: &str =
+        "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
+    /// HMAC-SHA256(0x0b * 32, "passmgr-approve-v1" || nonce || digest).
+    const PROVE_PROOF_HEX: &str =
+        "3596124510e1fbd47cc55655696b177e71c511593ca8dde627eacf964a1e3f4c";
+
+    fn prove_request() -> Request {
+        Request::Prove(ProveRequest {
+            nonce: ChallengeNonce::from_hex(PROVE_NONCE_HEX).expect("nonce"),
+            digest: RequestDigest::from_hex(PROVE_DIGEST_HEX).expect("digest"),
+            proof: Proof::from_hex(PROVE_PROOF_HEX).expect("proof"),
+        })
+    }
+
     /// Build a frame by hand, without going through `encode`.
     fn frame(body: &str) -> Vec<u8> {
         let mut frame = (body.len() as u32).to_be_bytes().to_vec();
@@ -707,10 +778,79 @@ mod tests {
 
     #[test]
     fn round_trips_every_request() {
-        for request in [Request::Ping, Request::Lock, run_request()] {
+        for request in [
+            Request::Ping,
+            Request::Lock,
+            Request::Challenge,
+            prove_request(),
+            run_request(),
+        ] {
             let encoded = encode(&request).expect("encode");
             assert_eq!(decode(&encoded).expect("decode"), request);
         }
+    }
+
+    #[test]
+    fn challenge_and_prove_frames_have_a_fixed_shape() {
+        let challenge = encode(&Request::Challenge).expect("encode");
+        let body = format!(
+            r#"{{"request":{{"type":"challenge"}},"token":"{TOKEN_HEX}","version":{PROTOCOL_VERSION}}}"#
+        );
+        assert_eq!(&challenge[4..], body.as_bytes());
+
+        let prove = encode(&prove_request()).expect("encode");
+        let body = format!(
+            r#"{{"request":{{"digest":"{PROVE_DIGEST_HEX}","nonce":"{PROVE_NONCE_HEX}","proof":"{PROVE_PROOF_HEX}","type":"prove"}},"token":"{TOKEN_HEX}","version":{PROTOCOL_VERSION}}}"#
+        );
+        assert_eq!(&prove[4..], body.as_bytes());
+    }
+
+    #[test]
+    fn malformed_presence_fields_are_rejected() {
+        let request = |fields: &str| {
+            format!(
+                r#"{{"version":3,"token":"{TOKEN_HEX}","request":{{"type":"prove",{fields}}}}}"#
+            )
+        };
+        let valid = format!(
+            r#""nonce":"{PROVE_NONCE_HEX}","digest":"{PROVE_DIGEST_HEX}","proof":"{PROVE_PROOF_HEX}""#
+        );
+        assert!(super::decode(&frame(&request(&valid))).is_ok());
+
+        let cases = [
+            String::new(),
+            format!(r#""nonce":"{PROVE_NONCE_HEX}","digest":"{PROVE_DIGEST_HEX}""#),
+            format!(r#""digest":"{PROVE_DIGEST_HEX}","proof":"{PROVE_PROOF_HEX}""#),
+            format!(r#""nonce":"{PROVE_NONCE_HEX}","proof":"{PROVE_PROOF_HEX}""#),
+            format!(
+                r#""nonce":"{}","digest":"{PROVE_DIGEST_HEX}","proof":"{PROVE_PROOF_HEX}""#,
+                PROVE_NONCE_HEX.to_uppercase()
+            ),
+            format!(
+                r#""nonce":"{PROVE_NONCE_HEX}","digest":"{PROVE_DIGEST_HEX}","proof":"{}""#,
+                &PROVE_PROOF_HEX[..62]
+            ),
+            format!(
+                r#""nonce":"{PROVE_NONCE_HEX}","digest":"{PROVE_DIGEST_HEX}","proof":"zz{}""#,
+                &PROVE_PROOF_HEX[2..]
+            ),
+            format!(r#""nonce":"{PROVE_NONCE_HEX}","digest":"{PROVE_DIGEST_HEX}","proof":7""#),
+        ];
+        for fields in cases {
+            match super::decode(&frame(&request(&fields))) {
+                Err(ProtocolError::MalformedJson(_) | ProtocolError::InvalidRequest(_)) => {}
+                other => panic!("expected a malformed prove request for {fields:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_prove_request_never_renders_its_proof_in_debug() {
+        let rendered = format!("{:?}", prove_request());
+        assert!(!rendered.contains(PROVE_PROOF_HEX), "{rendered}");
+        assert!(rendered.contains(PROVE_NONCE_HEX), "{rendered}");
+        assert!(rendered.contains(PROVE_DIGEST_HEX), "{rendered}");
+        assert!(rendered.contains("Proof(<redacted>)"), "{rendered}");
     }
 
     #[test]

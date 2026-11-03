@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 
 use crate::crypto::KEY_LEN;
 use crate::error::{Error, Result};
+use crate::presence::ChallengeNonce;
 use crate::protocol::{self, Request, Response, ResponseError, RunExit, RunFrame, RunStream};
 use crate::session;
 use crate::socket::{self, RuntimePaths, SocketError};
@@ -187,6 +188,59 @@ fn decode_frame_body(body: &[u8]) -> Result<RunFrame> {
     frame.extend_from_slice(&length.to_be_bytes());
     frame.extend_from_slice(body);
     protocol::decode_run_frame(&frame).map_err(protocol_error)
+}
+
+/// Ask the daemon for a fresh, single-use presence challenge nonce.
+///
+/// Any same-user process can ask for one; the nonce is public and worthless
+/// without the vault key. It only guards against replaying a recorded proof.
+pub fn challenge(paths: &RuntimePaths, token: &SessionToken) -> Result<ChallengeNonce> {
+    match request(paths, token, &Request::Challenge)? {
+        Response::Challenge(nonce) => Ok(nonce),
+        Response::Error(error) => Err(Error::Daemon(format!(
+            "the unlock daemon refused a presence challenge ({})",
+            error.code()
+        ))),
+        other => Err(unexpected_response("a challenge", &other)),
+    }
+}
+
+/// Present a presence proof and require the daemon to accept it.
+///
+/// The daemon spends the nonce on every attempt, so a refused proof (wrong
+/// key, altered digest, stale nonce) is final for that challenge: ask for a
+/// new one rather than retrying. The detail never includes the proof.
+pub fn prove(
+    paths: &RuntimePaths,
+    token: &SessionToken,
+    prove: &protocol::ProveRequest,
+) -> Result<()> {
+    match request(paths, token, &Request::Prove(prove.clone()))? {
+        Response::Proven => Ok(()),
+        Response::Error(error) => Err(Error::Daemon(format!(
+            "the unlock daemon refused the approval proof ({})",
+            error.code()
+        ))),
+        other => Err(unexpected_response("a proof", &other)),
+    }
+}
+
+fn unexpected_response(what: &str, response: &Response) -> Error {
+    Error::Daemon(format!(
+        "the unlock daemon answered {what} with an unexpected response ({}).",
+        response_kind(response)
+    ))
+}
+
+/// A non-secret label for a response, for diagnostics.
+fn response_kind(response: &Response) -> &'static str {
+    match response {
+        Response::Pong => "pong",
+        Response::Locked => "locked",
+        Response::Challenge(_) => "challenge",
+        Response::Proven => "proven",
+        Response::Error(error) => error.code(),
+    }
 }
 
 /// Ask whether a daemon is alive (and holds a key) at `paths`.
@@ -426,6 +480,7 @@ mod tests {
     use std::os::unix::fs::DirBuilderExt;
 
     use super::*;
+    use crate::presence::{Proof, RequestDigest};
     use crate::protocol::{AuthenticatedRequest, FrameDecoder};
     use crate::socket::DaemonSocket;
     use tempfile::TempDir;
@@ -499,6 +554,55 @@ mod tests {
             !paths.session().exists(),
             "lock must not leave a stale session token behind"
         );
+    }
+
+    #[test]
+    fn challenge_and_prove_round_trip_and_denial_is_reported() {
+        let (_directory, paths) = runtime_paths();
+        let token = test_token();
+
+        let nonce = ChallengeNonce::from_hex(
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .expect("nonce");
+        let server = serve_once(paths.clone(), Response::Challenge(nonce));
+        let received = challenge(&paths, &token).expect("challenge");
+        assert!(received.matches(&nonce));
+        assert_eq!(
+            server.join().expect("server thread").into_request(),
+            Request::Challenge
+        );
+
+        let digest = RequestDigest::new([0x24; 32]);
+        let proof = Proof::compute(&[0x0bu8; 32], &nonce, &digest).expect("proof");
+        let request_proof = protocol::ProveRequest {
+            nonce,
+            digest,
+            proof,
+        };
+        let server = serve_once(paths.clone(), Response::Proven);
+        prove(&paths, &token, &request_proof).expect("proven");
+        assert_eq!(
+            server.join().expect("server thread").into_request(),
+            Request::Prove(request_proof.clone())
+        );
+
+        // A refusal names the code and never the proof.
+        let server = serve_once(paths.clone(), Response::Error(ResponseError::Denied));
+        let error = prove(&paths, &token, &request_proof).expect_err("denied");
+        let message = error.to_string();
+        assert!(message.contains("denied"), "{message}");
+        assert!(
+            !message.contains(request_proof.proof.to_hex().as_str()),
+            "{message}"
+        );
+        server.join().expect("server thread");
+
+        // A daemon that answers a proof with the wrong shape is a protocol
+        // error, not a silently accepted approval.
+        let server = serve_once(paths.clone(), Response::Pong);
+        assert!(prove(&paths, &token, &request_proof).is_err());
+        server.join().expect("server thread");
     }
 
     #[test]

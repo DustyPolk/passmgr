@@ -12,18 +12,23 @@ use super::{
     LENGTH_PREFIX_BYTES, MAX_CHUNK_BYTES, MAX_MESSAGE_BYTES, MAX_SIGNAL, MAX_TYPE_CHARS,
     PROTOCOL_VERSION, ProtocolError, split_frame,
 };
+use crate::presence::ChallengeNonce;
 
 /// A daemon response.
 ///
-/// Responses carry status only. There is deliberately no field that can hold
-/// a secret value, and none may be added: any same-user process can connect to
-/// the socket.
+/// Responses carry status only (plus the public challenge nonce). There is
+/// deliberately no field that can hold a secret value, and none may be added:
+/// any same-user process can connect to the socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Response {
     /// The daemon is alive and the key is loaded.
     Pong,
     /// The daemon wiped its key and is shutting down.
     Locked,
+    /// A fresh, single-use nonce for a human-presence proof.
+    Challenge(ChallengeNonce),
+    /// The presented proof was accepted and its nonce spent.
+    Proven,
     /// The request was rejected. The error is a fixed code, never echo of the
     /// request or of vault data.
     Error(ResponseError),
@@ -50,8 +55,13 @@ pub enum ResponseError {
     Internal,
     /// The daemon is already serving its maximum number of concurrent `run`
     /// requests (or could not create a worker). Nothing was decrypted or
-    /// spawned; the caller may retry once an earlier run finishes.
+    /// spawned; the caller may retry once an earlier run finishes. Also used
+    /// when too many challenge nonces are already outstanding.
     Busy,
+    /// A human-presence proof was refused: unknown or spent nonce, expired
+    /// nonce, or a MAC that does not match the nonce and digest. All three
+    /// cases are deliberately indistinguishable.
+    Denied,
 }
 
 impl ResponseError {
@@ -65,6 +75,7 @@ impl ResponseError {
             Self::SpawnFailed => "spawn_failed",
             Self::Internal => "internal",
             Self::Busy => "busy",
+            Self::Denied => "denied",
         }
     }
 
@@ -77,6 +88,7 @@ impl ResponseError {
             "spawn_failed" => Ok(Self::SpawnFailed),
             "internal" => Ok(Self::Internal),
             "busy" => Ok(Self::Busy),
+            "denied" => Ok(Self::Denied),
             other => Err(ProtocolError::UnknownResponse(
                 other.chars().take(MAX_TYPE_CHARS).collect(),
             )),
@@ -172,6 +184,8 @@ pub fn encode_response(response: &Response) -> Result<Vec<u8>, ProtocolError> {
     let response = match response {
         Response::Pong => json!({ "type": "pong" }),
         Response::Locked => json!({ "type": "locked" }),
+        Response::Challenge(nonce) => json!({ "type": "challenge", "nonce": nonce.to_hex() }),
+        Response::Proven => json!({ "type": "proven" }),
         Response::Error(error) => json!({ "type": "error", "code": error.code() }),
     };
     encode_value(&json!({ "version": PROTOCOL_VERSION, "response": response }))
@@ -191,9 +205,26 @@ pub fn decode_response(frame: &[u8]) -> Result<Response, ProtocolError> {
     match response_type(response)? {
         "pong" => Ok(Response::Pong),
         "locked" => Ok(Response::Locked),
+        "challenge" => decode_challenge(response).map(Response::Challenge),
+        "proven" => Ok(Response::Proven),
         "error" => decode_error_code(response).map(Response::Error),
         other => Err(ProtocolError::UnknownResponse(truncate_type(other))),
     }
+}
+
+/// Decode the public nonce carried by a `challenge` response.
+fn decode_challenge(response: &Map<String, Value>) -> Result<ChallengeNonce, ProtocolError> {
+    let text = response
+        .get("nonce")
+        .ok_or_else(|| ProtocolError::MalformedJson("missing 'response.nonce'".into()))?
+        .as_str()
+        .ok_or_else(|| ProtocolError::MalformedJson("'response.nonce' must be a string".into()))?;
+    ChallengeNonce::from_hex(text).ok_or_else(|| {
+        ProtocolError::InvalidResponse(format!(
+            "'response.nonce' must be {} lowercase hex characters",
+            crate::presence::NONCE_BYTES * 2
+        ))
+    })
 }
 
 /// Encode one frame of a `run` response stream as a complete length-prefixed
@@ -428,15 +459,23 @@ mod tests {
 
     #[test]
     fn round_trips_every_response() {
+        let nonce = ChallengeNonce::from_hex(
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        )
+        .expect("nonce");
         for response in [
             Response::Pong,
             Response::Locked,
+            Response::Challenge(nonce),
+            Response::Proven,
             Response::Error(ResponseError::BadRequest),
             Response::Error(ResponseError::Unsupported),
             Response::Error(ResponseError::Unauthorized),
             Response::Error(ResponseError::NotFound),
             Response::Error(ResponseError::SpawnFailed),
             Response::Error(ResponseError::Internal),
+            Response::Error(ResponseError::Busy),
+            Response::Error(ResponseError::Denied),
         ] {
             let encoded = encode_response(&response).expect("encode response");
             assert_eq!(
@@ -452,6 +491,16 @@ mod tests {
         let pong_body = br#"{"response":{"type":"pong"},"version":3}"#;
         assert_eq!(&pong[..4], &(pong_body.len() as u32).to_be_bytes());
         assert_eq!(&pong[4..], pong_body);
+
+        let challenge = encode_response(&Response::Challenge(
+            ChallengeNonce::from_hex(
+                "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+            )
+            .expect("nonce"),
+        ))
+        .expect("encode");
+        let challenge_body = br#"{"response":{"nonce":"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f","type":"challenge"},"version":3}"#;
+        assert_eq!(&challenge[4..], challenge_body);
 
         let error = encode_response(&Response::Error(ResponseError::BadRequest)).expect("encode");
         assert_eq!(

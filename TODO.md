@@ -46,12 +46,15 @@ approval flow", "Audit"). Follow it.
       Note: optional fields are behind a flags byte (not a magic `0`
       timestamp), and `Vault::add_grant` reports a duplicate id as
       `InvalidInput` rather than a new error variant.
-- [ ] **3.3 Human-presence proof.** Add `hmac` (RustCrypto) here, its first
+- [x] **3.3 Human-presence proof.** Add `hmac` (RustCrypto) here, its first
       use. Daemon `challenge` request returns a nonce. The CLI answers with
       `HMAC-SHA256(key, "passmgr-approve-v1" || nonce || digest)`. The daemon
       verifies in constant time, and a nonce is single-use with a 60 s
       expiry. Tests: correct proof accepted, wrong key/reused
-      nonce/expired nonce/altered digest rejected.
+      nonce/expired nonce/altered digest rejected. Done: `src/presence.rs`,
+      `challenge`/`prove` requests, `client::challenge`/`client::prove`; the
+      nonce is spent by any attempt and all failures answer `denied`. The
+      master-password prompt and the request digest arrive with 3.4.
 - [ ] **3.4 `pm grant create`** (TTY + master password via the proof, refused
       in agent context with exit 5). Flags: `--label`, `--ref`/`--tag`
       (repeatable), `--command PATH` (repeatable; resolved to a canonical
