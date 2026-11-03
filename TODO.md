@@ -756,7 +756,7 @@ Rules that apply to every item:
       `a_denied_run_does_not_reveal_whether_a_reference_exists` (R.31), so
       they were not duplicated.
 
-- [ ] **R.36 Redaction holdback timing reveals the secret one byte at a
+- [x] **R.36 Redaction holdback timing reveals the secret one byte at a
       time.**
       `src/redact.rs:111-114` holds output back only when the buffered tail
       is a proper prefix of the secret; any other tail is emitted at once.
@@ -774,6 +774,30 @@ Rules that apply to every item:
       Test: a `Redactor` unit test pushes a correct prefix and a wrong prefix
       of the same length; `push` must return the same number of bytes for
       both. Plus an e2e latency test like the scratch one.
+      Done: `src/redact.rs::consume` now holds the last `secret.len() - 1`
+      bytes unconditionally until `finish`, so `push` returns the same number
+      of bytes for a correct and a wrong prefix of equal length; a complete
+      match is still replaced immediately. `the_holdback_window_does_not_depend_on_content`
+      proves the unit property and `tests/redaction_timing.rs` proves it over
+      the real daemon (the child prints a sentinel, then a 36-byte prefix or
+      its one-byte-perturbed twin, then pauses; neither is relayed during the
+      pause, and both arrive in order afterwards). `SECURITY.md` limit 3 and
+      `DECISIONS.md` note the fixed window and its small latency cost.
+
+- [ ] **R.36a The default marker can complete a secret that starts with one
+      of its suffixes.**
+      `src/redact.rs::choose_marker` avoids a marker that *contains* the
+      secret, but not a marker whose suffix is a prefix of it. With secret
+      `TED]X`, `redact(b"TED]X", b"TED]XX")` returns `[REDACTED]X`, which
+      contains `TED]X`: the marker supplied the `TED]` half. That violates
+      `Redactor::push`'s "never contains a complete occurrence" contract and
+      the invariant that relayed output never carries the value. Found while
+      writing R.36; not fixed there to keep the commit focused.
+      Fix: pick the fallback marker (a run of a byte absent from the secret)
+      when the secret is a substring of the default marker *or* any non-empty
+      suffix of it is a prefix of the secret. Test: extend
+      `the_marker_never_contains_the_value` with such secrets and assert the
+      redacted output does not contain the value.
 
 - [ ] **R.37 A run whose client disconnects keeps running and holds the key
       past the idle timeout.**

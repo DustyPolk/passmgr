@@ -1,3 +1,41 @@
+## 2026-11-03 — Make redaction's holdback independent of the secret (TODO R.36)
+
+- `src/redact.rs::consume` used to keep only a tail that was a proper prefix
+  of the secret. Whether the relay stalled therefore depended on the secret,
+  giving an agent that controls child output a byte-at-a-time prefix oracle.
+  It now keeps the last `secret.len() - 1` bytes unconditionally (`at_end`
+  flushes them) and drops/emits from the front, so `push` returns the same
+  number of bytes for a correct and a wrong prefix of equal length. A complete
+  match is still replaced immediately. Output order is preserved; tail output
+  is delayed by up to `secret.len() - 1` bytes.
+- Rejected the item's timer alternative: flushing a held partial prefix on a
+  timer would let later bytes complete it into a visible secret. Fixed-length
+  holdback is the only content-independent option that keeps the guarantee.
+- Tests: `src/redact.rs::the_holdback_window_does_not_depend_on_content`
+  (correct vs one-byte-perturbed prefix of the same length return equal byte
+  counts, before and after the window) and
+  `bytes_before_the_window_are_emitted_promptly`; existing tests updated to
+  the fixed window. `tests/redaction_timing.rs` runs the real daemon: the
+  child prints `RELAY-READY`, then the 36-byte prefix (or its perturbed twin),
+  pauses 2 s, then a tail. It asserts only the sentinel is relayed before the
+  pause, both cases emit nothing during a 500 ms quiet window, and the held
+  bytes arrive in order afterwards. Reverting `consume` makes it fail with the
+  perturbed 36-byte prefix relayed before the pause.
+- Docs: `SECURITY.md` limit 3 and `DECISIONS.md` record the fixed window and
+  the latency cost.
+- Found but **not fixed** (new TODO R.36a): the default `[REDACTED]` marker
+  can complete a secret that starts with one of its suffixes; with secret
+  `TED]X`, `redact(b"TED]X", b"TED]XX")` contains `TED]X`. A small
+  `choose_marker` change (fallback when a marker suffix is a secret prefix)
+  closes it.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  full `cargo test` pass; `cargo audit` is not installed (skipped).
+- **Next iteration must know:** the first unchecked item is now **R.36a**
+  (the marker-completion leak found here), then R.37. `tests/redaction_timing.rs`
+  adds ~5.5 s to the suite; its 500 ms quiet window is a lower bound on a
+  leak, not a synchronization sleep, and it observes the sentinel first so it
+  does not race daemon startup.
+
 ## 2026-11-03 — Prove `pmd` enforces allowlist, capability and use limits (TODO R.35)
 
 - Tests only, no production change. `tests/daemon_run.rs` gains

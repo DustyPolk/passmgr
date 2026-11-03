@@ -8,12 +8,19 @@
 //! # Streaming, not buffering
 //!
 //! Output arrives in arbitrary chunks. A naive per-chunk replacement leaks a
-//! secret that straddles a chunk boundary, so [`Redactor`] holds back the
-//! longest suffix that is still a prefix of the secret (at most
-//! `secret.len() - 1` bytes) until the next [`Redactor::push`] decides whether
-//! the value completes. [`Redactor::finish`] flushes a trailing partial prefix
-//! at end of stream: a prefix is not the secret, and keeping it back forever
-//! would truncate legitimate output.
+//! secret that straddles a chunk boundary, so [`Redactor`] always holds back
+//! the last `secret.len() - 1` bytes of what it has seen, whatever they are,
+//! until more output arrives or the stream ends. Any split occurrence must
+//! start within that window, so holding a fixed-length suffix is enough to
+//! catch every cross-chunk occurrence. [`Redactor::finish`] flushes the held
+//! bytes at end of stream: fewer than `secret.len()` bytes cannot be the
+//! secret, and keeping them back forever would truncate legitimate output.
+//!
+//! The window depends only on how many bytes have been seen, never on whether
+//! they match the secret. Holding back only a *matching* prefix would make the
+//! relay's timing an oracle: an agent that controls the child's output could
+//! send `known + guess`, pause, and learn from whether the bytes were delayed
+//! whether `guess` extended a real prefix of the secret.
 //!
 //! # Handling of the secret
 //!
@@ -43,8 +50,10 @@ const DEFAULT_MARKER: &[u8] = b"[REDACTED]";
 pub struct Redactor {
     secret: Vec<u8>,
     marker: Vec<u8>,
-    /// Bytes not yet emitted because they may be the start of a split
-    /// occurrence. Bounded by `secret.len() - 1` after every `push`.
+    /// A fixed window of bytes not yet emitted: always the last
+    /// `secret.len() - 1` bytes seen, regardless of content, so the relay's
+    /// timing cannot reveal a correct prefix. Bounded by `secret.len() - 1`
+    /// after every `push`.
     pending: Vec<u8>,
 }
 
@@ -64,6 +73,11 @@ impl Redactor {
     /// Feed the next chunk of output and return the bytes that are now safe to
     /// emit. The returned buffer never contains a complete occurrence of the
     /// secret, including occurrences that span this chunk and earlier ones.
+    ///
+    /// How many bytes this returns depends only on the number of bytes fed so
+    /// far and the secret's *length*, never on its content: the last
+    /// `secret.len() - 1` bytes are always held back until more output or
+    /// [`Redactor::finish`].
     pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
         if data.is_empty() {
             return Vec::new();
@@ -94,28 +108,36 @@ impl Redactor {
     /// Scan `pending`, appending safe bytes and the marker to `out`, and drop
     /// the consumed prefix.
     ///
-    /// At the end of a stream (`at_end`) a partial prefix is emitted; mid
-    /// stream it is kept for the next chunk.
+    /// Mid stream the final `secret.len() - 1` bytes are always kept for the
+    /// next chunk, whether or not they look like the secret. A suffix shorter
+    /// than the secret cannot contain a complete occurrence, and every split
+    /// occurrence starts inside this window, so nothing is missed. Keeping a
+    /// fixed window makes the decision independent of the secret's content.
+    /// At the end of a stream (`at_end`) the window is emitted: it is shorter
+    /// than the secret by construction.
     fn consume(&mut self, out: &mut Vec<u8>, at_end: bool) {
         let secret_len = self.secret.len();
         let mut consumed = 0;
         while consumed < self.pending.len() {
             let remaining = &self.pending[consumed..];
-            if remaining[0] == self.secret[0] {
-                if remaining.len() >= secret_len {
-                    if &remaining[..secret_len] == self.secret.as_slice() {
-                        out.extend_from_slice(&self.marker);
-                        consumed += secret_len;
-                        continue;
-                    }
-                } else if !at_end && self.secret.starts_with(remaining) {
-                    // The chunk ends in the middle of a possible occurrence:
-                    // hold it until more bytes arrive.
+            if remaining.len() < secret_len {
+                if !at_end {
+                    // Hold the tail: it may still become part of a secret
+                    // split across chunks.
                     break;
                 }
+                // At end of stream no complete occurrence can start here.
+                out.extend_from_slice(remaining);
+                consumed = self.pending.len();
+                break;
             }
-            out.push(remaining[0]);
-            consumed += 1;
+            if remaining[0] == self.secret[0] && remaining[..secret_len] == self.secret[..] {
+                out.extend_from_slice(&self.marker);
+                consumed += secret_len;
+            } else {
+                out.push(remaining[0]);
+                consumed += 1;
+            }
         }
         self.discard_prefix(consumed);
     }
@@ -297,17 +319,60 @@ mod tests {
     #[test]
     fn finish_flushes_a_trailing_partial_prefix() {
         let mut redactor = Redactor::new(b"abcdef");
-        // "abc" is a prefix of the secret and must be held back.
-        assert_eq!(redactor.push(b"xabc"), b"x");
-        assert_eq!(redactor.pending, b"abc");
-        assert_eq!(redactor.finish(), b"abc");
+        // The fixed window is five bytes, so a four-byte chunk is held whole
+        // even though only its tail is a prefix of the secret.
+        assert_eq!(redactor.push(b"xabc"), b"");
+        assert_eq!(redactor.pending, b"xabc");
+        assert_eq!(redactor.finish(), b"xabc");
         assert!(redactor.pending.is_empty());
 
-        // A suffix that only looks like a prefix for a while is released as
-        // soon as it is disproved.
+        // A suffix that only looks like a prefix for a while is held for the
+        // same fixed window and released at end of stream.
         let mut redactor = Redactor::new(b"abcdef");
-        assert_eq!(redactor.push(b"abcx"), b"abcx");
-        assert!(redactor.finish().is_empty());
+        assert_eq!(redactor.push(b"abcx"), b"");
+        assert_eq!(redactor.finish(), b"abcx");
+    }
+
+    #[test]
+    fn the_holdback_window_does_not_depend_on_content() {
+        // R.36: a correct partial prefix and a wrong guess of the same length
+        // must be held for the same number of bytes. Otherwise the relay's
+        // timing tells an agent how much of a guess was right.
+        let secret = SECRET;
+        let correct = &secret[..secret.len() - 1];
+        let mut wrong = correct.to_vec();
+        let last = wrong.len() - 1;
+        wrong[last] ^= 0x01;
+        assert!(!secret.starts_with(&wrong), "the fixture must be wrong");
+
+        let mut correct_redactor = Redactor::new(secret);
+        let mut wrong_redactor = Redactor::new(secret);
+        let correct_out = correct_redactor.push(correct);
+        let wrong_out = wrong_redactor.push(&wrong);
+        assert_eq!(correct_out.len(), 0);
+        assert_eq!(wrong_out.len(), correct_out.len());
+        assert_eq!(correct_redactor.pending.len(), wrong_redactor.pending.len());
+
+        // Longer than the window: both emit exactly the bytes above it.
+        let mut correct_tail = correct.to_vec();
+        correct_tail.extend_from_slice(b"tail!");
+        let mut wrong_tail = wrong.clone();
+        wrong_tail.extend_from_slice(b"tail!");
+        let mut correct_redactor = Redactor::new(secret);
+        let mut wrong_redactor = Redactor::new(secret);
+        let correct_out = correct_redactor.push(&correct_tail);
+        let wrong_out = wrong_redactor.push(&wrong_tail);
+        assert_eq!(correct_out.len(), 5);
+        assert_eq!(wrong_out.len(), correct_out.len());
+        assert_eq!(correct_redactor.pending.len(), wrong_redactor.pending.len());
+    }
+
+    #[test]
+    fn bytes_before_the_window_are_emitted_promptly() {
+        let mut redactor = Redactor::new(b"abcdef");
+        assert_eq!(redactor.push(b"01234567"), b"012");
+        assert_eq!(redactor.pending, b"34567");
+        assert_eq!(redactor.finish(), b"34567");
     }
 
     #[test]

@@ -36,6 +36,13 @@ code does not implement yet.
   (`redaction_replaces_only_the_exact_secret_not_its_encodings`) proves it.
   `tests/docs.rs` pins the same limit in MCP.md and forbids claiming encoded
   redaction before 4.6.
+- Redaction always holds back the last `len - 1` bytes of relayed output until
+  more output or EOF, where `len` is the secret's length. The choice is
+  content-independent so relay timing is not a prefix oracle (R.36); the cost
+  is that tail output is delayed by up to `len - 1` bytes. `src/redact.rs`
+  implements it and `tests/redaction_timing.rs` proves a correct and a wrong
+  prefix are held identically. Do not go back to holding only a *matching*
+  prefix.
 
 ## Crypto
 

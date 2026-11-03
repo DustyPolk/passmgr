@@ -143,6 +143,13 @@ but it does not and cannot:
 - protect against a hostile child that deliberately holds and forwards the
   value.
 
+To keep the relay's timing from revealing guesses, the redactor always holds
+back the last `len - 1` bytes of output (`len` is the secret's length) until
+more output arrives or the stream ends; the decision never depends on whether
+those bytes match the value. The visible cost is that the last `len - 1` bytes
+of a stream are relayed only when the child writes more or exits. The delay
+depends on the secret's length, never its content.
+
 Redaction protects the agent's context from accidental leakage. It is not a
 sandbox.
 
