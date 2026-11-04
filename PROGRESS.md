@@ -1,3 +1,35 @@
+## 2026-11-03 — Backpressure a paused run reader instead of a write timeout (TODO R.49)
+
+- `src/daemon/run.rs`: `serve_run` makes the run socket non-blocking right
+  after the cancel check, builds the `runner::Stop` there, and every frame it
+  sends goes through `write_client_frame`. That writer retries on `WouldBlock`
+  and waits in `poll(POLLOUT)` in `runner::CANCEL_POLL` (100 ms) slices,
+  checking `stop.requested()` (cancel or closed peer) before each. On
+  `POLLERR|POLLHUP|POLLNVAL` it returns `BrokenPipe`; other errors propagate,
+  so `runner::execute` aborts and reaps the child as before.
+- Backpressure is real, not buffering: a stalled reader stops the relay, the
+  bounded (8) frame channel fills, the pipe readers block, and the child's
+  stdout pipe fills. No new queue, no unbounded memory.
+- Control connections (`ping`, `lock`, `grant_*`) keep the 5 s read/write
+  timeout; only the run worker's stream is exempt. Without the timeout,
+  `lock`'s join no longer waits for a socket write (one poll slice).
+- Decision: no write timeout on a run stream. A timeout cannot distinguish
+  "slow reader" from "dead client" (`client_closed` does, exactly) and
+  truncating a run claims the child finished; `DECISIONS.md`'s framing bullet
+  records the exception. `runner::CANCEL_POLL` and `Stop::requested` are now
+  `pub(crate)` so the writer and relay cannot drift.
+- Tests: new `tests/run_backpressure.rs`. A 4 MiB child, reader silent 7 s:
+  all 4,194,304 bytes plus `Exit(Code(0))` (old code: 106,460 bytes, no Exit).
+  A stalled run client: FIONREAD proves the client queue stopped growing, then
+  `lock` must answer within 2 s and no `Exit(Code(0))` follows (old: 5.14 s).
+  Both proved failing on stashed `src/`, passing on HEAD.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` pass; audit not installed.
+- **Next iteration must know:** future frame writes on a run socket must use
+  `write_client_frame`; a plain `write_all` on the non-blocking socket can drop
+  a frame on `WouldBlock`. A client that stalls but never disconnects now holds
+  the child blocked for as long as it would run anyway; `lock`/SIGTERM still
+  kill it. R.50 is next.
+
 ## 2026-11-03 — Refuse hidden characters in new service names and usernames, escape stored ones (TODO R.48)
 
 - `src/store.rs`: `validate_service`/`validate_username` now refuse the whole

@@ -271,7 +271,12 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   no reply. The pid is informational and never used for authorization.
 - Framing: 4-byte big-endian length prefix + JSON body, 64 KiB body cap
   checked before slicing, one request per connection, 5 s read/write timeout,
-  200 ms accept poll.
+  200 ms accept poll. A `run` stream is the exception: its worker makes the
+  socket non-blocking and waits for room in `poll` in 100 ms slices, so a
+  client that stops reading backpressures the child (bounded frame channel,
+  then the child's full output pipe) instead of having the run truncated by a
+  write timeout; `lock`, a signal and a closed peer are still observed within
+  one slice (TODO R.49).
 - Envelope: `{"version":4,"token":"<64 lowercase hex>","request":{...}}`. The
   token is parsed before the request. Version 4 added the required
   `run.grant`; a version-3 daemon would ignore it and authorize with the

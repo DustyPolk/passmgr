@@ -72,8 +72,9 @@ pub const INHERITED_ENV: &[&str] = &[
 /// Prefixes of additional variables inherited from the daemon (locales).
 const INHERITED_PREFIXES: &[&str] = &["LC_"];
 
-/// How often the output loop and the pipe readers check for a shutdown.
-const CANCEL_POLL: Duration = Duration::from_millis(100);
+/// How often the output loop, the pipe readers and a blocked run-stream write
+/// check for a shutdown.
+pub(crate) const CANCEL_POLL: Duration = Duration::from_millis(100);
 
 /// How long a killed process group gets to act on SIGTERM before SIGKILL.
 const TERM_GRACE: Duration = Duration::from_millis(100);
@@ -175,7 +176,11 @@ impl<'a> Stop<'a> {
     }
 
     /// Whether the run must stop now.
-    fn requested(&self) -> bool {
+    ///
+    /// Also polled by the daemon's run-stream writer, so a write that is
+    /// waiting for a slow reader still observes `lock`, a signal or a vanished
+    /// client (TODO R.49).
+    pub(crate) fn requested(&self) -> bool {
         self.cancel.load(Ordering::SeqCst) || self.client_gone.is_some_and(|gone| gone())
     }
 }

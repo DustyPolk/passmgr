@@ -1073,8 +1073,13 @@ Rules that apply to every item:
       Test: validators reject U+202E, U+200B and U+FE0F; `add` with a bidi
       service exits 2 before any prompt; `list` escapes a legacy stored value.
 
-- [ ] **R.49 A client that stops reading for 5 s gets its run killed without
-      a terminal frame, and `lock` waits behind the stalled write.**
+- [x] **R.49 A client that stops reading for 5 s gets its run killed without
+      a terminal frame, and `lock` waits behind the stalled write.** (Done:
+      the run socket is non-blocking and `write_client_frame` waits in `poll`
+      in 100 ms slices, checking cancel/peer-gone each time; backpressure
+      reaches the child through the bounded frame channel. Control-request
+      sockets keep the 5 s timeout. Tests in `tests/run_backpressure.rs` failed
+      on the old code with 106 KB of 4 MiB and a 5.14 s `lock`.)
       `src/daemon.rs:470` sets a 5 s write timeout on the stream handed to
       the run worker; `relay` (`src/runner.rs:304`) cannot see `cancel` while
       blocked in `emit`.

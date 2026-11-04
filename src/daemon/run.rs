@@ -5,7 +5,7 @@
 //! and the program path are all re-checked, and the grant is looked up in the
 //! vault that the daemon opens itself.
 
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
@@ -20,7 +20,7 @@ use crate::store::EntryId;
 use crate::vault::Vault;
 
 use super::watermark::GrantWatermarks;
-use super::{LockedKey, unix_now, write_run_frame};
+use super::{LockedKey, unix_now};
 
 /// Read buffer for one connection. A request is bounded by
 /// [`protocol::MAX_MESSAGE_BYTES`].
@@ -69,18 +69,45 @@ pub(super) fn serve_run(
     if cancel.load(Ordering::SeqCst) {
         return;
     }
+    // The run stream is write-driven from here on: the worker never reads
+    // another request. Make it non-blocking so a client that stops reading
+    // cannot park the daemon in a socket write; `write_client_frame` waits in
+    // `poll` and checks the stop conditions instead (TODO R.49). A failure
+    // here means the socket is unusable, so there is nobody to answer.
+    if stream.set_nonblocking(true).is_err() {
+        return;
+    }
+    // A run ends when its client does. A host that times out a tool call drops
+    // the connection; the child must not keep the secret in its environment,
+    // and the idle timeout must not stay suspended, for as long as that child
+    // happens to live.
+    let fd = stream.as_raw_fd();
+    let client_gone = || client_closed(fd);
+    let stop = runner::Stop::new(cancel, &client_gone);
     // The protocol guarantees these, but the daemon must not rely on a
     // client-side check for a security decision.
     let Ok(id) = EntryId::parse_ref(&request.reference) else {
-        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::BadRequest));
+        let _ = write_client_frame(
+            &mut stream,
+            &RunFrame::Error(ResponseError::BadRequest),
+            &stop,
+        );
         return;
     };
     if runner::denied_env_name(&request.env) {
-        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::BadRequest));
+        let _ = write_client_frame(
+            &mut stream,
+            &RunFrame::Error(ResponseError::BadRequest),
+            &stop,
+        );
         return;
     }
     let Some(program) = request.command.first() else {
-        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::BadRequest));
+        let _ = write_client_frame(
+            &mut stream,
+            &RunFrame::Error(ResponseError::BadRequest),
+            &stop,
+        );
         return;
     };
     // Resolve the program before matching it against the grant, so a symlink
@@ -90,21 +117,29 @@ pub(super) fn serve_run(
     let Ok(program) = std::fs::canonicalize(program) else {
         // A program that cannot be resolved can never match a grant, and
         // saying so is not an oracle: the grant is checked on the same path.
-        let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::Denied));
+        let _ = write_client_frame(&mut stream, &RunFrame::Error(ResponseError::Denied), &stop);
         return;
     };
     let secret = match record_use(vault_path, key, watermarks, request, id, &program) {
         Ok(secret) => secret,
         Err(RecordError::Denied) => {
-            let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::Denied));
+            let _ = write_client_frame(&mut stream, &RunFrame::Error(ResponseError::Denied), &stop);
             return;
         }
         Err(RecordError::NotFound) => {
-            let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::NotFound));
+            let _ = write_client_frame(
+                &mut stream,
+                &RunFrame::Error(ResponseError::NotFound),
+                &stop,
+            );
             return;
         }
         Err(RecordError::Internal) => {
-            let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::Internal));
+            let _ = write_client_frame(
+                &mut stream,
+                &RunFrame::Error(ResponseError::Internal),
+                &stop,
+            );
             return;
         }
     };
@@ -115,13 +150,6 @@ pub(super) fn serve_run(
     if cancel.load(Ordering::SeqCst) {
         return;
     }
-    // The run ends when the client does. A host that times out a tool call
-    // drops the connection; the child must not keep the secret in its
-    // environment, and the idle timeout must not stay suspended, for as long
-    // as that child happens to live.
-    let fd = stream.as_raw_fd();
-    let client_gone = || client_closed(fd);
-    let stop = runner::Stop::new(cancel, &client_gone);
     let result = runner::execute(
         &program,
         &request.command[1..],
@@ -130,19 +158,95 @@ pub(super) fn serve_run(
         Path::new(&request.cwd),
         &inherited,
         &stop,
-        |frame| write_run_frame(&mut stream, &frame),
+        |frame| write_client_frame(&mut stream, &frame, &stop),
     );
     match result {
         Ok(exit) => {
-            let _ = write_run_frame(&mut stream, &RunFrame::Exit(exit));
+            let _ = write_client_frame(&mut stream, &RunFrame::Exit(exit), &stop);
         }
         Err(runner::RunError::Spawn(_)) => {
-            let _ = write_run_frame(&mut stream, &RunFrame::Error(ResponseError::SpawnFailed));
+            let _ = write_client_frame(
+                &mut stream,
+                &RunFrame::Error(ResponseError::SpawnFailed),
+                &stop,
+            );
         }
         // The caller vanished or the daemon is stopping: the child is gone
         // and there is nobody left to tell.
         Err(runner::RunError::Output(_) | runner::RunError::Cancelled) => {}
     }
+}
+
+/// Write one frame to a run's client while observing the run's stop conditions.
+///
+/// The socket is non-blocking here, so a reader that stops reading never
+/// trips a write timeout: the bytes wait until it reads again, the bounded
+/// frame channel backs up, and the child blocks on its full output pipe (TODO
+/// R.49). This is backpressure, not an unbounded buffer. The wait is in
+/// [`runner::CANCEL_POLL`] slices, so `lock`, a signal or a closed connection
+/// still cancels promptly.
+fn write_client_frame(
+    stream: &mut UnixStream,
+    frame: &RunFrame,
+    stop: &runner::Stop<'_>,
+) -> io::Result<()> {
+    let encoded = protocol::encode_run_frame(frame)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame is too large"))?;
+    let mut bytes = encoded.as_slice();
+    while !bytes.is_empty() {
+        if stop.requested() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "the run was cancelled",
+            ));
+        }
+        match stream.write(bytes) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "the client accepted no bytes",
+                ));
+            }
+            Ok(written) => bytes = &bytes[written..],
+            Err(err)
+                if err.kind() == io::ErrorKind::WouldBlock
+                    || err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+        if bytes.is_empty() {
+            break;
+        }
+        // Wait for room in the socket buffer, or for a stop. A peer that is
+        // gone reports an error on the next write; `poll` only bounds the wait.
+        let mut poll_fd = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        // SAFETY: one initialized `pollfd`; the timeout is the runner's cancel
+        // slice, so the stop check above runs at least that often.
+        let ready = unsafe {
+            libc::poll(
+                &mut poll_fd,
+                1,
+                runner::CANCEL_POLL.as_millis() as libc::c_int,
+            )
+        };
+        if ready < 0 {
+            let err = io::Error::last_os_error();
+            if err.kind() != io::ErrorKind::Interrupted {
+                return Err(err);
+            }
+        } else if ready > 0
+            && poll_fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "the run client is gone",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Whether the run's client has closed its end of the socket.
