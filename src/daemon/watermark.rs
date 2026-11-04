@@ -52,9 +52,10 @@ impl Progress {
 
 /// In-memory high-water marks, shared by every connection and run worker.
 ///
-/// All access happens while the caller holds the vault write lock (see
-/// `record_use` and `revoke_grants`), which serializes daemon writes; the mutex
-/// is still needed because the accept loop and the run workers are different
+/// Every read of the vault records what it saw, under the write lock or not:
+/// a save is an atomic rename of a complete file, so a lock-free read sees a
+/// state that was or is on disk, and recording can only raise a mark. The
+/// mutex is needed because the accept loop and the run workers are different
 /// threads.
 #[derive(Debug, Default)]
 pub struct GrantWatermarks {

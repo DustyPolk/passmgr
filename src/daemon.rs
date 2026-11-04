@@ -436,8 +436,15 @@ pub fn run(
     install_signal_handlers()?;
     detach_session();
 
+    // The furthest grant progress this process has seen. In memory on purpose:
+    // a marker file can be rolled back like the vault, and only the running
+    // daemon can notice a rollback (SECURITY.md limit 7, TODO R.44). Every
+    // read of the vault records what it saw, this first one included.
+    let watermarks = GrantWatermarks::new();
     // Prove the key opens this vault now, then drop the plaintext.
-    drop(Vault::open_with_key(vault_path, key.as_slice())?);
+    let vault = Vault::open_with_key(vault_path, key.as_slice())?;
+    watermarks.record(vault.grants());
+    drop(vault);
 
     let socket = DaemonSocket::bind_at(RuntimePaths::at(runtime_dir))?;
     socket.listener().set_nonblocking(true)?;
@@ -450,10 +457,6 @@ pub fn run(
     // per connection) because the proof arrives on the human's connection and
     // the write that spends it arrives on another one.
     let mut approvals = presence::Approvals::new();
-    // The furthest grant progress this process has seen. In memory on purpose:
-    // a marker file can be rolled back like the vault, and only the running
-    // daemon can notice a rollback (SECURITY.md limit 7, TODO R.44).
-    let watermarks = GrantWatermarks::new();
 
     let mut last_activity = Instant::now();
     // A `lock` connection whose answer is deferred until the key is gone.
@@ -883,12 +886,17 @@ fn describe_entry(
 /// `list` capability, and refuses a vault whose grant state went backwards
 /// (TODO R.44). No credential is looked at here, so the answer does not depend
 /// on which entries exist.
+///
+/// What was read is recorded first, whatever the answer: a revocation the
+/// daemon only ever saw while denying a read is still one it has seen, and
+/// recording never lowers a mark.
 fn metadata_grant<'v>(
     vault: &'v Vault,
     token: &GrantToken,
     watermarks: &GrantWatermarks,
     now: u64,
 ) -> Result<&'v Grant, ResponseError> {
+    watermarks.record(vault.grants());
     let token_hash = token.hash();
     let grant = vault
         .grants()
@@ -917,7 +925,9 @@ fn metadata_grant<'v>(
 /// Revocation is the one write **not** refused on a vault whose grant state
 /// regressed (TODO R.44): a rollback must not be able to disable the kill
 /// switch, and a revocation only ever removes access. Recording it never
-/// lowers the watermark.
+/// lowers the watermark. The state that was read is recorded before any early
+/// return, so a revocation made by another process and seen here only as a
+/// no-op is remembered too.
 fn revoke_grants(
     path: &Path,
     key: &LockedKey,
@@ -927,6 +937,7 @@ fn revoke_grants(
 ) -> Result<u32, ResponseError> {
     let mut vault = Vault::open_with_key_for_update(path, key.as_slice())
         .map_err(|_| ResponseError::Internal)?;
+    watermarks.record(vault.grants());
     let targets: Vec<GrantId> = match request {
         GrantRevokeRequest::Id(id) => {
             if vault.grant(id).is_none() {

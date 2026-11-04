@@ -453,8 +453,10 @@ fn client_closed(fd: RawFd) -> bool {
 /// A vault whose grant state went backwards (an older copy was put back) is
 /// refused with `Denied` before anything is authorized or spawned, so a
 /// rollback cannot resurrect a spent use or a cleared revocation while this
-/// daemon is serving (TODO R.44). The mark is only raised after a successful
-/// save, so a failed write does not claim a use the vault never recorded.
+/// daemon is serving (TODO R.44). The state that was read is recorded first,
+/// whatever the outcome, so a revocation seen only while denying a run is
+/// remembered; the use itself is only recorded after a successful save, so a
+/// failed write does not claim a use the vault never recorded.
 ///
 /// The clock is read **after** the write lock is acquired, never before: the
 /// wait can last up to the lock timeout, so a time read earlier would
@@ -506,6 +508,7 @@ where
     let Some(now) = unix_now() else {
         return Err(RecordError::Internal);
     };
+    watermarks.record(vault.grants());
     if watermarks.check(vault.grants()).is_err() {
         // Fail closed without consuming anything: the file on disk has
         // regressed, so the daemon cannot trust its grant state.

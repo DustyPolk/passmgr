@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use passmgr::crypto;
 use passmgr::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope};
 use passmgr::protocol::{
-    GrantRevokeRequest, MAX_CHUNK_BYTES, Request, Response, ResponseError, RunExit, RunFrame,
+    GrantRevokeRequest, ListRequest, MAX_CHUNK_BYTES, Request, Response, ResponseError, RunExit,
+    RunFrame,
 };
 use passmgr::store::{self, Credential};
 use passmgr::vault::Vault;
@@ -282,6 +283,94 @@ fn restoring_an_older_vault_cannot_clear_a_revocation() {
         Response::Locked
     );
     assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+/// Revoke every grant on disk behind the daemon's back, as `pm grant revoke`
+/// in another process would.
+fn revoke_on_disk(fixture: &Fixture) {
+    let vault = Vault::open_with_key(&fixture.vault, fixture.key.as_slice()).expect("open vault");
+    let credentials = vault.list().to_vec();
+    let mut grants = vault.grants().to_vec();
+    for grant in &mut grants {
+        grant.revoke(unix_now()).expect("revoke");
+    }
+    rewrite_vault(fixture, &credentials, &grants);
+}
+
+/// Put `snapshot` (taken before the revocation) back and prove the daemon
+/// still refuses to run with the grant, then stop it.
+fn assert_rollback_is_refused(fixture: &Fixture, child: &mut std::process::Child, snapshot: &[u8]) {
+    let socket = fixture.socket();
+    fs::write(&fixture.vault, snapshot).expect("restore older vault");
+    let (frames, raw) = read_run(
+        &socket,
+        &fixture.token,
+        &fixture.run_request("API_KEY", &["/bin/true"]),
+    );
+    assert_eq!(frames, vec![RunFrame::Error(ResponseError::Denied)]);
+    assert!(
+        !raw.windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes())
+    );
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    assert!(wait_for_exit(child, WAIT).success());
+}
+
+/// SECURITY.md limit 7 promises that a revocation this daemon has seen cannot
+/// be rolled back. Seeing one at startup counts: the daemon opens the vault
+/// to verify its key before it serves anything.
+#[test]
+fn a_revocation_seen_at_startup_survives_a_rollback() {
+    let fixture = Fixture::new();
+    let snapshot = fs::read(&fixture.vault).expect("snapshot vault");
+    revoke_on_disk(&fixture);
+    let mut child = fixture.start();
+    assert_rollback_is_refused(&fixture, &mut child, &snapshot);
+}
+
+/// A revocation that only ever reached this daemon as a no-op `grant_revoke`
+/// (nothing to change, nothing saved) is still one it has seen.
+#[test]
+fn a_revocation_seen_as_a_no_op_revoke_survives_a_rollback() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let snapshot = fs::read(&fixture.vault).expect("snapshot vault");
+    revoke_on_disk(&fixture);
+    assert_eq!(
+        request(
+            &fixture.socket(),
+            &fixture.token,
+            &Request::GrantRevoke(GrantRevokeRequest::All)
+        ),
+        Response::GrantRevoked { revoked: 0 }
+    );
+    assert_rollback_is_refused(&fixture, &mut child, &snapshot);
+}
+
+/// A revocation that this daemon only saw while denying a metadata read is
+/// still one it has seen.
+#[test]
+fn a_revocation_seen_by_a_denied_list_survives_a_rollback() {
+    let fixture = Fixture::with_capabilities(Capabilities::RUN.union(Capabilities::LIST));
+    let mut child = fixture.start();
+    let snapshot = fs::read(&fixture.vault).expect("snapshot vault");
+    revoke_on_disk(&fixture);
+    assert_eq!(
+        request(
+            &fixture.socket(),
+            &fixture.token,
+            &Request::List(ListRequest {
+                tags: Vec::new(),
+                query: None,
+                grant: fixture.grant.clone(),
+            })
+        ),
+        Response::Error(ResponseError::Denied)
+    );
+    assert_rollback_is_refused(&fixture, &mut child, &snapshot);
 }
 
 fn unix_now() -> u64 {
