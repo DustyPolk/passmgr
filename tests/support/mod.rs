@@ -421,3 +421,20 @@ pub fn stderr_bytes(frames: &[RunFrame]) -> Vec<u8> {
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+}
+
+/// Replace the vault's contents without changing the container header, so the
+/// running daemon's key still opens it (the salt and KDF parameters are kept).
+pub fn rewrite_vault(fixture: &Fixture, credentials: &[Credential], grants: &[Grant]) {
+    let plaintext = store::encode(credentials, grants).expect("encode store");
+    let template = fs::read(&fixture.vault).expect("read vault");
+    let container = crypto::encrypt_with_key(&plaintext, fixture.key.as_slice(), &template)
+        .expect("encrypt vault");
+    fs::write(&fixture.vault, &container).expect("write vault");
+}

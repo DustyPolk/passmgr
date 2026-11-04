@@ -11,28 +11,9 @@ use support::*;
 
 use std::fs;
 
-use passmgr::crypto;
 use passmgr::grant::{Capabilities, Grant, GrantSpec, Scope};
 use passmgr::protocol::{EnvBinding, Request, Response, ResponseError, RunFrame};
-use passmgr::store::{self, Credential};
 use passmgr::vault::Vault;
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs()
-}
-
-/// Replace the vault's contents without changing the container header, so the
-/// running daemon's key still opens it (the salt and KDF parameters are kept).
-fn rewrite_vault(fixture: &Fixture, credentials: &[Credential], grants: &[Grant]) {
-    let plaintext = store::encode(credentials, grants).expect("encode store");
-    let template = fs::read(&fixture.vault).expect("read vault");
-    let container = crypto::encrypt_with_key(&plaintext, fixture.key.as_slice(), &template)
-        .expect("encrypt vault");
-    fs::write(&fixture.vault, &container).expect("write vault");
-}
 
 #[test]
 fn a_run_injects_and_redacts_every_binding() {
