@@ -21,12 +21,9 @@ pub fn encode_lower(bytes: &[u8]) -> String {
 
 /// [`encode_lower`] for secret bytes: the text is wiped on drop.
 pub fn encode_lower_zeroizing(bytes: &[u8]) -> Zeroizing<String> {
-    let mut text = Zeroizing::new(String::with_capacity(bytes.len() * 2));
-    for byte in bytes {
-        text.push(char::from(DIGITS[usize::from(byte >> 4)]));
-        text.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
-    }
-    text
+    // `encode_lower` sizes the string exactly, so it never reallocates and
+    // leaves no unwiped partial copy behind.
+    Zeroizing::new(encode_lower(bytes))
 }
 
 /// Fill `out` from exactly `out.len() * 2` lowercase hex digits. `None` on any
