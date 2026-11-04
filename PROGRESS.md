@@ -1,3 +1,36 @@
+## 2026-11-03 — Wipe every buffer the wire codec copies a request into (TODO R.50c)
+
+- `src/protocol/codec.rs`: `encode`/`encode_body` return `Zeroizing<Vec<u8>>`.
+  A new `zeroize_json` overwrites every `String` in the encoder's `Value`
+  envelope and in the decoder's parsed tree before either is freed; object keys
+  are deliberately skipped (protocol field names, never a secret, and
+  `serde_json::Map` exposes no mutable access). The decoded `run.grant` hex
+  lives in a `Zeroizing<String>`.
+- `FrameDecoder`: `next_frame` copies the body out, then moves any following
+  frame down with `copy_within` and zeroizes the stale tail before truncating.
+  `Vec::drain` left the taken frame's bytes in the allocation whenever nothing
+  followed it — the common single-request-per-connection case. `Drop` now
+  zeroizes the buffer. A `#[cfg(test)] written` high-water mark and
+  `written_bytes()` accessor let a test read the region past `len` without UB.
+- `src/daemon/run.rs::read_request`: the reused 4 KiB stack chunk is wiped
+  after each `push`; it held the raw request including the grant-token hex.
+- `src/client.rs` needed no edit: it only ever used the returned frame.
+- Tests: `src/protocol/tests.rs` adds `a_taken_frame_is_wiped_from_the_decoder_buffer`
+  and `taking_a_frame_zeroes_the_stale_tail_behind_the_next_one` (both fail with
+  `drain`), and `tests/secret_copies.rs` adds
+  `the_wire_codec_leaves_no_copy_of_the_token_in_freed_memory`, which runs
+  encode -> push -> next_request under the freed-block allocator scan and needs
+  0 hits (it reports 1 when the envelope wipe is removed).
+- Docs: `DECISIONS.md` (Daemon and protocol) and `SECURITY.md` limit 6 now name
+  what is wiped and the two residues that are not ours: kernel socket buffers,
+  and JSON object keys.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, full
+  `cargo test` all pass; `cargo audit` unavailable (skipped).
+- **Next iteration must know:** the allocator scan looks for the *hex* of
+  `WIRE_TOKEN_BYTES` (`r50c-wire-token-canary-000000001`) via a `OnceLock`
+  needle set before the window opens; do not reuse that byte string. `R.50c`
+  closes the R.50 split — R.51 (docs drift) is now the first open item.
+
 ## 2026-11-03 — Wipe the passmgr-owned copies of an injected value (TODO R.50b)
 
 - `src/redact.rs`: `Redactor::push` now grows the overlap window through a new

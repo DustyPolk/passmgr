@@ -11,7 +11,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::grant::{AccessRequest, Denied, GrantId, Target, UpdateError};
 use crate::protocol::{self, FrameDecoder, ProtocolError, ResponseError, RunFrame};
@@ -393,7 +393,12 @@ pub(super) fn read_request(
                     }
                 });
             }
-            Ok(read) => decoder.push(&chunk[..read])?,
+            Ok(read) => {
+                decoder.push(&chunk[..read])?;
+                // The stack buffer holds the raw request, grant-token hex
+                // included; the next `read` overwrites only its front.
+                chunk[..read].zeroize();
+            }
             Err(err)
                 if matches!(
                     err.kind(),

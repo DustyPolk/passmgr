@@ -5,7 +5,7 @@
 //! block for the test's canary, so a buffer dropped without being wiped is
 //! observed even though no public API can show it.
 //!
-//! Two properties, both deterministic:
+//! Three properties, all deterministic:
 //!
 //! 1. The redactor's buffers (`src/redact.rs`) - the secret copy, the overlap
 //!    window and its growth - are all wiped. A `run` whose child echoes the
@@ -17,6 +17,11 @@
 //!    residue in `SECURITY.md` limit 6. Measuring the baseline instead of
 //!    pinning a count keeps the test meaningful across Rust versions while
 //!    still failing if passmgr adds a copy of its own.
+//!
+//! 3. The wire codec (TODO R.50c) wipes every buffer it copies a request into.
+//!    A frame carries the session-token hex, and a `run` frame carries the
+//!    grant-token hex; `pmd` is long-lived, so a frame freed unwiped hands a
+//!    usable token to anything that can read its heap.
 //!
 //! Each measurement has its own canary and counter, and the watched windows
 //! are serialized behind a mutex, so parallel test threads cannot attribute a
@@ -30,10 +35,12 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
+use passmgr::protocol::{self, FrameDecoder, Request};
 use passmgr::redact::Redactor;
 use passmgr::runner::{self, Stop};
+use passmgr::token::SessionToken;
 
 /// Canary injected into the redactor-only test.
 const REDACT_CANARY: &[u8] = b"r50b-redact-canary-0001";
@@ -43,11 +50,18 @@ const RUN_CANARY: &[u8] = b"r50b-run-canary-0000002";
 const BASELINE_CANARY: &[u8] = b"r50b-base-canary-000003";
 /// Environment variable the canary is injected as.
 const ENV_NAME: &str = "PASSMGR_TEST_SECRET";
+/// Bytes of the session token used by the wire-codec test. Its hex encoding is
+/// what a frame carries, so the needle below is derived from it.
+const WIRE_TOKEN_BYTES: [u8; 32] = *b"r50c-wire-token-canary-000000001";
 
 static WATCHING: AtomicBool = AtomicBool::new(false);
 static REDACT_HITS: AtomicUsize = AtomicUsize::new(0);
 static RUN_HITS: AtomicUsize = AtomicUsize::new(0);
 static BASELINE_HITS: AtomicUsize = AtomicUsize::new(0);
+static WIRE_HITS: AtomicUsize = AtomicUsize::new(0);
+/// The token hex to look for in freed blocks. Set once, before any watched
+/// window opens; reading a `OnceLock` in the allocator allocates nothing.
+static WIRE_NEEDLE: OnceLock<Vec<u8>> = OnceLock::new();
 
 /// Serializes the watched windows: the counters are process-wide.
 static WATCH_LOCK: Mutex<()> = Mutex::new(());
@@ -73,6 +87,15 @@ fn scan(ptr: *mut u8, len: usize) {
         let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
         if bytes.windows(probe.len()).any(|window| window == probe) {
             counter.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    if let Some(needle) = WIRE_NEEDLE.get() {
+        if len >= needle.len() {
+            // SAFETY: same block and bounds as above.
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+            if bytes.windows(needle.len()).any(|window| window == needle) {
+                WIRE_HITS.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 }
@@ -255,5 +278,32 @@ fn a_run_leaves_no_more_copies_than_the_spawn_itself() {
         "passmgr left more copies of the value than std::process::Command does \
          ({hits} freed blocks against a baseline of {baseline}); see SECURITY.md \
          limit 6 and wipe the new buffer"
+    );
+}
+
+/// The whole encode -> decode path must leave no copy of the session-token hex
+/// in freed memory: the frame, the encoder's JSON tree, the decoder's buffer,
+/// the frame body it returns and the decoder's tree are all wiped.
+#[test]
+fn the_wire_codec_leaves_no_copy_of_the_token_in_freed_memory() {
+    let token = SessionToken::from_bytes(&WIRE_TOKEN_BYTES).expect("fixed token");
+    // The needle is allocated before the window opens and lives until the
+    // process exits, so it is never itself scanned.
+    let needle = WIRE_NEEDLE.get_or_init(|| token.to_hex().as_bytes().to_vec());
+
+    let (_, hits) = count_releases(&WIRE_HITS, || {
+        let frame = protocol::encode(&token, &Request::Ping).expect("encode");
+        let mut decoder = FrameDecoder::new();
+        decoder.push(&frame).expect("push");
+        let request = decoder.next_request().expect("decode").expect("request");
+        assert!(request.token().matches(&token));
+    });
+
+    assert_eq!(
+        hits,
+        0,
+        "the wire codec left the token hex {} times in freed memory; see \
+         SECURITY.md limit 6",
+        needle.len()
     );
 }

@@ -1135,7 +1135,7 @@ Rules that apply to every item:
       Test: the allocator-scan test as its own integration binary reports 0
       (or documents the accepted residue).
 
-- [ ] **R.50c Grant tokens are copied into plain buffers on both sides of the
+- [x] **R.50c Grant tokens are copied into plain buffers on both sides of the
       socket and never zeroized.** (Split from R.50(b).)
       Grant-token hex is copied into plain `String`/`Vec` buffers on both
       sides: `src/protocol/codec.rs:192,228,41-44`, `src/client.rs:147-148`,
@@ -1146,6 +1146,21 @@ Rules that apply to every item:
       buffer on drain/drop; or, where that is impractical, list the residual
       copies in `SECURITY.md` limit 6.
       Test: a `FrameDecoder` unit test sees a zeroed buffer after `next_frame`.
+      Done: `protocol::encode` and `encode_body` return `Zeroizing<Vec<u8>>`;
+      a new `zeroize_json` overwrites every string in the encoder's envelope
+      and the decoder's parsed tree (object keys are left: they are protocol
+      field names, never a secret); the decoded `run.grant` hex is
+      `Zeroizing`; `FrameDecoder::next_frame` copies the frame out, moves any
+      following frame down with `copy_within` and zeroizes the stale tail
+      (`drain` used to leave it), and `Drop` zeroizes the buffer;
+      `daemon::run::read_request` wipes its stack chunk after each `push`.
+      `client.rs` needed no change: it only used the returned frame.
+      Tests: two `src/protocol/tests.rs` cases read the decoder's own buffer
+      through a test-only `written_bytes` accessor and require it to be zero
+      (both fail with the old `drain`), and
+      `tests/secret_copies.rs::the_wire_codec_leaves_no_copy_of_the_token_in_freed_memory`
+      runs encode -> push -> next_request under the freed-block allocator scan
+      and requires zero hits (1 hit with the envelope wipe removed).
 
 - [ ] **R.51 More docs drift beyond R.32.**
       `DECISIONS.md:420-421` says the daemon's only vault write is

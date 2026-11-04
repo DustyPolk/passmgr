@@ -9,8 +9,17 @@
 //! Everything here is pure: no I/O, and every input is treated as
 //! attacker-controlled (the declared length is range-checked before any slice
 //! or allocation is made from it).
+//!
+//! # The frame bytes carry the session and grant tokens
+//!
+//! Every encoded request contains the session-token hex and some contain the
+//! grant-token hex, so the buffers this module hands out are `Zeroizing` and
+//! every copy it makes internally is overwritten before it is freed
+//! (TODO R.50c). `pmd` is long-lived; a freed 200-byte frame would otherwise
+//! leave a usable token in its allocator for the rest of the session.
 
 use serde_json::{Map, Value, json};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{
     AuthenticatedRequest, GrantCreateRequest, GrantRevokeRequest, LENGTH_PREFIX_BYTES,
@@ -29,7 +38,10 @@ use crate::token::SessionToken;
 /// Fails with [`ProtocolError::InvalidRequest`] if the request violates the
 /// field bounds, and with [`ProtocolError::MessageTooLarge`] if the encoded
 /// body would exceed [`MAX_MESSAGE_BYTES`].
-pub fn encode(token: &SessionToken, request: &Request) -> Result<Vec<u8>, ProtocolError> {
+pub fn encode(
+    token: &SessionToken,
+    request: &Request,
+) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
     validate_request(request)?;
     let body = encode_body(token, request)?;
     if body.len() > MAX_MESSAGE_BYTES {
@@ -38,7 +50,7 @@ pub fn encode(token: &SessionToken, request: &Request) -> Result<Vec<u8>, Protoc
             max: MAX_MESSAGE_BYTES,
         });
     }
-    let mut frame = Vec::with_capacity(LENGTH_PREFIX_BYTES + body.len());
+    let mut frame = Zeroizing::new(Vec::with_capacity(LENGTH_PREFIX_BYTES + body.len()));
     frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
     frame.extend_from_slice(&body);
     Ok(frame)
@@ -70,6 +82,19 @@ pub struct FrameDecoder {
     /// Declared body length of the frame at the front of `buffer`, once the
     /// prefix has been seen and validated.
     expected: Option<usize>,
+    /// Highest length `buffer` has ever had, so a test can read the bytes a
+    /// taken frame left behind (they are outside `buffer`'s current length but
+    /// were all written by `push`). Test-only: it is never needed at runtime.
+    #[cfg(test)]
+    written: usize,
+}
+
+impl Drop for FrameDecoder {
+    fn drop(&mut self) {
+        // The buffer holds whatever the peer sent, which includes the token
+        // hex of every frame not yet taken.
+        self.buffer.zeroize();
+    }
 }
 
 impl FrameDecoder {
@@ -91,6 +116,10 @@ impl FrameDecoder {
             });
         }
         self.buffer.extend_from_slice(bytes);
+        #[cfg(test)]
+        {
+            self.written = self.written.max(self.buffer.len());
+        }
         if self.expected.is_none() && self.buffer.len() >= LENGTH_PREFIX_BYTES {
             let length = read_length(&self.buffer);
             check_length(length)?;
@@ -105,7 +134,12 @@ impl FrameDecoder {
     }
 
     /// Take the next complete frame body, if one is buffered.
-    pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, ProtocolError> {
+    ///
+    /// The returned copy zeroizes on drop, and the frame's bytes are wiped out
+    /// of the decoder's own buffer before the buffer is shrunk: `Vec::drain`
+    /// would move the following frame down and leave the taken frame's tail in
+    /// the allocation, reachable by nothing but a heap inspection.
+    pub fn next_frame(&mut self) -> Result<Option<Zeroizing<Vec<u8>>>, ProtocolError> {
         if self.buffer.len() < LENGTH_PREFIX_BYTES {
             return Ok(None);
         }
@@ -122,8 +156,12 @@ impl FrameDecoder {
         if self.buffer.len() < end {
             return Ok(None);
         }
-        let body = self.buffer[LENGTH_PREFIX_BYTES..end].to_vec();
-        self.buffer.drain(..end);
+        let body = Zeroizing::new(self.buffer[LENGTH_PREFIX_BYTES..end].to_vec());
+        let old_len = self.buffer.len();
+        let remaining = old_len - end;
+        self.buffer.copy_within(end..old_len, 0);
+        self.buffer[remaining..old_len].zeroize();
+        self.buffer.truncate(remaining);
         self.expected = None;
         Ok(Some(body))
     }
@@ -135,6 +173,17 @@ impl FrameDecoder {
             Some(body) => decode_body(&body).map(Some),
             None => Ok(None),
         }
+    }
+
+    /// Every byte this decoder has ever written into its buffer, including the
+    /// stale tail beyond the current length. Used only by the test that proves
+    /// a taken frame is wiped.
+    #[cfg(test)]
+    pub(crate) fn written_bytes(&self) -> &[u8] {
+        // SAFETY: `written <= capacity` (it is a maximum of past lengths) and
+        // every byte in `0..written` was written by `push`, so the range is
+        // initialized and inside the one allocation `buffer` owns.
+        unsafe { std::slice::from_raw_parts(self.buffer.as_ptr(), self.written) }
     }
 }
 
@@ -179,7 +228,10 @@ pub(super) fn split_frame(frame: &[u8]) -> Result<(&[u8], &[u8]), ProtocolError>
     Ok((&frame[LENGTH_PREFIX_BYTES..end], &frame[end..]))
 }
 
-fn encode_body(token: &SessionToken, request: &Request) -> Result<Vec<u8>, ProtocolError> {
+fn encode_body(
+    token: &SessionToken,
+    request: &Request,
+) -> Result<Zeroizing<Vec<u8>>, ProtocolError> {
     let request = match request {
         Request::Ping => json!({ "type": "ping" }),
         Request::Lock => json!({ "type": "lock" }),
@@ -220,16 +272,38 @@ fn encode_body(token: &SessionToken, request: &Request) -> Result<Vec<u8>, Proto
         }),
     };
     let token = token.to_hex();
-    let envelope = json!({
+    let mut envelope = json!({
         "version": PROTOCOL_VERSION,
         "token": token.as_str(),
         "request": request,
     });
-    serde_json::to_vec(&envelope).map_err(|err| ProtocolError::MalformedJson(err.to_string()))
+    let body = Zeroizing::new(
+        serde_json::to_vec(&envelope)
+            .map_err(|err| ProtocolError::MalformedJson(err.to_string()))?,
+    );
+    // `serde_json` copies the token hex into the tree, and the tree outlives
+    // the serialized bytes, so wipe it before it is freed.
+    zeroize_json(&mut envelope);
+    Ok(body)
+}
+
+/// Overwrite every string a JSON value owns.
+///
+/// `serde_json::Value` has no `Zeroize` impl: its strings are ordinary heap
+/// allocations, freed unwiped if we simply drop the tree. Object *keys* are
+/// left alone deliberately: they are protocol field names, never a secret, and
+/// `Map` exposes no mutable access to them.
+fn zeroize_json(value: &mut Value) {
+    match value {
+        Value::String(text) => text.zeroize(),
+        Value::Array(items) => items.iter_mut().for_each(zeroize_json),
+        Value::Object(map) => map.values_mut().for_each(zeroize_json),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
 }
 
 fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
-    let value: Value = serde_json::from_slice(body)
+    let mut value: Value = serde_json::from_slice(body)
         .map_err(|err| ProtocolError::MalformedJson(err.to_string()))?;
     let envelope = value
         .as_object()
@@ -268,14 +342,18 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
     let decoded = match kind {
         "ping" => Request::Ping,
         "lock" => Request::Lock,
-        "run" => Request::Run(RunRequest {
-            env: required_string(request, "env")?,
-            reference: required_string(request, "ref")?,
-            command: required_string_array(request, "command")?,
-            cwd: required_string(request, "cwd")?,
-            grant: GrantToken::from_hex(&required_string(request, "grant")?)
-                .map_err(|_| invalid_grant_field())?,
-        }),
+        "run" => {
+            // The grant-token hex is a bearer credential even in its encoded
+            // form: keep it zeroizing rather than in a plain `String`.
+            let grant = Zeroizing::new(required_string(request, "grant")?);
+            Request::Run(RunRequest {
+                env: required_string(request, "env")?,
+                reference: required_string(request, "ref")?,
+                command: required_string_array(request, "command")?,
+                cwd: required_string(request, "cwd")?,
+                grant: GrantToken::from_hex(&grant).map_err(|_| invalid_grant_field())?,
+            })
+        }
         "challenge" => Request::Challenge,
         "prove" => Request::Prove(ProveRequest {
             nonce: ChallengeNonce::from_hex(&required_string(request, "nonce")?)
@@ -293,6 +371,9 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
             ));
         }
     };
+    // The decoded request owns zeroizing copies of anything secret; the parsed
+    // tree still holds plain strings (the session-token hex among them).
+    zeroize_json(&mut value);
     validate_request(&decoded)?;
     Ok(AuthenticatedRequest::new(token, decoded))
 }

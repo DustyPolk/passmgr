@@ -200,11 +200,20 @@ buffers out or clear them, and the only alternative is to replace
 `Command`/`Child` with a hand-written `posix_spawn` plus pipe, process-group
 and reap handling (TODO R.50b considered and rejected that for the risk).
 Everything passmgr owns *is* wiped: the redaction window including when it
-grows, the reader's raw-output buffer, and the redactors themselves. A `run`
-never creates such a copy for itself — `tests/secret_copies.rs` runs under an
-allocator that scans every freed block for a canary and requires that a `run`
+grows, the reader's raw-output buffer, the redactors themselves, and every
+buffer the wire codec copies a request into (the frame it returns, the encoder's
+JSON tree, the decoder's buffer and the body it hands back — TODO R.50c). A
+`run` never creates such a copy for itself — `tests/secret_copies.rs` runs under
+an allocator that scans every freed block for a canary and requires that a `run`
 leaves no more secret-bearing freed blocks than a bare `std::process::Command`
-spawn of the same child leaves.
+spawn of the same child leaves, and that encoding then decoding a request
+leaves no copy of the session-token hex at all.
+
+Two more residues are not ours to wipe: the kernel's socket buffers, which hold
+a frame until both ends have copied it out, and object *keys* in a parsed JSON
+tree, which are protocol field names and never a secret. The socket lives in
+the 0700 runtime directory and is peer-UID checked, so reading it needs the same
+same-user access that reading the session file needs.
 
 ### 7. An older `vault.dat` can be put back
 

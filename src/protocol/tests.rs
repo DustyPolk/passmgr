@@ -17,7 +17,7 @@ fn test_token() -> SessionToken {
 /// Request-only views of [`super::encode`]/[`super::decode`], so each
 /// transport test can assert on the request without restating the token.
 /// Tests that care about the token call `super::decode` directly.
-fn encode(request: &Request) -> Result<Vec<u8>, ProtocolError> {
+fn encode(request: &Request) -> Result<zeroize::Zeroizing<Vec<u8>>, ProtocolError> {
     super::encode(&test_token(), request)
 }
 
@@ -825,4 +825,46 @@ fn errors_do_not_echo_request_field_values() {
     let text = error.to_string();
     assert!(text.contains("run.ref"), "unexpected message: {text}");
     assert!(!text.contains(secret_like));
+}
+
+#[test]
+fn a_taken_frame_is_wiped_from_the_decoder_buffer() {
+    // The decoder's buffer holds the session-token hex until the frame is
+    // taken; `Vec::drain` would leave the consumed bytes in the allocation.
+    // (TODO R.50c)
+    let frame = encode(&run_request()).expect("encode");
+    let mut decoder = FrameDecoder::new();
+    decoder.push(&frame).expect("push");
+    let taken = decoder.next_frame().expect("frame").expect("body");
+    assert_eq!(
+        taken.len() + crate::protocol::LENGTH_PREFIX_BYTES,
+        frame.len()
+    );
+    assert_eq!(decoder.buffered(), 0);
+    assert!(
+        decoder.written_bytes().iter().all(|&byte| byte == 0),
+        "the taken frame is still in the decoder buffer"
+    );
+}
+
+#[test]
+fn taking_a_frame_zeroes_the_stale_tail_behind_the_next_one() {
+    // A second frame keeps its bytes live, but the tail the first frame left
+    // past the new length must be zero: that is exactly the region `drain`
+    // used to leave the taken frame in.
+    let first = encode(&run_request()).expect("encode");
+    let second = encode(&Request::Ping).expect("encode");
+    let mut decoder = FrameDecoder::new();
+    decoder.push(&first).expect("push first");
+    decoder.push(&second).expect("push second");
+    decoder.next_frame().expect("frame").expect("body");
+    let live = decoder.buffered();
+    assert_eq!(live, second.len());
+    assert_eq!(&decoder.written_bytes()[..live], &second[..]);
+    assert!(
+        decoder.written_bytes()[live..]
+            .iter()
+            .all(|&byte| byte == 0),
+        "the taken frame's tail is still in the decoder buffer"
+    );
 }

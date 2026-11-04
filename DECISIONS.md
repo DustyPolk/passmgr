@@ -285,6 +285,15 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   then the child's full output pipe) instead of having the run truncated by a
   write timeout; `lock`, a signal and a closed peer are still observed within
   one slice (TODO R.49).
+- Every buffer the codec copies a request into is wiped, because a request
+  carries the session-token hex and (for `run`) the grant-token hex, and `pmd`
+  is long-lived: `encode` returns `Zeroizing<Vec<u8>>`, the JSON envelope and
+  the decoded tree have their strings overwritten before they are freed,
+  `FrameDecoder` zeroizes the bytes of a taken frame and its whole buffer on
+  drop, and the daemon's fixed read chunk is wiped after each `push` (TODO
+  R.50c). Object *keys* in the parsed tree are not wiped: they are protocol
+  field names, never a secret. The kernel's socket buffers are outside the
+  process and are not wiped; see `SECURITY.md` limit 6.
 - Envelope: `{"version":4,"token":"<64 lowercase hex>","request":{...}}`. The
   token is parsed before the request. Version 4 added the required
   `run.grant`; a version-3 daemon would ignore it and authorize with the
