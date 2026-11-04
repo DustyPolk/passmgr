@@ -23,13 +23,13 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use passmgr::protocol::{self, Request, Response, RunExit, RunFrame};
+use passmgr::protocol::{
+    self, MAX_RUN_OUTPUT_BYTES, Request, Response, RunExit, RunFinished, RunFrame,
+};
 
-/// Bytes the child writes to stdout: 64 x 64 KiB = 4 MiB, well past any socket
-/// buffer, so a client that does not read keeps the child blocked on its pipe.
-const OUTPUT_BYTES: usize = 64 * 65536;
-
-/// A child that writes [`OUTPUT_BYTES`] to stdout and nothing to stderr.
+/// A child that writes 64 x 64 KiB = 4 MiB to stdout and nothing to stderr:
+/// far past any socket buffer (and past the 1 MiB relay cap), so a client that
+/// does not read keeps the daemon blocked on its socket.
 const WRITE_FOUR_MIB: &str = "dd if=/dev/zero bs=65536 count=64 2>/dev/null";
 
 /// How long a reader may refuse to read in the first test. Longer than the old
@@ -41,14 +41,15 @@ fn run_stream(fixture: &Fixture) -> UnixStream {
     stream
         .set_read_timeout(Some(WAIT))
         .expect("set read timeout");
+    // Ask for the largest cap so the pause exercises playback of a megabyte,
+    // not the (much smaller) default. The child still writes 4 MiB, so the
+    // daemon must drain past the cap to let it exit.
+    let mut request = fixture.run_request("API_KEY", &["/bin/sh", "-c", WRITE_FOUR_MIB]);
+    if let Request::Run(run) = &mut request {
+        run.limits.max_output_bytes = MAX_RUN_OUTPUT_BYTES;
+    }
     stream
-        .write_all(
-            &protocol::encode(
-                &fixture.token,
-                &fixture.run_request("API_KEY", &["/bin/sh", "-c", WRITE_FOUR_MIB]),
-            )
-            .expect("encode request"),
-        )
+        .write_all(&protocol::encode(&fixture.token, &request).expect("encode request"))
         .expect("write request");
     stream
 }
@@ -125,12 +126,20 @@ fn a_paused_reader_gets_every_byte_and_the_exit_frame() {
 
     let frames = read_until_eof(stream);
     let stdout = stdout_bytes(&frames);
+    // The daemon caps the relayed stream at 1 MiB; every byte below the cap
+    // must still arrive, and the cap must be reported, not silently applied.
     assert_eq!(
         stdout.len(),
-        OUTPUT_BYTES,
-        "the paused reader lost child output"
+        MAX_RUN_OUTPUT_BYTES as usize,
+        "the paused reader lost relayed child output"
     );
-    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert_eq!(
+        frames.last(),
+        Some(&RunFrame::Exit(RunFinished {
+            stdout_truncated: true,
+            ..RunFinished::exited(RunExit::Code(0))
+        }))
+    );
     assert!(
         !stdout
             .windows(SECRET.len())
@@ -170,7 +179,7 @@ fn lock_is_not_delayed_by_a_stalled_run_client() {
     let frames = read_until_eof(stream);
     assert_ne!(
         frames.last(),
-        Some(&RunFrame::Exit(RunExit::Code(0))),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0)))),
         "a cancelled run claimed to finish"
     );
     assert!(wait_for_exit(&mut child, WAIT).success());

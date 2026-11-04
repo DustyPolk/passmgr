@@ -41,7 +41,7 @@ use passmgr::client::{self, RunOutcome};
 #[cfg(unix)]
 use passmgr::error::EXIT_OUTPUT_CLOSED;
 #[cfg(unix)]
-use passmgr::protocol::{EnvBinding, ResponseError, RunExit, RunFrame, RunRequest};
+use passmgr::protocol::{EnvBinding, ResponseError, RunExit, RunFrame, RunLimits, RunRequest};
 #[cfg(unix)]
 use passmgr::runner;
 #[cfg(unix)]
@@ -169,6 +169,7 @@ fn run_via_daemon(
             name: env,
             reference: reference.clone(),
         }],
+        limits: RunLimits::default(),
         plain_env: Vec::new(),
         command,
         cwd: cwd_text,
@@ -209,7 +210,7 @@ fn run_via_daemon(
     drop(err);
 
     match outcome {
-        RunOutcome::Exited(exit) => Ok(ExitCode::from(status_code(exit))),
+        RunOutcome::Exited(finished) => Ok(ExitCode::from(status_code(finished.exit))),
         RunOutcome::Refused(error) => Err(refusal(error, &reference)),
     }
 }
@@ -288,6 +289,7 @@ fn run_locally(
         &[],
         cwd,
         &inherited,
+        runner::Limits::NONE,
         &stop,
         |frame| match frame {
             RunFrame::Stdout(bytes) => relay(&mut out, &bytes, &output_closed),
@@ -301,7 +303,8 @@ fn run_locally(
     );
 
     match result {
-        Ok(exit) => {
+        Ok(finished) => {
+            let exit = finished.exit;
             let termination = match exit {
                 RunExit::Code(code) => audit::Termination::Code(code),
                 RunExit::Signal(signal) => audit::Termination::Signal(signal),

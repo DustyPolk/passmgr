@@ -45,6 +45,7 @@ fn binding(name: &str) -> EnvBinding {
 
 fn run_request() -> Request {
     Request::Run(RunRequest {
+        limits: Default::default(),
         env: vec![binding("API_KEY")],
         plain_env: Vec::new(),
         command: vec![
@@ -483,6 +484,7 @@ fn oversized_encoded_message_is_rejected() {
         command.push("x".repeat(4096));
     }
     let request = Request::Run(RunRequest {
+        limits: Default::default(),
         env: vec![binding("API_KEY")],
         plain_env: Vec::new(),
         command,
@@ -625,45 +627,6 @@ fn unknown_request_types_are_rejected() {
 }
 
 #[test]
-fn requests_have_no_plaintext_field() {
-    // Structural proof: the only keys on the wire are these. A future
-    // request type must not introduce a value field.
-    let ping_frame = encode(&Request::Ping).expect("encode");
-    let ping: Value = serde_json::from_slice(&ping_frame[4..]).expect("json");
-    let keys: Vec<&str> = ping
-        .as_object()
-        .expect("object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(keys, ["request", "token", "version"]);
-    // The token is the only envelope value, and it is the client's own
-    // token, not anything read from the vault.
-    let token = ping["token"].as_str().expect("token string");
-    assert_eq!(token, TOKEN_HEX);
-    let keys: Vec<&str> = ping["request"]
-        .as_object()
-        .expect("object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(keys, ["type"]);
-
-    let run_frame = encode(&run_request()).expect("encode");
-    let run: Value = serde_json::from_slice(&run_frame[4..]).expect("json");
-    let keys: Vec<&str> = run["request"]
-        .as_object()
-        .expect("object")
-        .keys()
-        .map(String::as_str)
-        .collect();
-    assert_eq!(
-        keys,
-        ["command", "cwd", "env", "grant", "plain_env", "type"]
-    );
-}
-
-#[test]
 fn env_name_syntax_is_shared_with_the_cli() {
     // The CLI pre-checks with `valid_env_name`; both paths must agree so a
     // name can never pass the client and fail at the daemon (or vice
@@ -685,6 +648,7 @@ fn env_name_syntax_is_shared_with_the_cli() {
 #[test]
 fn run_fields_are_validated() {
     let base = RunRequest {
+        limits: Default::default(),
         env: vec![binding("OK")],
         plain_env: Vec::new(),
         command: vec!["/bin/true".into()],
@@ -693,26 +657,32 @@ fn run_fields_are_validated() {
     };
     let cases = [
         RunRequest {
+            limits: Default::default(),
             env: Vec::new(),
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             env: vec![binding("")],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             env: vec![binding("1BAD")],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             env: vec![binding("BAD-NAME")],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             env: vec![binding(&"A".repeat(MAX_ENV_NAME_BYTES + 1))],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             env: vec![
                 EnvBinding {
                     name: "DUP".into(),
@@ -726,11 +696,13 @@ fn run_fields_are_validated() {
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             env: vec![binding("OK")],
             plain_env: vec![("OK".into(), "plain".into())],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             env: vec![EnvBinding {
                 name: "OK".into(),
                 reference: String::new(),
@@ -738,6 +710,7 @@ fn run_fields_are_validated() {
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             env: vec![EnvBinding {
                 name: "OK".into(),
                 reference: "not-a-reference".into(),
@@ -745,6 +718,7 @@ fn run_fields_are_validated() {
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             env: (0..=MAX_ENV_BINDINGS)
                 .map(|index| EnvBinding {
                     name: format!("V{index}"),
@@ -754,60 +728,74 @@ fn run_fields_are_validated() {
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             plain_env: vec![("1BAD".into(), "x".into())],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             plain_env: vec![("OK_PLAIN".into(), "x".repeat(MAX_ENV_VALUE_BYTES + 1))],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             plain_env: vec![("OK_PLAIN".into(), "x\0y".into())],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             command: vec![],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             command: vec![String::new()],
             ..base.clone()
         },
         // A bare program name would be resolved through the daemon's own
         // PATH, which belongs to the shell that ran `unlock`.
         RunRequest {
+            limits: Default::default(),
             command: vec!["true".into()],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             command: vec!["bin/true".into()],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             command: vec!["/bin/true".into(); MAX_ARGS + 1],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             command: vec!["/bin/true".into(), "x".repeat(MAX_ARG_BYTES + 1)],
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             cwd: String::new(),
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             cwd: "tmp".into(),
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             cwd: "./tmp".into(),
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             cwd: "/tmp/\0/x".into(),
             ..base.clone()
         },
         RunRequest {
+            limits: Default::default(),
             cwd: format!("/{}", "x".repeat(MAX_PATH_BYTES)),
             ..base.clone()
         },
@@ -988,3 +976,5 @@ fn taking_a_frame_zeroes_the_stale_tail_behind_the_next_one() {
 mod describe;
 mod list;
 mod run_env;
+mod run_limits;
+mod wire;

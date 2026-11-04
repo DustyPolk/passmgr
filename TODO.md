@@ -109,12 +109,14 @@ keeps the dependency tree small and stdout hygiene under our control.
       Note: all bindings are authorized before any use is recorded, so a
       denied set spends nothing; a multi-binding run still writes one audit
       record and names its first reference (TODO 4.11 covers richer audit).
-- [ ] **4.5c Run timeout and output caps.** `timeout_secs` (1..=600) kills the
+- [x] **4.5c Run timeout and output caps.** `timeout_secs` (1..=600) kills the
       child's process group with `SIGTERM` then `SIGKILL` after a 2 s grace;
       per-stream output is capped (default 256 KiB, at most 1 MiB) with
       `stdout_truncated`/`stderr_truncated` set. Tests: a grandchild is killed
       on timeout, a large stream is capped, the terminal frame carries the
       flags, and the grace period is polled, not slept on blindly.
+      *Caps count redacted bytes, and the local human run is deliberately
+      unbounded; the terminal frame is now `RunFinished` (flags + `timed_out`).*
 - [ ] **4.5d MCP `run_with_credentials`.** Validate the tool input, call the
       daemon `run` request, map frames to the result object, and never echo a
       secret or raw child bytes outside the capped/redacted streams. Refuse

@@ -1,3 +1,48 @@
+## 2026-11-04 — Run timeout and per-stream output caps (TODO 4.5c)
+
+- `RunRequest` gained `limits: {timeout_secs, max_output_bytes}` (defaults 600 s,
+  256 KiB; checked 1..=600 and 1..=1 MiB on encode *and* decode; missing/null
+  fields decode to the defaults, so older clients keep working without a
+  protocol-version bump). `src/daemon/run.rs` clamps again before handing
+  `runner::Limits` to the runner.
+- `src/runner.rs`: `Limits {timeout, max_output_bytes}` plus `Limits::NONE`.
+  The deadline starts at the spawn and is checked while relaying and while
+  waiting for the leader; expiry aborts like a cancel (SIGTERM, then poll
+  `leader_exited` for up to a 2 s grace, then SIGKILL the group) and returns a
+  finished run instead of an error. `terminate` now polls with
+  `CANCEL_POLL` rather than sleeping the whole grace.
+- Output is capped in `emit_chunks` **after** redaction, per stream; the
+  reader keeps draining and discarding until EOF, so a capped child cannot
+  block on a full pipe. `RunFrame::Exit` now carries `RunFinished`
+  (`exit` + `timed_out` + both truncated flags); decode treats absent flags as
+  false, so an older peer's terminal frame still decodes.
+- The local human run (`src/cli/run.rs`) passes `Limits::NONE`: it must not
+  silently kill or truncate a command the human is watching. Only the daemon
+  path, which serves agents, is bounded.
+- Tests: protocol limits round-trip/defaults/bounds/non-numeric; exit-flag
+  round-trip, legacy frames, non-boolean flags; runner timeout flags + polled
+  grace (< 2.5 s for a 1 s deadline), grandchild killed, per-stream caps,
+  post-redaction cut of a repeating canary, and 200 KB past the cap still
+  drained (child exits 3, no SIGPIPE); daemon e2e that a capped run relays 16
+  bytes with the flag and a 30 s child times out in ~1 s while `pmd` stays up.
+  Moved response tests to `src/protocol/response/tests.rs` and the wire-shape
+  test to `src/protocol/tests/wire.rs` to stay under 1,000 lines.
+  `tests/run_backpressure.rs` now asks for the 1 MiB cap; its 4 MiB child is
+  intentionally capped, and the test still proves paused-reader playback and
+  that `lock` interrupts a stalled run.
+- Docs: `MCP.md` (defaults, post-redaction cap, timed-out terminal frame) and
+  `README.md` (daemon runs bounded, local human run not). `DECISIONS.md` records
+  both lasting choices.
+- Gate: fmt, clippy `-D warnings`, `cargo test` pass (`cargo audit` skipped:
+  not installed).
+- **Next iteration must know:** TODO 4.5d builds the MCP tool on top of these
+  fields; `RunOutcome::Exited` now holds `RunFinished`, so read `.exit` before
+  matching `RunExit`. A slow client that stops reading can delay the deadline
+  because daemon emit blocks on the socket write (pre-existing backpressure
+  edge, bounded by the daemon's write timeout); a timeout that fires after the
+  leader already exited still reports `timed_out: true` with the real status.
+- NEEDS HUMAN REVIEW: none.
+
 ## 2026-11-04 — Daemon env injection for several credentials (TODO 4.5b)
 
 - `RunRequest.env` is now `Vec<EnvBinding>` (`{name, ref}`) plus

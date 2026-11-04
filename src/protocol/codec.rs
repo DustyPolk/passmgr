@@ -22,9 +22,10 @@ use serde_json::{Map, Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    AuthenticatedRequest, DescribeRequest, EnvBinding, GrantCreateRequest, GrantRevokeRequest,
-    LENGTH_PREFIX_BYTES, ListRequest, MAX_BUFFERED_BYTES, MAX_MESSAGE_BYTES, MAX_TYPE_CHARS,
-    PROTOCOL_VERSION, ProtocolError, ProveRequest, Request, RunRequest, validate_request,
+    AuthenticatedRequest, DEFAULT_RUN_OUTPUT_BYTES, DEFAULT_RUN_TIMEOUT_SECS, DescribeRequest,
+    EnvBinding, GrantCreateRequest, GrantRevokeRequest, LENGTH_PREFIX_BYTES, ListRequest,
+    MAX_BUFFERED_BYTES, MAX_MESSAGE_BYTES, MAX_TYPE_CHARS, PROTOCOL_VERSION, ProtocolError,
+    ProveRequest, Request, RunLimits, RunRequest, validate_request,
 };
 use crate::grant::{
     Capabilities, GRANT_ID_BYTES, GrantId, GrantToken, TOKEN_HASH_BYTES, TokenHash,
@@ -288,6 +289,8 @@ fn encode_body(
             }).collect::<Map<String, Value>>(),
             "command": run.command,
             "cwd": run.cwd,
+            "timeout_secs": run.limits.timeout_secs,
+            "max_output_bytes": run.limits.max_output_bytes,
             "grant": run.grant.to_hex().as_str(),
         }),
         Request::List(list) => json!({
@@ -477,6 +480,7 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
             let (env, plain_env) = decode_run_env(request)?;
             Request::Run(RunRequest {
                 env,
+                limits: decode_run_limits(request)?,
                 plain_env,
                 command: required_string_array(request, "command")?,
                 cwd: required_string(request, "cwd")?,
@@ -629,6 +633,32 @@ fn decode_run_env(request: &Map<String, Value>) -> Result<DecodedRunEnv, Protoco
         }
     };
     Ok((env, plain_env))
+}
+
+/// Decode the optional `run` resource limits, applying the documented defaults
+/// when a legacy client omits them. Bounds are checked by `validate_request`.
+fn decode_run_limits(request: &Map<String, Value>) -> Result<RunLimits, ProtocolError> {
+    Ok(RunLimits {
+        timeout_secs: optional_u32(request, "timeout_secs", DEFAULT_RUN_TIMEOUT_SECS)?,
+        max_output_bytes: optional_u32(request, "max_output_bytes", DEFAULT_RUN_OUTPUT_BYTES)?,
+    })
+}
+
+fn optional_u32(
+    object: &Map<String, Value>,
+    key: &str,
+    default: u32,
+) -> Result<u32, ProtocolError> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(value) => {
+            let number = value
+                .as_u64()
+                .ok_or_else(|| ProtocolError::MalformedJson(format!("'{key}' must be a number")))?;
+            u32::try_from(number)
+                .map_err(|_| ProtocolError::InvalidRequest(format!("'{key}' is too large")))
+        }
+    }
 }
 
 fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, ProtocolError> {

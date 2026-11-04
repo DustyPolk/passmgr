@@ -17,7 +17,7 @@ use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use passmgr::protocol::{self, FrameDecoder, RunExit, RunFrame};
+use passmgr::protocol::{self, FrameDecoder, RunExit, RunFinished, RunFrame};
 
 /// How long to watch for output that must be held back. The child pauses for
 /// two seconds, so a leak shows up well inside this window.
@@ -118,7 +118,10 @@ fn exercise(guess: &str) {
 
     let expected = [SENTINEL, guess.as_bytes(), b" tail"].concat();
     assert_eq!(relay.stdout(), expected, "frames: {:?}", relay.frames);
-    assert_eq!(relay.frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert_eq!(
+        relay.frames.last(),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
+    );
     assert!(
         !relay
             .raw

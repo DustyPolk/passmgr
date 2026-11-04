@@ -359,7 +359,18 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   with child output and a `run` stream can never answer `pong`. `RunStream`
   refuses any frame after a terminal one.
 - An `exit` frame carries either `code` (0..=255) or `signal` (1..=127), never
-  both; "killed by signal N" stays distinct from exit code 128+N.
+  both; "killed by signal N" stays distinct from exit code 128+N. Since TODO
+  4.5c it also carries `timed_out`, `stdout_truncated` and `stderr_truncated`
+  (missing on an older peer's frame means false); a timed-out run reports the
+  signal that ended it and is still an allowed, audited use.
+- A `run` is bounded by `timeout_secs` (1..=600, default 600) and
+  `max_output_bytes` per stream (1 B..1 MiB, default 256 KiB). The cap counts
+  bytes **after** redaction, so a cut can never split a secret, and the reader
+  keeps draining the pipe after the cap so the child cannot block. Timeout
+  kills the whole process group with SIGTERM, polls for up to 2 s, then
+  SIGKILLs; it never sleeps the full grace unconditionally. The local,
+  human-only `run` path uses no deadline and no cap, because a human watching
+  their own terminal asked for the command's real output.
 - `not_found` also covers a reference outside the caller's scope, so a client
   cannot use the daemon as an existence oracle for refs it may not use. `pmd`
   also decides the credential-independent checks (grant state, `run`

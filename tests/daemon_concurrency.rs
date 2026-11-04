@@ -267,6 +267,7 @@ fn revocation_succeeds_while_runs_record_their_use() {
         let requests: Vec<Request> = (0..8)
             .map(|_| {
                 Request::Run(RunRequest {
+                    limits: Default::default(),
                     env: vec![passmgr::protocol::EnvBinding {
                         name: "API_KEY".into(),
                         reference: fixture.reference.clone(),

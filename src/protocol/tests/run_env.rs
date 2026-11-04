@@ -33,6 +33,7 @@ fn a_legacy_single_env_run_decodes_as_one_binding() {
 #[test]
 fn several_bindings_and_plain_env_round_trip_in_order() {
     let request = Request::Run(RunRequest {
+        limits: Default::default(),
         env: vec![
             EnvBinding {
                 name: "FIRST".into(),

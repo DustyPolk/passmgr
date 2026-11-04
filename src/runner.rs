@@ -22,7 +22,13 @@
 //! The child receives the value in its environment, so a deliberately hostile
 //! child can still exfiltrate it by writing a file, opening a socket, or
 //! letting another same-user process read `/proc/<pid>/environ`. Redaction
-//! protects the *relayed output* only. Per-call timeouts belong to TODO 4.5.
+//! protects the *relayed output* only.
+//!
+//! [`Limits`] bounds a run in wall-clock time and per-stream relayed bytes.
+//! The byte cap is applied *after* redaction (a cap that cut raw child output
+//! could split a secret in half) and the reader keeps draining the pipe after
+//! the cap is reached, so a child that keeps writing cannot block forever.
+//! A run that exceeds its deadline has its whole process group terminated.
 //!
 //! # Stopping a run
 //!
@@ -59,11 +65,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::protocol::{MAX_CHUNK_BYTES, MAX_SIGNAL, RunExit, RunFrame};
+use crate::protocol::{MAX_CHUNK_BYTES, MAX_SIGNAL, RunExit, RunFinished, RunFrame};
 use crate::redact::Redactor;
 
 /// Environment variables the child inherits from the daemon's own environment.
@@ -82,12 +88,33 @@ const INHERITED_PREFIXES: &[&str] = &["LC_"];
 pub(crate) const CANCEL_POLL: Duration = Duration::from_millis(100);
 
 /// How long a killed process group gets to act on SIGTERM before SIGKILL.
-const TERM_GRACE: Duration = Duration::from_millis(100);
+const TERM_GRACE: Duration = Duration::from_secs(2);
 
 /// Read size per pipe read. Deliberately smaller than
 /// [`MAX_CHUNK_BYTES`]: redaction can expand output (one marker per match),
 /// and [`emit_chunks`] splits anything larger before it becomes a frame.
 const READ_CHUNK: usize = 8 * 1024;
+
+/// Resource limits for one run.
+///
+/// Both are optional so the local, human-facing `pm run` path can relay a
+/// command exactly as the terminal would. The daemon always sets both, from
+/// the request; only the daemon path ever touches an agent.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// Wall-clock deadline, measured from the spawn. `None` means no deadline.
+    pub timeout: Option<Duration>,
+    /// Per-stream cap on relayed redacted bytes. `None` means no cap.
+    pub max_output_bytes: Option<usize>,
+}
+
+impl Limits {
+    /// No deadline and no cap: only for a human watching their own terminal.
+    pub const NONE: Self = Self {
+        timeout: None,
+        max_output_bytes: None,
+    };
+}
 
 /// True when the daemon must never set this variable to a secret.
 ///
@@ -218,6 +245,11 @@ enum Message {
 /// relative argument means what the caller meant; the daemon never runs a
 /// child in its own (unlock-time) directory.
 ///
+/// `limits` bounds the run: [`Limits::timeout`] is measured from the spawn
+/// and [`Limits::max_output_bytes`] caps each relayed stream after redaction.
+/// Exceeding either is reported through the returned [`RunFinished`], not as
+/// an error: the grant was used and the child ran.
+///
 /// `emit` is called on this thread only, in output order per stream, and must
 /// write the frame before returning. Exactly one [`RunFrame::Exit`] is emitted
 /// on success; an error is returned instead when the run could not finish.
@@ -233,9 +265,10 @@ pub fn execute<F>(
     plain_env: &[(String, String)],
     cwd: &Path,
     inherited: &[(OsString, OsString)],
+    limits: Limits,
     stop: &Stop<'_>,
     mut emit: F,
-) -> Result<RunExit, RunError>
+) -> Result<RunFinished, RunError>
 where
     F: FnMut(RunFrame) -> io::Result<()>,
 {
@@ -322,6 +355,9 @@ where
     let mut child = command.spawn().map_err(RunError::Spawn)?;
     drop(command);
     let pgid = child.id() as libc::pid_t;
+    let deadline = limits.timeout.map(|timeout| Instant::now() + timeout);
+    let stdout_truncated = Arc::new(AtomicBool::new(false));
+    let stderr_truncated = Arc::new(AtomicBool::new(false));
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
@@ -335,7 +371,20 @@ where
     ] {
         let redactor = Redactor::new_many(&redact_values);
         let reader_stop = Arc::clone(&readers_stop);
-        match spawn_reader(reader, redactor, sender.clone(), is_stderr, reader_stop) {
+        let truncated = if is_stderr {
+            Arc::clone(&stderr_truncated)
+        } else {
+            Arc::clone(&stdout_truncated)
+        };
+        match spawn_reader(
+            reader,
+            redactor,
+            sender.clone(),
+            is_stderr,
+            reader_stop,
+            limits.max_output_bytes,
+            truncated,
+        ) {
             Ok(handle) => readers.push(handle),
             Err(err) => {
                 drop(sender);
@@ -346,7 +395,7 @@ where
     }
     drop(sender);
 
-    let emit_result = relay(&receiver, stop, &mut emit);
+    let emit_result = relay(&receiver, stop, deadline, &mut emit);
     match emit_result {
         Relay::Finished => {
             // Both pipes reached EOF. The child may have closed them and kept
@@ -370,9 +419,20 @@ where
                         signal_group(pgid, libc::SIGKILL);
                         let status = child.wait();
                         join_all(readers);
-                        return status.map(exit_status).map_err(RunError::Output);
+                        return status
+                            .map(|status| RunFinished {
+                                exit: exit_status(status),
+                                timed_out: false,
+                                stdout_truncated: stdout_truncated.load(Ordering::SeqCst),
+                                stderr_truncated: stderr_truncated.load(Ordering::SeqCst),
+                            })
+                            .map_err(RunError::Output);
                     }
                     Ok(false) => {
+                        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                            let status = abort(&mut child, receiver, readers, &readers_stop);
+                            return timed_out(status, &stdout_truncated, &stderr_truncated);
+                        }
                         if stop.requested() {
                             abort(&mut child, receiver, readers, &readers_stop);
                             return Err(RunError::Cancelled);
@@ -394,7 +454,31 @@ where
             abort(&mut child, receiver, readers, &readers_stop);
             Err(RunError::Cancelled)
         }
+        Relay::TimedOut => {
+            let status = abort(&mut child, receiver, readers, &readers_stop);
+            timed_out(status, &stdout_truncated, &stderr_truncated)
+        }
     }
+}
+
+/// Turn "the deadline killed the group" into a finished run.
+///
+/// The exit status is whatever the kill produced (normally `SIGTERM`), so a
+/// caller can report both `timed_out` and the signal. A status that cannot be
+/// collected is an output-path error: the run is over, but pretending it had
+/// a status would be a lie.
+fn timed_out(
+    status: Option<ExitStatus>,
+    stdout_truncated: &AtomicBool,
+    stderr_truncated: &AtomicBool,
+) -> Result<RunFinished, RunError> {
+    let status = status.ok_or_else(|| RunError::Output(io::Error::other("the child was lost")))?;
+    Ok(RunFinished {
+        exit: exit_status(status),
+        timed_out: true,
+        stdout_truncated: stdout_truncated.load(Ordering::SeqCst),
+        stderr_truncated: stderr_truncated.load(Ordering::SeqCst),
+    })
 }
 
 /// How the output loop ended.
@@ -405,6 +489,8 @@ enum Relay {
     OutputError(io::Error),
     /// The daemon is shutting down or the client is gone.
     Cancelled,
+    /// The run's wall-clock deadline fired.
+    TimedOut,
 }
 
 /// Forward frames until both readers are done, the caller fails, or the
@@ -417,17 +503,25 @@ enum Relay {
 /// still holds the output pipes: the run must keep waiting for the pipes, and
 /// a cancel may arrive minutes later. The `Finished` path below reaps the
 /// child only after both pipes reached EOF.
-fn relay<F>(receiver: &Receiver<Message>, stop: &Stop<'_>, emit: &mut F) -> Relay
+fn relay<F>(
+    receiver: &Receiver<Message>,
+    stop: &Stop<'_>,
+    deadline: Option<Instant>,
+    emit: &mut F,
+) -> Relay
 where
     F: FnMut(RunFrame) -> io::Result<()>,
 {
     let mut finished = 0usize;
     loop {
         // Observe a stop even while a noisy child keeps the channel full: a
-        // `lock`, a signal or a vanished client must not wait for the output
-        // to pause.
+        // `lock`, a signal, a vanished client or an expired deadline must not
+        // wait for the output to pause.
         if stop.requested() {
             return Relay::Cancelled;
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Relay::TimedOut;
         }
         match receiver.recv_timeout(CANCEL_POLL) {
             Ok(Message::Frame(frame)) => {
@@ -488,15 +582,16 @@ fn abort(
     receiver: Receiver<Message>,
     readers: Vec<JoinHandle<()>>,
     stop: &AtomicBool,
-) {
+) -> Option<ExitStatus> {
     // Tell the readers first: a process that escaped the group could still
     // hold a pipe open, and the reader must not wait for an EOF that never
     // comes. They observe the flag within one `CANCEL_POLL` slice.
     stop.store(true, Ordering::SeqCst);
-    terminate(child);
+    let status = terminate(child);
     // Dropping the receiver unblocks readers waiting to send.
     drop(receiver);
     join_all(readers);
+    status
 }
 
 /// Kill the child's whole process group, then reap the child.
@@ -508,15 +603,21 @@ fn abort(
 /// The leader is deliberately not reaped between the two signals: while it is
 /// a zombie its pid -- and therefore the process-group id -- cannot be reused,
 /// so the group signal can never hit an unrelated group.
-fn terminate(child: &mut Child) {
+fn terminate(child: &mut Child) -> Option<ExitStatus> {
     let pgid = child.id() as libc::pid_t;
     signal_group(pgid, libc::SIGTERM);
-    std::thread::sleep(TERM_GRACE);
+    // Poll instead of sleeping the whole grace period: a child that exits on
+    // SIGTERM should not make every cancel take two seconds. `WNOWAIT` keeps
+    // the leader a zombie, so the group id stays valid for the SIGKILL below.
+    let grace_end = Instant::now() + TERM_GRACE;
+    while Instant::now() < grace_end && !matches!(leader_exited(pgid), Ok(true) | Err(_)) {
+        std::thread::sleep(CANCEL_POLL);
+    }
     signal_group(pgid, libc::SIGKILL);
     // `setpgid` runs in the child, so a stop that races the spawn would miss
     // the group; kill the leader directly too so `wait` cannot block.
     let _ = child.kill();
-    let _ = child.wait();
+    child.wait().ok()
 }
 
 fn signal_group(pgid: libc::pid_t, signal: libc::c_int) {
@@ -541,12 +642,15 @@ trait OutputPipe: Read + AsRawFd {}
 impl<T: Read + AsRawFd> OutputPipe for T {}
 
 /// Start one pipe reader.
+#[allow(clippy::too_many_arguments)]
 fn spawn_reader(
     mut reader: Box<dyn OutputPipe + Send>,
     mut redactor: Redactor,
     sender: SyncSender<Message>,
     is_stderr: bool,
     stop: Arc<AtomicBool>,
+    cap: Option<usize>,
+    truncated: Arc<AtomicBool>,
 ) -> io::Result<JoinHandle<()>> {
     let fd = reader.as_raw_fd();
     std::thread::Builder::new()
@@ -557,6 +661,7 @@ fn spawn_reader(
         })
         .spawn(move || {
             let mut buffer = [0u8; READ_CHUNK];
+            let mut remaining = cap;
             loop {
                 if !wait_readable(fd, &stop) {
                     // The run is being aborted: the client is gone or the
@@ -570,7 +675,7 @@ fn spawn_reader(
                         // The raw child output may contain the value; do not
                         // leave it in this thread's stack while the relay runs.
                         buffer[..read].zeroize();
-                        if !emit_chunks(&sender, output, is_stderr) {
+                        if !emit_chunks(&sender, output, is_stderr, &mut remaining, &truncated) {
                             return;
                         }
                     }
@@ -579,7 +684,7 @@ fn spawn_reader(
                 }
             }
             let tail = redactor.finish();
-            let _ = emit_chunks(&sender, tail, is_stderr);
+            let _ = emit_chunks(&sender, tail, is_stderr, &mut remaining, &truncated);
             let _ = sender.send(Message::Done);
         })
 }
@@ -619,7 +724,28 @@ fn wait_readable(fd: RawFd, stop: &AtomicBool) -> bool {
 
 /// Split redacted bytes into protocol-sized frames. Returns false when the
 /// receiving side is gone, so the reader can stop.
-fn emit_chunks(sender: &SyncSender<Message>, data: Vec<u8>, is_stderr: bool) -> bool {
+///
+/// `remaining` is this stream's byte budget. Once it is exhausted the reader
+/// still drains the pipe (the caller does that) but nothing more is relayed;
+/// `truncated` records that the cap changed the result. The budget is applied
+/// to already-redacted bytes, so a cut can never fall inside a secret.
+fn emit_chunks(
+    sender: &SyncSender<Message>,
+    data: Vec<u8>,
+    is_stderr: bool,
+    remaining: &mut Option<usize>,
+    truncated: &AtomicBool,
+) -> bool {
+    let mut data = data.as_slice();
+    if let Some(left) = *remaining {
+        if data.len() > left {
+            truncated.store(true, Ordering::SeqCst);
+            data = &data[..left];
+            *remaining = Some(0);
+        } else {
+            *remaining = Some(left - data.len());
+        }
+    }
     for chunk in data.chunks(MAX_CHUNK_BYTES) {
         let frame = if is_stderr {
             RunFrame::Stderr(chunk.to_vec())

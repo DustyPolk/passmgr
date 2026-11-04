@@ -149,8 +149,8 @@ use codec::split_frame;
 pub use codec::{FrameDecoder, decode, encode};
 pub use entry::Entry;
 pub use response::{
-    Response, ResponseError, RunExit, RunFrame, RunStream, decode_response, decode_run_frame,
-    encode_response, encode_run_frame,
+    Response, ResponseError, RunExit, RunFinished, RunFrame, RunStream, decode_response,
+    decode_run_frame, encode_response, encode_run_frame,
 };
 
 /// The protocol version carried in every envelope. Bump it when a change is
@@ -205,6 +205,16 @@ pub const MAX_CHUNK_BYTES: usize = 16 * 1024;
 /// below this on every supported platform; anything else is refused rather
 /// than passed to a caller that may use it as an exit status.
 pub const MAX_SIGNAL: u8 = 127;
+
+/// Default deadline for one `run`, in seconds (ten minutes).
+pub const DEFAULT_RUN_TIMEOUT_SECS: u32 = 600;
+/// Largest accepted `run.timeout_secs`. A request can never make the daemon
+/// keep a child alive longer than this.
+pub const MAX_RUN_TIMEOUT_SECS: u32 = 600;
+/// Default per-stream cap on relayed (already redacted) output: 256 KiB.
+pub const DEFAULT_RUN_OUTPUT_BYTES: u32 = 256 * 1024;
+/// Largest accepted per-stream output cap: 1 MiB.
+pub const MAX_RUN_OUTPUT_BYTES: u32 = 1024 * 1024;
 
 /// How much of an unknown request type is echoed back in an error message.
 pub(super) const MAX_TYPE_CHARS: usize = 32;
@@ -364,6 +374,8 @@ pub struct RunRequest {
     /// Ordered secret bindings, one environment variable each. Order is
     /// preserved on the wire and at least one binding is required.
     pub env: Vec<EnvBinding>,
+    /// Deadline and per-stream output cap for this run.
+    pub limits: RunLimits,
     /// Non-secret variables set after the inherited allowlist and before the
     /// secret bindings. Never redacted, because the agent supplied them.
     pub plain_env: Vec<(String, String)>,
@@ -382,6 +394,7 @@ pub struct RunRequest {
 impl PartialEq for RunRequest {
     fn eq(&self, other: &Self) -> bool {
         self.env == other.env
+            && self.limits == other.limits
             && self.plain_env == other.plain_env
             && self.command == other.command
             && self.cwd == other.cwd
@@ -390,6 +403,25 @@ impl PartialEq for RunRequest {
 }
 
 impl Eq for RunRequest {}
+
+/// Per-run resource limits. Both are policy, never secret data; the daemon
+/// re-clamps them before it spawns anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunLimits {
+    /// Wall-clock deadline for the child and everything it starts.
+    pub timeout_secs: u32,
+    /// Cap on relayed bytes per output stream, applied after redaction.
+    pub max_output_bytes: u32,
+}
+
+impl Default for RunLimits {
+    fn default() -> Self {
+        Self {
+            timeout_secs: DEFAULT_RUN_TIMEOUT_SECS,
+            max_output_bytes: DEFAULT_RUN_OUTPUT_BYTES,
+        }
+    }
+}
 
 /// The `list` payload: which metadata to return, and the grant that allows it.
 ///
@@ -662,6 +694,7 @@ fn validate_request(request: &Request) -> Result<(), ProtocolError> {
     let Request::Run(run) = request else {
         return Ok(());
     };
+    validate_run_limits(&run.limits)?;
     validate_run_env(run)?;
     validate_absolute_path("run.cwd", &run.cwd)?;
     if run.command.is_empty() {
@@ -783,6 +816,22 @@ pub fn valid_env_name(env: &str) -> bool {
     let first = bytes.next().expect("checked non-empty");
     (first.is_ascii_alphabetic() || first == b'_')
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+/// Validate the `run` resource limits. Both are required to be non-zero and
+/// bounded; the defaults are inside these ranges.
+fn validate_run_limits(limits: &RunLimits) -> Result<(), ProtocolError> {
+    if !(1..=MAX_RUN_TIMEOUT_SECS).contains(&limits.timeout_secs) {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "run.timeout_secs must be between 1 and {MAX_RUN_TIMEOUT_SECS}"
+        )));
+    }
+    if !(1..=MAX_RUN_OUTPUT_BYTES).contains(&limits.max_output_bytes) {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "run.max_output_bytes must be between 1 and {MAX_RUN_OUTPUT_BYTES}"
+        )));
+    }
+    Ok(())
 }
 
 /// Validate the whole `run` environment: at least one secret binding, bounded

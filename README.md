@@ -222,6 +222,14 @@ variable. Its stdout and stderr are relayed with an exact, contiguous
 occurrence of the secret replaced by `[REDACTED]`; encoded or transformed
 copies (base64, hex, percent-encoding, case changes) are not replaced —
 redaction is best-effort, not a sandbox (see `SECURITY.md`, limit 3).
+Daemon-backed runs are bounded: the request carries `timeout_secs` (default
+600) and `max_output_bytes` (default 256 KiB per stream, at most 1 MiB). A run
+past its deadline has its whole process group killed (SIGTERM, then SIGKILL
+after 2 s), and output past the cap is dropped after redaction with
+`stdout_truncated`/`stderr_truncated` set in the terminal frame; the daemon
+keeps draining both pipes so the child cannot block. The local human run above
+is not bounded: it relays exactly what the terminal would.
+
 `passmgr` exits with the child's status, or 128+N when the child was killed by
 signal N. If the reader closes passmgr's output pipe (for example
 `passmgr run ... | head -1`), passmgr cancels the run and exits 141: it can no

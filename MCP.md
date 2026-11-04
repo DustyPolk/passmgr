@@ -198,8 +198,8 @@ Input:
   "stdin_ref": "pm://…",                      // optional: secret written to child stdin, then EOF
   "files":  { "KUBECONFIG": "pm://…" },        // optional: secret written to a 0600 temp file; the env var holds its path
   "cwd": "/abs/path",                         // optional, default: the MCP server's cwd
-  "timeout_secs": 60,                         // 1..600
-  "max_output_bytes": 262144                  // per stream, cap 1 MiB
+  "timeout_secs": 60,                         // 1..600, default 600
+  "max_output_bytes": 262144                  // per stream, 1 B..1 MiB, default 262144
 }
 ```
 Output: `{ exit_code: int|null, signal: string|null, timed_out: bool,
@@ -240,7 +240,15 @@ Rules, enforced by the **daemon** (the MCP server is untrusted plumbing):
   are created with `O_EXCL|O_NOFOLLOW` and mode 0600, and unlinked when the
   child exits, including on timeout and on daemon shutdown.
 - On timeout, kill the child's whole process group (SIGTERM, then SIGKILL
-  after 2 s).
+  after 2 s). The terminal frame then has `timed_out: true`, `exit_code: null`
+  and `signal` naming what ended the child (normally `SIGTERM`, `SIGKILL` if
+  the group ignored the grace period). A use that hit its deadline is still a
+  completed use: it is audited, and it is not an `isError` result.
+- `max_output_bytes` caps each relayed stream **after** redaction, so a cut
+  can never expose half a secret. Past the cap the daemon keeps draining the
+  pipe (the child cannot block on a full pipe) but relays nothing more, and
+  the terminal frame sets `stdout_truncated`/`stderr_truncated`. A frame from
+  an older daemon omits the flags; they then read as false.
 
 ### `access_status`  (readOnlyHint, idempotentHint)
 Output: `{ daemon: "unlocked"|"locked"|"not_running", grant: GrantView|null,

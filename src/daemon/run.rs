@@ -11,6 +11,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use zeroize::{Zeroize, Zeroizing};
 
@@ -265,6 +266,22 @@ pub(super) fn serve_run(
         .map(|binding| binding.name.clone())
         .zip(secrets)
         .collect();
+    // The request was validated at decode time; clamp again so a future
+    // caller of `serve_run` cannot hand a child an unbounded run.
+    let limits = runner::Limits {
+        timeout: Some(Duration::from_secs(u64::from(
+            request
+                .limits
+                .timeout_secs
+                .clamp(1, protocol::MAX_RUN_TIMEOUT_SECS),
+        ))),
+        max_output_bytes: Some(
+            request
+                .limits
+                .max_output_bytes
+                .clamp(1, protocol::MAX_RUN_OUTPUT_BYTES) as usize,
+        ),
+    };
     let result = runner::execute(
         &program,
         &request.command[1..],
@@ -272,12 +289,13 @@ pub(super) fn serve_run(
         &request.plain_env,
         Path::new(&request.cwd),
         &inherited,
+        limits,
         &stop,
         |frame| write_client_frame(&mut stream, &frame, &stop),
     );
     match result {
-        Ok(exit) => {
-            let termination = match exit {
+        Ok(finished) => {
+            let termination = match finished.exit {
                 protocol::RunExit::Code(code) => audit::Termination::Code(code),
                 protocol::RunExit::Signal(signal) => audit::Termination::Signal(signal),
             };
@@ -299,7 +317,7 @@ pub(super) fn serve_run(
                 );
                 return;
             }
-            let _ = write_client_frame(&mut stream, &RunFrame::Exit(exit), &stop);
+            let _ = write_client_frame(&mut stream, &RunFrame::Exit(finished), &stop);
         }
         Err(runner::RunError::Spawn(_)) => {
             warn(record(
@@ -775,6 +793,7 @@ mod tests {
             LockedKey::new(unlock_key(&container, master).expect("derive key")).expect("lock key");
 
         let request = protocol::RunRequest {
+            limits: Default::default(),
             env: vec![protocol::EnvBinding {
                 name: "TOKEN".to_owned(),
                 reference: id.to_ref(),

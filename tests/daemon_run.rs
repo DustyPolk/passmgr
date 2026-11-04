@@ -9,11 +9,13 @@ mod support;
 use support::*;
 
 use std::fs;
+use std::time::{Duration, Instant};
 
 use passmgr::crypto;
 use passmgr::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope};
 use passmgr::protocol::{
-    GrantRevokeRequest, MAX_CHUNK_BYTES, Request, Response, ResponseError, RunExit, RunFrame,
+    GrantRevokeRequest, MAX_CHUNK_BYTES, Request, Response, ResponseError, RunExit, RunFinished,
+    RunFrame,
 };
 use passmgr::store::{self, Credential};
 use passmgr::vault::Vault;
@@ -40,7 +42,10 @@ fn run_injects_the_secret_and_redacts_stdout_and_stderr() {
 
     assert_eq!(stdout_bytes(&frames), b"[REDACTED]");
     assert_eq!(stderr_bytes(&frames), b"[REDACTED]");
-    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert_eq!(
+        frames.last(),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
+    );
     assert!(
         !raw.windows(SECRET.len())
             .any(|window| window == SECRET.as_bytes())
@@ -132,7 +137,10 @@ fn run_requires_a_grant_beyond_the_session_token() {
         &fixture.token,
         &fixture.run_request("API_KEY", &["/bin/true"]),
     );
-    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert_eq!(
+        frames.last(),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
+    );
 
     let vault = Vault::open_with_key(&fixture.vault, fixture.key.as_slice()).expect("open vault");
     assert_eq!(vault.grants().len(), 1);
@@ -175,7 +183,10 @@ fn run_stops_at_a_use_limited_grant() {
         &fixture.token,
         &fixture.run_request("API_KEY", &["/bin/true"]),
     );
-    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert_eq!(
+        frames.last(),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
+    );
 
     // The second use exceeds the limit recorded in the vault.
     let (frames, _) = read_run(
@@ -208,7 +219,10 @@ fn restoring_an_older_vault_cannot_restore_a_spent_use() {
         &fixture.token,
         &fixture.run_request("API_KEY", &["/bin/true"]),
     );
-    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert_eq!(
+        frames.last(),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
+    );
 
     fs::write(&fixture.vault, &snapshot).expect("restore older vault");
     let (frames, raw) = read_run(
@@ -506,7 +520,10 @@ fn run_streams_large_output_in_protocol_sized_chunks_and_redacts() {
     assert_eq!(stdout.len(), 40 * 1024 + b"[REDACTED]".len());
     assert!(stdout[..40 * 1024].iter().all(|byte| *byte == b'x'));
     assert_eq!(&stdout[40 * 1024..], b"[REDACTED]");
-    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert_eq!(
+        frames.last(),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
+    );
 
     assert!(
         !raw.windows(secret.len())
@@ -552,7 +569,10 @@ fn the_child_is_spawned_as_the_canonical_program_not_the_request_path() {
     );
 
     assert_eq!(stdout_bytes(&frames), canonical.as_bytes());
-    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert_eq!(
+        frames.last(),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
+    );
 
     assert_eq!(
         request(&socket, &fixture.token, &Request::Lock),
@@ -652,7 +672,10 @@ fn a_symlink_swapped_after_the_allowlist_check_cannot_change_the_program() {
         !loot.exists(),
         "the swapped program ran and captured the injected secret"
     );
-    assert_eq!(frames.last(), Some(&RunFrame::Exit(RunExit::Code(0))));
+    assert_eq!(
+        frames.last(),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
+    );
     assert!(
         !raw.windows(SECRET.len())
             .any(|window| window == SECRET.as_bytes())
@@ -874,7 +897,9 @@ fn concurrent_runs_cannot_exceed_max_uses() {
 
     let ran = results
         .iter()
-        .filter(|frames| frames.last() == Some(&RunFrame::Exit(RunExit::Code(0))))
+        .filter(|frames| {
+            frames.last() == Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
+        })
         .count();
     let denied = results
         .iter()
@@ -892,4 +917,58 @@ fn concurrent_runs_cannot_exceed_max_uses() {
         Response::Locked
     );
     assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+#[test]
+fn run_reports_a_timeout_and_truncation_in_the_terminal_frame() {
+    let fixture = Fixture::new();
+    let child = fixture.start();
+    let socket = fixture.socket();
+
+    // A cap on stdout: the child writes 100 bytes, the daemon relays 16.
+    let mut capped = fixture.run_request("API_KEY", &["/bin/sh", "-c", r#"printf "%0100d" 0"#]);
+    if let Request::Run(run) = &mut capped {
+        run.limits.max_output_bytes = 16;
+    }
+    let (frames, _) = read_run(&socket, &fixture.token, &capped);
+    assert_eq!(stdout_bytes(&frames).len(), 16);
+    let Some(RunFrame::Exit(finished)) = frames.last() else {
+        panic!("expected a terminal frame");
+    };
+    assert!(finished.stdout_truncated);
+    assert!(!finished.stderr_truncated);
+    assert!(!finished.timed_out);
+    assert_eq!(finished.exit, RunExit::Code(0));
+
+    // A one-second deadline on a child that would run for thirty.
+    let mut slow = fixture.run_request("API_KEY", &["/bin/sh", "-c", "sleep 30"]);
+    if let Request::Run(run) = &mut slow {
+        run.limits.timeout_secs = 1;
+    }
+    let started = Instant::now();
+    let (frames, _) = read_run(&socket, &fixture.token, &slow);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "the timeout took {:?}",
+        started.elapsed()
+    );
+    let Some(RunFrame::Exit(finished)) = frames.last() else {
+        panic!("expected a terminal frame");
+    };
+    assert!(finished.timed_out);
+    assert_eq!(finished.exit, RunExit::Signal(libc::SIGTERM as u8));
+
+    // A timed-out run is a completed use, not a daemon failure.
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Ping),
+        Response::Pong
+    );
+    assert_eq!(
+        request(&socket, &fixture.token, &Request::Lock),
+        Response::Locked
+    );
+    let output = child.wait_with_output().expect("wait for pmd");
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(SECRET));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(SECRET));
 }

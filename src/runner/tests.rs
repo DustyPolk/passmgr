@@ -18,7 +18,17 @@ fn collect(
     argv: &[&str],
     env_name: &str,
     secret: &str,
-) -> (Vec<RunFrame>, Result<RunExit, RunError>) {
+) -> (Vec<RunFrame>, Result<RunFinished, RunError>) {
+    collect_with(argv, env_name, secret, Path::new("/"), Limits::NONE)
+}
+
+fn collect_with(
+    argv: &[&str],
+    env_name: &str,
+    secret: &str,
+    cwd: &Path,
+    limits: Limits,
+) -> (Vec<RunFrame>, Result<RunFinished, RunError>) {
     let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
     let env = secret_env(env_name, secret);
     let cancel = AtomicBool::new(false);
@@ -29,8 +39,9 @@ fn collect(
         &argv[1..],
         &env,
         &[],
-        Path::new("/"),
+        cwd,
         &inherited(),
+        limits,
         &stop,
         |frame| {
             frames.push(frame);
@@ -44,6 +55,16 @@ fn stdout_bytes(frames: &[RunFrame]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for frame in frames {
         if let RunFrame::Stdout(data) = frame {
+            bytes.extend_from_slice(data);
+        }
+    }
+    bytes
+}
+
+fn stderr_bytes(frames: &[RunFrame]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for frame in frames {
+        if let RunFrame::Stderr(data) = frame {
             bytes.extend_from_slice(data);
         }
     }
@@ -89,7 +110,7 @@ fn the_child_sees_the_injected_variable() {
         "PM_TEST",
         secret,
     );
-    assert_eq!(result.expect("run"), RunExit::Code(0));
+    assert_eq!(result.expect("run").exit, RunExit::Code(0));
     assert_eq!(stdout_bytes(&frames), b"[REDACTED]");
     assert!(frames.iter().all(|frame| match frame {
         RunFrame::Stdout(data) | RunFrame::Stderr(data) =>
@@ -124,13 +145,14 @@ fn every_secret_is_injected_and_plain_env_is_not_redacted() {
         &plain_env,
         Path::new("/"),
         &inherited(),
+        Limits::NONE,
         &stop,
         |frame| {
             frames.push(frame);
             Ok(())
         },
     );
-    assert_eq!(result.expect("run"), RunExit::Code(0));
+    assert_eq!(result.expect("run").exit, RunExit::Code(0));
     assert_eq!(
         stdout_bytes(&frames),
         b"[REDACTED]|[REDACTED]|visible",
@@ -153,7 +175,7 @@ fn the_injected_variable_is_the_only_secret_and_the_env_is_not_inherited() {
         "PM_TEST",
         "unit-test-secret-5678",
     );
-    assert_eq!(result.expect("run"), RunExit::Code(0));
+    assert_eq!(result.expect("run").exit, RunExit::Code(0));
     let output = String::from_utf8(stdout_bytes(&frames)).expect("utf8");
     assert_eq!(output, "|[REDACTED]");
 }
@@ -167,7 +189,7 @@ fn a_secret_split_across_pipe_reads_is_redacted() {
         "BIG_SECRET",
         &secret,
     );
-    assert_eq!(result.expect("run"), RunExit::Code(0));
+    assert_eq!(result.expect("run").exit, RunExit::Code(0));
     let output = stdout_bytes(&frames);
     assert_eq!(output, b"[REDACTED]");
     assert!(
@@ -188,7 +210,7 @@ fn large_output_is_split_into_protocol_sized_frames() {
         "PM_TEST",
         "unit-test-secret-9012",
     );
-    assert_eq!(result.expect("run"), RunExit::Code(0));
+    assert_eq!(result.expect("run").exit, RunExit::Code(0));
     let stdout: Vec<&Vec<u8>> = frames
         .iter()
         .filter_map(|frame| match frame {
@@ -210,7 +232,7 @@ fn large_output_is_split_into_protocol_sized_frames() {
 #[test]
 fn the_exit_code_is_propagated() {
     let (_frames, result) = collect(&["/bin/sh", "-c", "exit 7"], "PM_TEST", "secret-1234");
-    assert_eq!(result.expect("run"), RunExit::Code(7));
+    assert_eq!(result.expect("run").exit, RunExit::Code(7));
 }
 
 #[test]
@@ -220,7 +242,10 @@ fn a_signalled_child_is_not_reported_as_an_exit_code() {
         "PM_TEST",
         "secret-1234",
     );
-    assert_eq!(result.expect("run"), RunExit::Signal(libc::SIGTERM as u8));
+    assert_eq!(
+        result.expect("run").exit,
+        RunExit::Signal(libc::SIGTERM as u8)
+    );
 }
 
 #[test]
@@ -251,13 +276,14 @@ fn the_child_starts_in_the_callers_working_directory() {
         &[],
         dir.path(),
         &inherited(),
+        Limits::NONE,
         &stop,
         |frame| {
             frames.push(frame);
             Ok(())
         },
     );
-    assert_eq!(result.expect("run"), RunExit::Code(0));
+    assert_eq!(result.expect("run").exit, RunExit::Code(0));
     assert_eq!(stdout_bytes(&frames), b"from-the-cwd");
 }
 
@@ -273,6 +299,7 @@ fn an_invalid_environment_name_is_refused_before_spawning() {
         &[],
         Path::new("/"),
         &inherited(),
+        Limits::NONE,
         &stop,
         |_| Ok(()),
     )
@@ -307,6 +334,7 @@ fn output_errors_and_cancellation_stop_the_child() {
         &[],
         Path::new("/"),
         &inherited(),
+        Limits::NONE,
         &stop,
         |_| Err(io::Error::new(io::ErrorKind::BrokenPipe, "gone")),
     )
@@ -323,6 +351,7 @@ fn output_errors_and_cancellation_stop_the_child() {
         &[],
         Path::new("/"),
         &inherited(),
+        Limits::NONE,
         &stop,
         |_| Ok(()),
     )
@@ -356,6 +385,7 @@ fn a_vanished_client_stops_a_child_that_keeps_its_pipes_open() {
         &[],
         Path::new("/"),
         &inherited(),
+        Limits::NONE,
         &stop,
         |frame| {
             if matches!(frame, RunFrame::Stdout(_)) {
@@ -408,6 +438,7 @@ fn a_vanished_client_stops_a_child_that_closed_its_pipes() {
         &[],
         Path::new("/"),
         &inherited(),
+        Limits::NONE,
         &stop,
         |frame| {
             if matches!(frame, RunFrame::Stdout(_)) {
@@ -452,6 +483,7 @@ fn a_client_that_is_already_gone_starts_no_child() {
         &[],
         Path::new("/"),
         &inherited(),
+        Limits::NONE,
         &stop,
         |_| Ok(()),
     )
@@ -515,6 +547,7 @@ fn cancellation_kills_a_grandchild_that_holds_the_pipes() {
             &[],
             Path::new("/"),
             &inherited(),
+            Limits::NONE,
             &stop,
             |_| Ok(()),
         )
@@ -569,6 +602,7 @@ fn a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes() {
             &[],
             Path::new("/"),
             &inherited(),
+            Limits::NONE,
             &stop,
             |_| Ok(()),
         )
@@ -632,7 +666,7 @@ fn a_background_process_does_not_outlive_a_completed_run() {
         pid_file.display()
     );
     let (frames, result) = collect(&["/bin/sh", "-c", &script], "PM_TEST", "secret-1234");
-    assert_eq!(result.expect("run"), RunExit::Code(0));
+    assert_eq!(result.expect("run").exit, RunExit::Code(0));
     assert!(stdout_bytes(&frames).is_empty());
 
     let grandchild = wait_for_pid_file(&pid_file);
@@ -644,4 +678,156 @@ fn a_background_process_does_not_outlive_a_completed_run() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn a_run_past_its_deadline_is_terminated_and_flagged() {
+    let started = std::time::Instant::now();
+    let (frames, result) = collect_with(
+        &["/bin/sh", "-c", "sleep 30"],
+        "PM_TEST",
+        "secret-1234",
+        Path::new("/"),
+        Limits {
+            timeout: Some(Duration::from_secs(1)),
+            max_output_bytes: None,
+        },
+    );
+    let finished = result.expect("run");
+    assert!(finished.timed_out);
+    assert_eq!(finished.exit, RunExit::Signal(libc::SIGTERM as u8));
+    assert!(!finished.stdout_truncated);
+    assert!(!finished.stderr_truncated);
+    assert!(stdout_bytes(&frames).is_empty());
+    // A SIGTERM-aware child exits during the grace period; waiting out the
+    // full two seconds here would mean `terminate` slept instead of polling.
+    assert!(
+        started.elapsed() < Duration::from_millis(2500),
+        "the timeout took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_timeout_kills_the_whole_process_group() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pid_file = dir.path().join("grandchild.pid");
+    let script = format!("sleep 60 & echo $! > {}; wait", pid_file.display());
+    let (_, result) = collect_with(
+        &["/bin/sh", "-c", &script],
+        "PM_TEST",
+        "secret-1234",
+        dir.path(),
+        Limits {
+            timeout: Some(Duration::from_secs(1)),
+            max_output_bytes: None,
+        },
+    );
+    assert!(result.expect("run").timed_out);
+
+    let grandchild = wait_for_pid_file(&pid_file);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !process_is_gone(grandchild) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "grandchild {grandchild} survived the run timeout"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn output_past_the_cap_is_dropped_and_flagged() {
+    let (frames, result) = collect_with(
+        &["/bin/sh", "-c", r#"printf "%0100d" 0"#],
+        "PM_TEST",
+        "secret-1234",
+        Path::new("/"),
+        Limits {
+            timeout: None,
+            max_output_bytes: Some(16),
+        },
+    );
+    let finished = result.expect("run");
+    assert_eq!(finished.exit, RunExit::Code(0));
+    assert!(!finished.timed_out);
+    assert!(finished.stdout_truncated);
+    assert!(!finished.stderr_truncated);
+    assert_eq!(stdout_bytes(&frames), vec![b'0'; 16]);
+}
+
+#[test]
+fn the_output_cap_is_per_stream() {
+    let (frames, result) = collect_with(
+        &[
+            "/bin/sh",
+            "-c",
+            r#"printf "%0100d" 0; printf "%0100d" 0 >&2"#,
+        ],
+        "PM_TEST",
+        "secret-1234",
+        Path::new("/"),
+        Limits {
+            timeout: None,
+            max_output_bytes: Some(10),
+        },
+    );
+    let finished = result.expect("run");
+    assert!(finished.stdout_truncated);
+    assert!(finished.stderr_truncated);
+    assert_eq!(stdout_bytes(&frames), vec![b'0'; 10]);
+    assert_eq!(stderr_bytes(&frames), vec![b'0'; 10]);
+}
+
+#[test]
+fn the_cap_cuts_redacted_output_never_a_secret() {
+    // The child repeats the secret, so the relayed stream is a run of
+    // markers. The cap is applied after redaction: 40 bytes is exactly four
+    // markers, and no fragment of the secret may appear.
+    let secret = "canary-cap-4c1f8e2d";
+    let (frames, result) = collect_with(
+        &[
+            "/bin/sh",
+            "-c",
+            r#"i=0; while [ $i -lt 20 ]; do printf %s "$PM_TEST"; i=$((i+1)); done"#,
+        ],
+        "PM_TEST",
+        secret,
+        Path::new("/"),
+        Limits {
+            timeout: None,
+            max_output_bytes: Some(40),
+        },
+    );
+    assert!(result.expect("run").stdout_truncated);
+    let output = stdout_bytes(&frames);
+    assert_eq!(output, b"[REDACTED]".repeat(4));
+    assert!(!output.windows(secret.len()).any(|w| w == secret.as_bytes()));
+}
+
+#[test]
+fn reaching_the_cap_keeps_draining_the_pipe() {
+    // More output than a pipe buffer holds, after the cap is reached. If the
+    // reader stopped reading, the child would block or die of SIGPIPE; it
+    // must instead drain to EOF and report its own exit status.
+    let started = std::time::Instant::now();
+    let (frames, result) = collect_with(
+        &["/bin/sh", "-c", "head -c 200000 /dev/zero; exit 3"],
+        "PM_TEST",
+        "secret-1234",
+        Path::new("/"),
+        Limits {
+            timeout: None,
+            max_output_bytes: Some(10),
+        },
+    );
+    let finished = result.expect("run");
+    assert_eq!(finished.exit, RunExit::Code(3));
+    assert!(finished.stdout_truncated);
+    assert_eq!(stdout_bytes(&frames).len(), 10);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the capped run stalled: {:?}",
+        started.elapsed()
+    );
 }

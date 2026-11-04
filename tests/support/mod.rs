@@ -206,6 +206,7 @@ impl Fixture {
     /// A `run` request authorized by this fixture's grant.
     pub fn run_request(&self, env: &str, command: &[&str]) -> Request {
         Request::Run(RunRequest {
+            limits: Default::default(),
             env: vec![EnvBinding {
                 name: env.into(),
                 reference: self.reference.clone(),

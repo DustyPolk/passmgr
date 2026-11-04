@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 use crate::crypto::KEY_LEN;
 use crate::error::{Error, Result};
 use crate::presence::ChallengeNonce;
-use crate::protocol::{self, Request, Response, ResponseError, RunExit, RunFrame, RunStream};
+use crate::protocol::{self, Request, Response, ResponseError, RunFinished, RunFrame, RunStream};
 use crate::session;
 use crate::socket::{self, RuntimePaths, SocketError};
 use crate::token::SessionToken;
@@ -142,7 +142,7 @@ fn send_request(stream: &mut UnixStream, token: &SessionToken, request: &Request
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOutcome {
     /// The child finished; the caller renders this as its own exit status.
-    Exited(RunExit),
+    Exited(RunFinished),
     /// The daemon refused the request. No child output was produced.
     Refused(ResponseError),
 }
@@ -519,7 +519,7 @@ mod tests {
 
     use super::*;
     use crate::presence::{Proof, RequestDigest};
-    use crate::protocol::{AuthenticatedRequest, FrameDecoder};
+    use crate::protocol::{AuthenticatedRequest, FrameDecoder, RunExit};
     use crate::socket::DaemonSocket;
     use tempfile::TempDir;
 
@@ -847,6 +847,7 @@ mod tests {
 
     fn run_request() -> protocol::RunRequest {
         protocol::RunRequest {
+            limits: Default::default(),
             env: vec![protocol::EnvBinding {
                 name: "API_KEY".into(),
                 reference: "pm://00112233445566778899aabbccddeeff".into(),
@@ -868,7 +869,7 @@ mod tests {
                 RunFrame::Stdout(b"one".to_vec()),
                 RunFrame::Stderr(b"two".to_vec()),
                 RunFrame::Stdout(b"three".to_vec()),
-                RunFrame::Exit(RunExit::Code(7)),
+                RunFrame::Exit(RunFinished::exited(RunExit::Code(7))),
             ],
         );
 
@@ -883,7 +884,10 @@ mod tests {
         })
         .expect("run");
 
-        assert_eq!(outcome, RunOutcome::Exited(RunExit::Code(7)));
+        assert_eq!(
+            outcome,
+            RunOutcome::Exited(RunFinished::exited(RunExit::Code(7)))
+        );
         assert_eq!(
             relayed,
             [
@@ -944,13 +948,16 @@ mod tests {
         let server = serve_frames(
             paths.clone(),
             vec![
-                RunFrame::Exit(RunExit::Signal(9)),
+                RunFrame::Exit(RunFinished::exited(RunExit::Signal(9))),
                 RunFrame::Stdout(b"late".to_vec()),
             ],
         );
         let outcome = run(&paths, &test_token(), &run_request(), |_frame| Ok(()))
             .expect("first terminal frame wins");
-        assert_eq!(outcome, RunOutcome::Exited(RunExit::Signal(9)));
+        assert_eq!(
+            outcome,
+            RunOutcome::Exited(RunFinished::exited(RunExit::Signal(9)))
+        );
         server.join().expect("server thread");
     }
 

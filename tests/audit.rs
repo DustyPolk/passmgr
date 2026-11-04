@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use passmgr::audit::{self, GENESIS_PREV};
 use passmgr::grant::GrantToken;
-use passmgr::protocol::{Request, ResponseError, RunExit, RunFrame, RunRequest};
+use passmgr::protocol::{Request, ResponseError, RunExit, RunFinished, RunFrame, RunRequest};
 use serde_json::Value;
 use support::*;
 
@@ -51,7 +51,7 @@ fn an_allowed_run_appends_one_record_without_the_secret_or_any_token() {
     let (frames, raw) = read_run(&fixture.socket(), &fixture.token, &request);
     assert_eq!(
         frames.last(),
-        Some(&RunFrame::Exit(RunExit::Code(0))),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0)))),
         "the run must finish: {frames:?}"
     );
     let stdout = stdout_bytes(&frames);
@@ -106,6 +106,7 @@ fn a_denied_run_is_recorded_without_a_grant_or_any_token() {
     let mut daemon = fixture.start();
     let forged = GrantToken::generate().expect("forged token");
     let request = Request::Run(RunRequest {
+        limits: Default::default(),
         env: vec![passmgr::protocol::EnvBinding {
             name: "TOKEN".into(),
             reference: fixture.reference.clone(),
@@ -157,7 +158,7 @@ fn consecutive_runs_chain_each_record_to_the_previous_line() {
         let (frames, _) = read_run(&fixture.socket(), &fixture.token, &request);
         assert_eq!(
             frames.last(),
-            Some(&RunFrame::Exit(RunExit::Code(0))),
+            Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0)))),
             "{frames:?}"
         );
     }
@@ -252,7 +253,7 @@ fn the_audit_file_is_private_and_its_directory_is_private() {
     let (frames, _) = read_run(&fixture.socket(), &fixture.token, &request);
     assert_eq!(
         frames.last(),
-        Some(&RunFrame::Exit(RunExit::Code(0))),
+        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0)))),
         "{frames:?}"
     );
 

@@ -187,6 +187,7 @@ fn run_child(program: &str, args: &[String], secret: &str) -> Vec<u8> {
         &[],
         Path::new("/"),
         &inherited,
+        runner::Limits::NONE,
         &stop,
         |frame| {
             if let passmgr::protocol::RunFrame::Stdout(data) = frame {
@@ -360,6 +361,7 @@ fn large_run_request(grant: &GrantToken, arguments: usize, extra: usize) -> Requ
         .chain((extra > 0).then(|| "a".repeat(extra)))
         .collect();
     Request::Run(RunRequest {
+        limits: Default::default(),
         env: vec![passmgr::protocol::EnvBinding {
             name: "API_KEY".into(),
             reference: "pm://00112233445566778899aabbccddeeff".into(),
