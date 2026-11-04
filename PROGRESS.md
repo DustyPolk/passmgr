@@ -1,3 +1,9 @@
+## 2026-11-03 — loop note: timeout (iteration 112)
+
+- The work iteration on TODO R.66 hit the 45m limit before committing.
+- Uncommitted work (if any) is in `git stash list` as "loop iter 112 leftovers".
+- Next attempt: split R.66 into smaller sub-items first and do only the first one.
+
 ## 2026-11-03 — Wipe the parsed envelope on a rejected request (TODO R.65)
 
 - `src/protocol/codec.rs`: `decode_body` now holds the `serde_json::Value` in
