@@ -1,3 +1,43 @@
+## 2026-11-04 — Daemon `list` request: metadata only, per-candidate grants (TODO 4.4b)
+
+- New `src/protocol/entry.rs` (500 lines): `Entry` (`ref`, `service`,
+  `username`, `tags`, `fields`, `url`, `created`, `last_rotated`),
+  `from_credential` (never reads the password; `fields` is `[]` and `url` is
+  `null` until TODO 6.1), a strict `from_json` (ref canonicalized through
+  `EntryId::parse_ref`, tags/fields re-validated, timestamps bounded),
+  `matches_filters` (all tags + case-insensitive service substring) and
+  `fit_entries` (drops the tail so the answer fits one frame, reports
+  `truncated`).
+- `Request::List(ListRequest { tags, query, grant })` and
+  `Response::Entries { entries, truncated }`; `list` joins
+  `REQUEST_WIRE_NAMES`, the module doc and the codec, and `validate_list`
+  bounds tags (≤32, valid tags) and query (≤256 bytes, no control chars) on
+  encode *and* decode. `Response` lost `Copy`.
+- `pmd::list_entries`: grant token -> `Grant::check_grant_for_list` (active +
+  `List`) -> watermark -> per-candidate `AccessRequest::list` (OutOfScope is
+  skipped, any other denial is `Denied`) -> filters -> truncation. The grant
+  is checked before enumeration, so a revoked grant is denied even on an
+  empty vault. No protocol version bump: an old daemon answers `unknown
+  request type`, a refusal (recorded in `DECISIONS.md`).
+- Tests: 5 daemon tests (scope, filters that cannot widen it, missing /
+  revoked / expired / run-only grant denied, empty vault) with per-test canary
+  passwords asserted absent from the encoded response; protocol tests pin the
+  wire shape, the bounded filters and every `Entry` decoder refusal.
+- `src/daemon/tests.rs` and `src/protocol/tests.rs` crossed 1,000 lines, so
+  the new tests live in `src/{daemon,protocol}/tests/list.rs` (the layout test
+  enforces the limit).
+- `SECURITY.md` and `MCP.md` describe `list` (metadata only, `truncated`).
+  The docs test requiring every request name in "Current status" passed only
+  because "allowlist" contains "list"; it now requires a word boundary
+  (`mentions_word`), and `SECURITY.md` no longer claims `pm mcp serve` is
+  unimplemented code.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` pass (`cargo audit` skipped, not installed). No new dependency.
+- **Next iteration must know:** 4.4c (`describe`) should reuse
+  `protocol::Entry` and the same grant-first-then-candidate order; 4.4d must
+  map `truncated` into the tool output (`src/mcp/tools.rs` currently allows
+  only `entries`).
+
 ## 2026-11-04 — Source guard for reveal/clipboard in `mcp` (TODO R.69)
 
 - New `tests/mcp_source_guard.rs`: recursively scans every `.rs` file under

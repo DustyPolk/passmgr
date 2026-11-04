@@ -32,15 +32,23 @@ Any process running as the same user can read the 0600 session file, so:
   *accidental* exposure: the value never crosses the socket, and relayed child
   output is redacted before it leaves `pmd`.
 - `run` requires a human-created grant token in addition to the session
-  token. The session token authorizes only `ping`, `lock`, `challenge`,
-  `prove`, `grant_create` and `grant_revoke`; it can never inject a secret by
-  itself, and `grant_create` still requires the human-presence proof. A
-  same-user process that can read the session file still needs a grant token
-  file whose grant covers the credential and command.
+  token. The session token authorizes only `ping`, `lock`, `list`,
+  `challenge`, `prove`, `grant_create` and `grant_revoke`; it can never inject
+  a secret by itself, and `grant_create` still requires the human-presence
+  proof. A same-user process that can read the session file still needs a
+  grant token file whose grant covers the credential and command.
+- `list` (TODO 4.4b) needs a grant token too, and returns metadata only: refs,
+  service names, usernames, tags, field names and timestamps. It authorizes
+  every candidate entry on its own with a `List` request, so an entry outside
+  the grant's scope is never returned (it is indistinguishable from a
+  nonexistent one), and its tag/query filters can only narrow that set. The
+  grant is checked before the vault is enumerated, so a revoked, expired,
+  exhausted or run-only grant is refused even when nothing would match.
 
-The MCP server (`pm mcp serve`, `MCP.md`) is a contract at this point, not
-implemented code. Once implemented it is a thin client of the same daemon and
-inherits every limit below.
+The MCP server (`pm mcp serve`, `MCP.md`) is partially implemented: it speaks
+the handshake and publishes the tool catalogue, and `tools/call` refuses every
+tool with `-32601` until the daemon requests land (TODO 4.4d–4.5). It is a thin
+client of the same daemon and inherits every limit below.
 
 ## What passmgr protects
 

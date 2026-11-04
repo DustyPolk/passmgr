@@ -17,9 +17,9 @@
 //! Every request is untrusted and any same-user process can connect. The
 //! daemon therefore has no request type that returns a secret; see
 //! [`crate::protocol`]. It answers `ping`, `lock`, `challenge`, `prove`,
-//! `grant_create` and `grant_revoke`, and `run` streams the child's
-//! already-redacted output plus an exit status (TODO 2.6c). There is no
-//! request that returns a value.
+//! `grant_create`, `grant_revoke` and the metadata-only `list`, and `run`
+//! streams the child's already-redacted output plus an exit status (TODO
+//! 2.6c). There is no request that returns a value.
 //!
 //! `challenge`/`prove` implement the human-presence proof (TODO 3.3, see
 //! [`crate::presence`]): the daemon issues a single-use 60-second nonce and
@@ -93,9 +93,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 use crate::crypto::KEY_LEN;
-use crate::grant::GrantId;
+use crate::grant::{AccessRequest, Denied, GrantId, Target};
 use crate::presence;
-use crate::protocol::{self, GrantRevokeRequest, Request, Response, ResponseError, RunFrame};
+use crate::protocol::{
+    self, GrantRevokeRequest, ListRequest, Request, Response, ResponseError, RunFrame,
+};
 use crate::session;
 use crate::socket::{DaemonSocket, RuntimePaths, SocketError};
 use crate::store::MAX_TIMESTAMP_UNIX;
@@ -739,7 +741,86 @@ fn handle_connection(
                 Handled::Rejected
             }
         }
+        Request::List(list) => {
+            // Metadata only, and only for the entries this grant covers. The
+            // scope check is per candidate, so an out-of-scope entry is
+            // indistinguishable from a nonexistent one (TODO 4.4b).
+            let response = list_entries(vault_path, key, watermarks, &list);
+            let answered = !matches!(response, Response::Error(_));
+            let _ = write_response(&mut stream, &response);
+            if answered {
+                Handled::Served
+            } else {
+                Handled::Rejected
+            }
+        }
     }
+}
+
+/// Answer a `list` request with the metadata of the entries its grant covers.
+///
+/// The order is deliberate:
+///
+/// 1. the grant must be active and carry the `list` capability, so a revoked,
+///    expired, exhausted or `run`-only grant is `denied` even when the vault
+///    is empty;
+/// 2. the grant state must not have gone backwards (TODO R.44), because a
+///    rollback must not resurrect a listing the human revoked;
+/// 3. every credential is authorized **on its own** with
+///    [`Grant::authorizes`], so tags, fields and references scope the answer
+///    exactly as they scope `run`, and an out-of-scope entry is skipped rather
+///    than reported;
+/// 4. the tag and query filters narrow that set. They are applied after the
+///    authorization, so no filter can widen access.
+///
+/// Only [`Entry::from_credential`](protocol::Entry::from_credential) is used to
+/// build the answer: it never reads the password. The vault is opened
+/// read-only and lock-free, which is safe because a save is an atomic rename
+/// of a complete file.
+fn list_entries(
+    vault_path: &Path,
+    key: &LockedKey,
+    watermarks: &GrantWatermarks,
+    request: &ListRequest,
+) -> Response {
+    let Some(now) = unix_now() else {
+        return Response::Error(ResponseError::Internal);
+    };
+    let vault = match Vault::open_with_key(vault_path, key.as_slice()) {
+        Ok(vault) => vault,
+        Err(_) => return Response::Error(ResponseError::Internal),
+    };
+    let token_hash = request.grant.hash();
+    let Some(grant) = vault
+        .grants()
+        .iter()
+        .find(|grant| grant.matches_token(&token_hash))
+    else {
+        return Response::Error(ResponseError::Denied);
+    };
+    if grant.check_grant_for_list(now).is_err() {
+        return Response::Error(ResponseError::Denied);
+    }
+    if watermarks.check(vault.grants()).is_err() {
+        return Response::Error(ResponseError::Denied);
+    }
+    let mut entries = Vec::new();
+    for credential in vault.list() {
+        let target = Target::new(credential.id(), credential.tags());
+        match grant.authorizes(&AccessRequest::list(target, None), now) {
+            Ok(()) => {}
+            Err(Denied::OutOfScope) => continue,
+            // The grant-level checks above already passed; any other denial
+            // means the state changed underneath us. Fail closed.
+            Err(_) => return Response::Error(ResponseError::Denied),
+        }
+        if !protocol::entry::matches_filters(credential, &request.tags, request.query.as_deref()) {
+            continue;
+        }
+        entries.push(protocol::Entry::from_credential(credential));
+    }
+    let (entries, truncated) = protocol::entry::fit_entries(entries);
+    Response::Entries { entries, truncated }
 }
 
 /// Revoke one grant or every active grant, returning how many were newly

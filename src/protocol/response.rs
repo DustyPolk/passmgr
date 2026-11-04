@@ -8,6 +8,7 @@ use std::fmt;
 
 use serde_json::{Map, Value, json};
 
+use super::entry::{Entry, decode_entries, entries_json};
 use super::{
     LENGTH_PREFIX_BYTES, MAX_CHUNK_BYTES, MAX_MESSAGE_BYTES, MAX_SIGNAL, MAX_TYPE_CHARS,
     PROTOCOL_VERSION, ProtocolError, split_frame,
@@ -16,10 +17,11 @@ use crate::presence::ChallengeNonce;
 
 /// A daemon response.
 ///
-/// Responses carry status only (plus the public challenge nonce). There is
+/// Responses carry status, the public challenge nonce, or credential metadata
+/// (references, names, tags, field *names*, URLs and timestamps). There is
 /// deliberately no field that can hold a secret value, and none may be added:
 /// any same-user process can connect to the socket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
     /// The daemon is alive and the key is loaded.
     Pong,
@@ -40,6 +42,14 @@ pub enum Response {
     /// that were active until now, so revoking an already-revoked id answers
     /// zero and changes nothing. Carries no id, label or hash.
     GrantRevoked { revoked: u32 },
+    /// The metadata of the credentials a `list` grant covers, in vault order.
+    /// Each entry is authorized individually, so an out-of-scope credential is
+    /// simply absent. `truncated` is set when the rest would not fit one
+    /// frame; the entries returned are always a prefix of the filtered list.
+    Entries {
+        entries: Vec<Entry>,
+        truncated: bool,
+    },
     /// The request was rejected. The error is a fixed code, never echo of the
     /// request or of vault data.
     Error(ResponseError),
@@ -202,6 +212,11 @@ pub fn encode_response(response: &Response) -> Result<Vec<u8>, ProtocolError> {
         Response::GrantRevoked { revoked } => {
             json!({ "type": "grant_revoked", "revoked": revoked })
         }
+        Response::Entries { entries, truncated } => json!({
+            "type": "entries",
+            "entries": entries_json(entries),
+            "truncated": truncated,
+        }),
         Response::Error(error) => json!({ "type": "error", "code": error.code() }),
     };
     encode_value(&json!({ "version": PROTOCOL_VERSION, "response": response }))
@@ -227,6 +242,8 @@ pub fn decode_response(frame: &[u8]) -> Result<Response, ProtocolError> {
         "grant_revoked" => {
             decode_grant_revoked(response).map(|revoked| Response::GrantRevoked { revoked })
         }
+        "entries" => decode_entries(response)
+            .map(|(entries, truncated)| Response::Entries { entries, truncated }),
         "error" => decode_error_code(response).map(Response::Error),
         other => Err(ProtocolError::UnknownResponse(truncate_type(other))),
     }

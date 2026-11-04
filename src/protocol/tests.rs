@@ -44,6 +44,14 @@ fn run_request() -> Request {
     })
 }
 
+fn list_request() -> Request {
+    Request::List(ListRequest {
+        tags: vec!["prod".into()],
+        query: Some("gh".into()),
+        grant: grant_token(),
+    })
+}
+
 const PROVE_NONCE_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 const PROVE_DIGEST_HEX: &str = "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
 /// HMAC-SHA256(0x0b * 32, "passmgr-approve-v1" || nonce || digest).
@@ -102,6 +110,7 @@ fn round_trips_every_request() {
         Request::Challenge,
         prove_request(),
         run_request(),
+        list_request(),
         grant_create(),
         Request::GrantRevoke(GrantRevokeRequest::Id(grant_id())),
         Request::GrantRevoke(GrantRevokeRequest::All),
@@ -123,6 +132,7 @@ fn request_wire_names_match_the_encoder_for_every_variant() {
         Request::Challenge,
         prove_request(),
         run_request(),
+        list_request(),
         grant_create(),
         Request::GrantRevoke(GrantRevokeRequest::Id(grant_id())),
         Request::GrantRevoke(GrantRevokeRequest::All),
@@ -904,3 +914,5 @@ fn taking_a_frame_zeroes_the_stale_tail_behind_the_next_one() {
         "the taken frame's tail is still in the decoder buffer"
     );
 }
+
+mod list;

@@ -298,6 +298,17 @@ fn security_documents_the_vault_rollback_limit() {
     );
 }
 
+/// `plain()` drops backticks, so a substring test would accept "allowlist"
+/// for the request named `list`. Require a word boundary on both sides.
+fn mentions_word(text: &str, word: &str) -> bool {
+    text.match_indices(word).any(|(start, _)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + word.len()..].chars().next();
+        !before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+            && !after.is_some_and(|c| c.is_alphanumeric() || c == '_')
+    })
+}
+
 /// TODO R.32: the "Current status" section described the pre-3.6 state, so a
 /// reviewer could treat `run` as session-token gated (the hole 3.6 closed)
 /// and expect an audit log that does not exist yet. Pin the implemented flow
@@ -321,7 +332,7 @@ fn security_current_status_matches_the_implemented_grant_flow() {
             continue;
         }
         assert!(
-            status.contains(request),
+            mentions_word(&status, request),
             "SECURITY.md Current status must list {request} as authorized by the session token"
         );
     }

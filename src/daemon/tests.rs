@@ -115,6 +115,26 @@ fn exchange_frame(
     challenges: &mut presence::Challenges,
     approvals: &mut presence::Approvals,
 ) -> Response {
+    exchange_frame_at(
+        Path::new("/nonexistent/passmgr-test-vault"),
+        frame,
+        token,
+        key,
+        challenges,
+        approvals,
+    )
+}
+
+/// The same exchange against a real vault, for requests whose answer depends
+/// on stored credentials and grants.
+pub(super) fn exchange_frame_at(
+    vault_path: &Path,
+    frame: &[u8],
+    token: &SessionToken,
+    key: &LockedKey,
+    challenges: &mut presence::Challenges,
+    approvals: &mut presence::Approvals,
+) -> Response {
     let (server, mut client) = UnixStream::pair().expect("socket pair");
     client.write_all(frame).expect("send request");
     let watermarks = GrantWatermarks::new();
@@ -122,7 +142,7 @@ fn exchange_frame(
         server,
         token,
         key,
-        Path::new("/nonexistent/passmgr-test-vault"),
+        vault_path,
         challenges,
         approvals,
         &watermarks,
@@ -706,3 +726,5 @@ fn a_revocation_fits_a_vault_written_at_the_payload_cap() {
         "the revoked payload must stay inside the container's plaintext bound"
     );
 }
+
+mod list;

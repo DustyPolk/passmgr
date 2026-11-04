@@ -482,6 +482,19 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   non-Unix stubs, and no unchecked accept path exists on an unsupported
   platform.
 
+- A new request type may join the current protocol version when the only
+  possible old-daemon answer is a refusal: an unknown `type` decodes to
+  `unknown request type …` (`bad_request`), so `list` shipped inside version 4
+  instead of bumping to 5. Bump the version only when an old daemon would
+  answer a new request in a way *less strict* than the new contract (as v4
+  did for `run.grant`: a v3 daemon authorized a run with the session token
+  alone). A new response type is additive for the same reason: an old client
+  fails the decode closed.
+- `list` returns at most one 64 KiB frame of entries and sets `truncated` when
+  it dropped matches. The budget is measured on the encoded entry, so it holds
+  for any field length the store allows. Filters narrow, never paginate, and a
+  truncated answer is never a claim of completeness.
+
 ## Grants, approval and MCP (planned, per `MCP.md`)
 
 - The grant model lives in `src/grant.rs` (TODO 3.2a) and is pure: no I/O,

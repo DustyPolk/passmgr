@@ -885,6 +885,19 @@ impl Grant {
         self.check_command(command)
     }
 
+    /// The parts of a `list` decision that do not depend on a candidate: the
+    /// grant's state and the `list` capability.
+    ///
+    /// `list` is authorized per candidate with [`Grant::authorizes`], but an
+    /// empty vault would otherwise turn a revoked or expired grant into a
+    /// successful (empty) listing. The daemon calls this once before it walks
+    /// the credentials, so the grant-level answer is the same whether the
+    /// vault has entries or not.
+    pub(crate) fn check_grant_for_list(&self, now: u64) -> std::result::Result<(), Denied> {
+        self.check_active(now)?;
+        self.check_capability(Capability::List)
+    }
+
     fn check_capability(&self, capability: Capability) -> std::result::Result<(), Denied> {
         if self.capabilities.contains(capability.flag()) {
             Ok(())

@@ -151,13 +151,18 @@ granted"), so an agent cannot probe which refs exist.
 
 ### `list_credentials`  (readOnlyHint, idempotentHint, openWorldHint=false)
 Input: `{ "tags"?: string[], "query"?: string }` (query = case-insensitive
-substring of service name). Output: `{ "entries": [Entry] }`, containing only
-entries **inside the grant's scope**. Scope is checked for each candidate
-entry individually (`Grant::authorizes` with a `List` request naming it);
-there is no bulk "listing is allowed" decision, so an out-of-scope entry is
-never returned (it is reported exactly like a nonexistent ref).
+substring of service name). Output: `{ "entries": [Entry], "truncated": bool }`,
+containing only entries **inside the grant's scope**. Scope is checked for each
+candidate entry individually (`Grant::authorizes` with a `List` request naming
+it); there is no bulk "listing is allowed" decision, so an out-of-scope entry is
+never returned (it is reported exactly like a nonexistent ref). The grant
+itself is checked first, so a revoked, expired, exhausted or run-only grant is
+refused even when the vault is empty. Tags and query only narrow the result:
+they can never add an entry the scope excludes.
 `Entry = { ref, service, username|null, tags[], fields[] (field names only),
-url|null, created|null, last_rotated|null }`.
+url|null, created|null, last_rotated|null }`. An answer must fit one 64 KiB
+frame, so `truncated: true` means more entries matched than were returned; the
+agent narrows with `tags`/`query` rather than assuming it saw everything.
 No grant: `isError` with "no active grant; call request_access".
 
 ### `describe_credential`  (readOnlyHint, idempotentHint)

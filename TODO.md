@@ -48,13 +48,17 @@ keeps the dependency tree small and stdout hygiene under our control.
       files refused with exit 5, and the token hex or file content never
       reaches stdout or stderr. Note: `mcp serve` now accepts exactly one
       `--grant-file`; the old "takes no arguments" refusal is per-flag.
-- [ ] **4.4b Daemon `list` request**: add `Request::List { tags, query, grant }`
+- [x] **4.4b Daemon `list` request**: add `Request::List { tags, query, grant }`
       and a response of metadata-only entries. The daemon checks the grant and
       filters **per candidate** with `Grant::authorizes(AccessRequest::List)`,
       so an out-of-scope ref is reported exactly like a nonexistent one. No
       tag/query filter broadens access. Tests: scope filtering, tag and query
       filters, no grant or a revoked/expired one is `Denied`, and a canary
       password never appears in the encoded response.
+      Note: `Response::Entries { entries, truncated }`; the grant is also
+      checked up front (`Grant::check_grant_for_list`), so an inactive grant is
+      denied on an empty vault. Entries that would not fit one 64 KiB frame are
+      dropped and `truncated` is set; `Entry` lives in `src/protocol/entry.rs`.
 - [ ] **4.4c Daemon `describe` request**: one `Request::Describe { reference,
       grant }`, same per-candidate authorization and not-found collapsing as
       4.4b; output has service, username, tags, created/last-rotated only

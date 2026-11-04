@@ -12,8 +12,8 @@
 //! The `token` is the unlock session token (see [`crate::token`]) and is
 //! required on every request; the daemon rejects a missing or mismatched one
 //! with `unauthorized`. The `request` object always has a `"type"` field; the
-//! types this version knows are `ping`, `lock`, `run`, `challenge`, `prove`,
-//! `grant_create` and `grant_revoke`:
+//! types this version knows are `ping`, `lock`, `run`, `list`, `challenge`,
+//! `prove`, `grant_create` and `grant_revoke`:
 //!
 //! ```json
 //! {"version":4,"token":"...","request":{"type":"ping"}}
@@ -23,6 +23,8 @@
 //!                         "grant":"<64 lowercase hex>",
 //!                         "command":["/usr/bin/curl","-s","https://example.test"],
 //!                         "cwd":"/home/alice/project"}}
+//! {"version":4,"token":"...","request":{"type":"list","tags":["prod"],
+//!                         "query":"gh","grant":"<64 lowercase hex>"}}
 //! {"version":4,"token":"...","request":{"type":"challenge"}}
 //! {"version":4,"token":"...","request":{"type":"prove","nonce":"<64 hex>",
 //!                         "digest":"<64 hex>","proof":"<64 hex>"}}
@@ -65,13 +67,20 @@
 //! would run the child in the wrong directory. Older versions are refused
 //! with `unsupported_version`.
 //!
+//! `list` was added inside version 4 without a bump: an older daemon answers
+//! it with `unknown request type`, which is a refusal, not a silently widened
+//! grant. Like `run`, it presents a grant token in addition to the session
+//! token and answers only with metadata the grant covers.
+//!
 //! # There is no plaintext request type
 //!
 //! The daemon holds the vault key, and any same-user process can connect to
 //! the socket, so a client-side check would protect nothing. Consequently no
 //! request type returns a secret value: the daemon injects the secret into a
-//! child process for `run` and relays only redacted output. This module never
-//! carries a secret in either direction; unknown request types are rejected.
+//! child process for `run` and relays only redacted output, and `list`
+//! answers references, names, tags, field *names* and timestamps. This module
+//! never carries a secret in either direction; unknown request types are
+//! rejected.
 //!
 //! # The `run` response stream
 //!
@@ -122,11 +131,13 @@ use crate::store::EntryId;
 use crate::token::SessionToken;
 
 mod codec;
+pub(crate) mod entry;
 mod response;
 
 /// Frame splitting is shared with [`response`], which decodes its own bodies.
 use codec::split_frame;
 pub use codec::{FrameDecoder, decode, encode};
+pub use entry::Entry;
 pub use response::{
     Response, ResponseError, RunExit, RunFrame, RunStream, decode_response, decode_run_frame,
     encode_response, encode_run_frame,
@@ -156,6 +167,10 @@ pub const LENGTH_PREFIX_BYTES: usize = 4;
 /// it: two maximum-size frames, so a read may legitimately contain more than
 /// one frame.
 pub const MAX_BUFFERED_BYTES: usize = 2 * (LENGTH_PREFIX_BYTES + MAX_MESSAGE_BYTES);
+
+/// Longest accepted `list.query` (a service-name substring). Matches the
+/// `maxLength` of the MCP `list_credentials` input schema.
+pub const MAX_QUERY_BYTES: usize = 256;
 
 /// Longest accepted environment variable name.
 pub const MAX_ENV_NAME_BYTES: usize = 128;
@@ -193,6 +208,16 @@ pub enum Request {
     Lock,
     /// Spawn `command` with `env` set to the value of `reference`.
     Run(RunRequest),
+    /// List the metadata of the credentials `grant` covers.
+    ///
+    /// Every candidate is authorized on its own with
+    /// [`Grant::authorizes`](crate::grant::Grant::authorizes) and an
+    /// out-of-scope credential is simply absent, so `list` is not an
+    /// existence oracle. The answer is a [`Response::Entries`](crate::protocol::Response::Entries)
+    /// of references, names, tags, field *names* and timestamps — never a
+    /// value. Tags and `query` only narrow the result; they cannot widen the
+    /// grant's scope.
+    List(ListRequest),
     /// Issue a single-use nonce for a human-presence proof. Answer: [`Response::Challenge`](crate::protocol::Response::Challenge).
     Challenge,
     /// Present a proof of vault-key knowledge for a challenge.
@@ -233,6 +258,7 @@ pub const REQUEST_WIRE_NAMES: &[&str] = &[
     "ping",
     "lock",
     "run",
+    "list",
     "challenge",
     "prove",
     "grant_create",
@@ -246,6 +272,7 @@ impl Request {
             Self::Ping => "ping",
             Self::Lock => "lock",
             Self::Run(_) => "run",
+            Self::List(_) => "list",
             Self::Challenge => "challenge",
             Self::Prove(_) => "prove",
             Self::GrantCreate(_) => "grant_create",
@@ -322,6 +349,34 @@ impl PartialEq for RunRequest {
 }
 
 impl Eq for RunRequest {}
+
+/// The `list` payload: which metadata to return, and the grant that allows it.
+///
+/// Both filters are optional and only ever narrow the answer. An empty `tags`
+/// means "no tag filter" and `query` is matched as a case-insensitive
+/// substring of the service name. Scope is never derived from them: the daemon
+/// authorizes each candidate against the grant's references and tags first.
+#[derive(Debug, Clone)]
+pub struct ListRequest {
+    /// Tags the credential must all carry; empty means no tag filter.
+    pub tags: Vec<String>,
+    /// Case-insensitive substring of the service name; `None` means no filter.
+    pub query: Option<String>,
+    /// The grant token this list presents. Never rendered; see [`GrantToken`].
+    pub grant: GrantToken,
+}
+
+// A manual implementation for the same reason as [`RunRequest`]: compare the
+// grant hashes, which is what authorization does anyway.
+impl PartialEq for ListRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.tags == other.tags
+            && self.query == other.query
+            && self.grant.hash().matches(&other.grant.hash())
+    }
+}
+
+impl Eq for ListRequest {}
 
 /// The `grant_create` payload: the exact grant a human approved.
 ///
@@ -533,6 +588,9 @@ fn validate_request(request: &Request) -> Result<(), ProtocolError> {
         create.clone().into_grant_request()?;
         return Ok(());
     }
+    if let Request::List(list) = request {
+        return validate_list(list);
+    }
     let Request::Run(run) = request else {
         return Ok(());
     };
@@ -576,6 +634,36 @@ fn validate_request(request: &Request) -> Result<(), ProtocolError> {
             // that PATH belongs to the shell that started `unlock`, not to the
             // caller that named the command.
             validate_absolute_path("run.command[0]", argument)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate the `list` filters. They are agent-supplied text, so each tag
+/// must be a real tag and `query` is bounded and control-free before the
+/// daemon or the CLI ever renders it.
+fn validate_list(list: &ListRequest) -> Result<(), ProtocolError> {
+    if list.tags.len() > crate::store::MAX_TAGS_PER_CREDENTIAL {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "list.tags accepts at most {} tags",
+            crate::store::MAX_TAGS_PER_CREDENTIAL
+        )));
+    }
+    for (index, tag) in list.tags.iter().enumerate() {
+        crate::store::validate_tag(tag).map_err(|_| {
+            ProtocolError::InvalidRequest(format!("list.tags[{index}] is not a valid tag"))
+        })?;
+    }
+    if let Some(query) = &list.query {
+        if query.len() > MAX_QUERY_BYTES {
+            return Err(ProtocolError::InvalidRequest(format!(
+                "list.query exceeds {MAX_QUERY_BYTES} bytes"
+            )));
+        }
+        if query.chars().any(char::is_control) {
+            return Err(ProtocolError::InvalidRequest(
+                "list.query must not contain control characters".into(),
+            ));
         }
     }
     Ok(())

@@ -22,7 +22,7 @@ use serde_json::{Map, Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    AuthenticatedRequest, GrantCreateRequest, GrantRevokeRequest, LENGTH_PREFIX_BYTES,
+    AuthenticatedRequest, GrantCreateRequest, GrantRevokeRequest, LENGTH_PREFIX_BYTES, ListRequest,
     MAX_BUFFERED_BYTES, MAX_MESSAGE_BYTES, MAX_TYPE_CHARS, PROTOCOL_VERSION, ProtocolError,
     ProveRequest, Request, RunRequest, validate_request,
 };
@@ -285,6 +285,12 @@ fn encode_body(
             "cwd": run.cwd,
             "grant": run.grant.to_hex().as_str(),
         }),
+        Request::List(list) => json!({
+            "type": "list",
+            "tags": list.tags,
+            "query": list.query,
+            "grant": list.grant.to_hex().as_str(),
+        }),
         Request::Challenge => json!({ "type": "challenge" }),
         Request::Prove(prove) => json!({
             "type": "prove",
@@ -463,6 +469,22 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
                 reference: required_string(request, "ref")?,
                 command: required_string_array(request, "command")?,
                 cwd: required_string(request, "cwd")?,
+                grant: GrantToken::from_hex(&grant).map_err(|_| invalid_grant_field())?,
+            })
+        }
+        "list" => {
+            // The grant-token hex is a bearer credential even in its encoded
+            // form: keep it zeroizing rather than in a plain `String`.
+            let grant = Zeroizing::new(required_string(request, "grant")?);
+            Request::List(ListRequest {
+                tags: match request.get("tags") {
+                    None | Some(Value::Null) => Vec::new(),
+                    Some(_) => required_string_array(request, "tags")?,
+                },
+                query: match request.get("query") {
+                    None | Some(Value::Null) => None,
+                    Some(_) => Some(required_string(request, "query")?),
+                },
                 grant: GrantToken::from_hex(&grant).map_err(|_| invalid_grant_field())?,
             })
         }
