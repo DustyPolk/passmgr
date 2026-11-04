@@ -1,3 +1,14 @@
+## 2026-11-03 — loop note: gate failed (iteration 108)
+
+- Commits from this review iteration failed the gate and were rolled back.
+- The work is kept on branch failed/iter-108-20261103-204341; you may cherry-pick from it and fix it.
+- gate: `cli::grant::tests::a_token_path_with_hidden_characters_is_rendered_as_text --- FAILED`
+- gate: `cli::grant::tests::credential_names_are_escaped_in_the_summary --- FAILED`
+- gate: `thread 'cli::grant::tests::a_token_path_with_hidden_characters_is_rendered_as_text' (696774) panicked at src/cli/grant/tests.rs:45:5:`
+- gate: `thread 'cli::grant::tests::credential_names_are_escaped_in_the_summary' (696778) panicked at src/cli/grant/tests.rs:274:5:`
+- gate: `test result: FAILED. 54 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s`
+- gate: `error: test failed, to rerun pass `--bin passmgr``
+
 ## 2026-11-03 — Pin the docs that had drifted since grants landed (TODO R.51)
 
 - Corrected every stale claim in the item: the daemon's vault writes are
