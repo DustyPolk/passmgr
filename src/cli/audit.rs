@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 
 use passmgr::Error;
 use passmgr::audit::{self, Filter, Record, Termination};
-use passmgr::text::escape_hidden;
+use passmgr::text::{escape_hidden, escape_quoted};
 use passmgr::timestamp;
 
 use super::args::{AuditCommand, AuditListOptions};
@@ -98,8 +98,14 @@ fn describe(record: &Record) -> String {
         push_field(&mut line, "command", command);
     }
     if !record.args.is_empty() {
-        let args: Vec<String> = record.args.iter().map(|arg| escape_hidden(arg)).collect();
-        push_field(&mut line, "args", &format!("[{}]", args.join(", ")));
+        // Each argument is quoted, so `, ` or `  name=` inside one cannot
+        // read as an argument boundary or a field of its own.
+        let args: Vec<String> = record
+            .args
+            .iter()
+            .map(|arg| format!("'{}'", escape_quoted(arg)))
+            .collect();
+        write!(line, "  args=[{}]", args.join(", ")).expect("writing to a String cannot fail");
     }
     match record.termination {
         Some(Termination::Code(code)) => push_field(&mut line, "exit", &code.to_string()),
@@ -151,7 +157,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("command=/usr/bin/true"), "{text}");
-        assert!(text.contains("args=[--flag, two words]"), "{text}");
+        assert!(text.contains("args=['--flag', 'two words']"), "{text}");
         assert!(text.contains("exit=0"), "{text}");
         assert!(
             !text.contains("prev="),
@@ -170,6 +176,27 @@ mod tests {
             text.contains("\\u{1b}") || text.contains("\\x1b") || text.contains("U+001B"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn an_argument_cannot_forge_a_field_or_split_into_two() {
+        let mut record = record(None);
+        record.termination = None;
+        record.args = vec!["x]  exit=0".into()];
+        let forged = describe(&record);
+        assert!(forged.ends_with("args=['x]  exit=0']"), "{forged}");
+
+        record.args = vec!["a, b".into()];
+        let one = describe(&record);
+        record.args = vec!["a".into(), "b".into()];
+        let two = describe(&record);
+        assert_ne!(one, two, "one argument must not read as two");
+        assert!(one.ends_with("args=['a, b']"), "{one}");
+        assert!(two.ends_with("args=['a', 'b']"), "{two}");
+
+        record.args = vec!["it's".into()];
+        let quoted = describe(&record);
+        assert!(quoted.ends_with(r"args=['it\'s']"), "{quoted}");
     }
 
     #[test]

@@ -149,7 +149,10 @@ fn audit_lists_records_as_metadata_including_arguments() {
     assert!(text.contains(&format!("grant={GRANT_ONE}")), "{text}");
     assert!(text.contains(&format!("ref={REFERENCE}")), "{text}");
     assert!(text.contains("command=/usr/bin/true"), "{text}");
-    assert!(text.contains(&format!("args=[--note={CANARY}]")), "{text}");
+    assert!(
+        text.contains(&format!("args=['--note={CANARY}']")),
+        "{text}"
+    );
     assert!(text.contains("exit=0"), "{text}");
     assert!(
         text.contains("2025-01-01T00:00:01Z  denied  daemon"),
