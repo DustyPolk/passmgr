@@ -13,6 +13,7 @@ pub mod crypto;
 pub mod daemon;
 pub mod error;
 pub mod grant;
+pub mod mcp;
 pub mod password;
 pub mod presence;
 pub mod protocol;

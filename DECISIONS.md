@@ -790,6 +790,23 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   MCP SDK, no async runtime): 1 MiB line cap with resync to the next newline,
   batches rejected, stdout carries only JSON-RPC, diagnostics on stderr, and
   requests are handled sequentially.
+- The transport codec is `src/mcp/jsonrpc.rs` (TODO 4.1) and it is pure: a
+  `LineReader` splits the stream and `parse_line`/`encode_line` handle one
+  line, so framing and re-sync are unit-tested without a pipe. Structural
+  rules live there, method semantics above it. A line at exactly the 1 MiB
+  cap is accepted and one byte more is dropped as `TooLong { bytes }` (the
+  count is exact, so the server can report how much it threw away).
+  `"id": null` on a frame with a `method` is refused rather than guessed at:
+  treating it as a notification and treating it as a request are both
+  defensible, and the spec forbids the ambiguity. Ids are strings up to 128
+  bytes or `i64` integers (no floats, no booleans, no objects) for the same
+  reason: this server echoes the id back and cannot echo a float exactly.
+  A method name is 1..=128 bytes. A peer's `error.code` is kept as the raw
+  `i32` rather than mapped onto our enum, so an unknown code is never
+  rewritten into a wrong meaning; the codes this server *sends* are the six
+  in `MCP.md`, built from `ErrorCode`. A final line without a trailing
+  newline is accepted at EOF (`LineReader::finish`) because dropping a
+  complete message the peer obviously sent would be worse than accepting it.
 - Dual era: legacy `2025-11-25` handshake and modern stateless `2026-07-28`
   (`_meta` validation, `server/discover`, `resultType`, `serverInfo`); an
   unknown modern version gets `-32022` with the supported list.

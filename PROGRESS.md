@@ -1,3 +1,40 @@
+## 2026-11-04 — JSON-RPC 2.0 line codec (TODO 4.1)
+
+- New `src/mcp/mod.rs` (contract summary + `pub mod jsonrpc`) and
+  `src/mcp/jsonrpc.rs` with `src/mcp/jsonrpc/tests.rs`. Pure, no I/O:
+  `LineReader::push`/`finish` turn a byte stream into `LineEvent::Line` /
+  `LineEvent::TooLong { bytes }`; `parse_line` validates one line into
+  `Message::{Request, Notification, Response}`; `encode_line` produces exactly
+  one newline-terminated line. `Rejected { error, id }` carries the JSON-RPC
+  error to send and the id to address it to (the six `ErrorCode` values are
+  `-32700/-32600/-32601/-32602/-32603/-32022`).
+- Rules: a line longer than `MAX_LINE_BYTES` (1 MiB) is dropped while it is
+  read and the reader resynchronizes on its newline, so it never holds more
+  than the cap; batches (top-level arrays) are `-32600`; `jsonrpc` must be the
+  string `"2.0"`; ids are `i64` or strings of at most 128 bytes, and
+  `"id": null` on a call is refused instead of guessed; a response needs
+  exactly one of `result`/`error` and may use `id: null`; method names are
+  1..=128 bytes; params must be an object, an array or `null` (absent).
+- Chose to keep a peer's `error.code` as its raw `i32` (an unknown code is
+  not rewritten into a wrong meaning), to bound `error.message` at 1024 bytes,
+  and to accept a final line without a trailing newline at EOF. No rejection
+  message echoes any input byte. Added `pub mod mcp;` to `src/lib.rs`.
+- Tests: 42 units. Message shapes and round trips, every rejection code,
+  prefix fuzzing of a valid line (no panic), a parse error that must not echo
+  a canary, `-32700` vs `-32600` boundaries, and the reader under the cap,
+  over it, split across pushes, across several lines per push, CRLF, empty
+  lines and `finish`.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` green; `cargo audit` skipped (not installed).
+- **Next iteration must know:** 4.2 (`era.rs`) sits on top of this: era
+  decisions are *semantic*, so `parse_line` deliberately has no notion of
+  `initialize`, `_meta` or result decoration. A rejection's `id` is `None`
+  whenever the id itself was unusable (including an oversized or float id),
+  so the answer uses `"id": null`; the server loop must send `Rejected`
+  as-is rather than re-deriving an id. `tests/layout.rs` keeps files under
+  1,000 lines: `src/mcp/jsonrpc.rs` is 628, so the server loop belongs in a
+  sibling module (`src/mcp/server.rs`), not here.
+
 ## 2026-11-04 — `pm audit` listing and `pm audit verify` (TODO 3.9)
 
 - `src/audit/read.rs` (new; `audit.rs` re-exports it): strict `Record` parser

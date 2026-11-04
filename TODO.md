@@ -15,11 +15,14 @@ Implement `MCP.md`. Do not use an MCP SDK: write a small, synchronous
 JSON-RPC layer with `serde_json` (decided; see `DECISIONS.md` after H.1). It
 keeps the dependency tree small and stdout hygiene under our control.
 
-- [ ] **4.1 JSON-RPC 2.0 line codec** (`src/mcp/jsonrpc.rs`, pure). Parse and
+- [x] **4.1 JSON-RPC 2.0 line codec** (`src/mcp/jsonrpc.rs`, pure). Parse and
       serialize requests, notifications, responses and errors. 1 MiB line cap
       with resync to the next newline; batches rejected; ids may be a string
       or a number. Tests: every error code in `MCP.md`, oversize lines,
       invalid UTF-8, missing `jsonrpc`.
+      Note: ids are bounded at 128 bytes and `i64` only (no floats, no
+      `null` on a call); a peer's `error.code` is preserved as its raw `i32`;
+      `LineReader` also returns an unterminated final line at EOF.
 - [ ] **4.2 Era handling** (`src/mcp/era.rs`). Legacy `initialize`/
       `notifications/initialized`/`ping`, modern `_meta` validation, `-32022`
       with the supported list, `server/discover`, `resultType` and
