@@ -383,6 +383,13 @@ where
         });
     }
 
+    // Both redactors exist before the fork: nothing between the spawn and
+    // the reader threads may fail or panic, or the child would be left
+    // running, unkilled, with the secret in its environment.
+    let redactors = [
+        Redactor::new_many(&redact_values),
+        Redactor::new_many(&redact_values),
+    ];
     let mut child = command.spawn().map_err(RunError::Spawn)?;
     drop(command);
     // The clock starts at the spawn: `duration_ms` is the time the child and
@@ -403,11 +410,11 @@ where
     let (sender, receiver) = mpsc::sync_channel::<Message>(8);
     let readers_stop = Arc::new(AtomicBool::new(false));
     let mut readers = Vec::with_capacity(2);
-    for (reader, is_stderr) in [
+    let pipes = [
         (Box::new(stdout) as Box<dyn OutputPipe + Send>, false),
         (Box::new(stderr) as Box<dyn OutputPipe + Send>, true),
-    ] {
-        let redactor = Redactor::new_many(&redact_values);
+    ];
+    for ((reader, is_stderr), redactor) in pipes.into_iter().zip(redactors) {
         let reader_stop = Arc::clone(&readers_stop);
         let redaction_count = Arc::clone(&redactions);
         let truncated = if is_stderr {
