@@ -179,8 +179,9 @@ Commands:
                              Implements both protocol eras, the legacy
                              'initialize' handshake and the modern stateless
                              '_meta' era, and answers 'tools/list' with five
-                             tools; credential calls go to the daemon (not
-                             wired yet, so 'tools/call' answers -32601).
+                             tools. 'tools/call' sends list_credentials,
+                             describe_credential and run_with_credentials
+                             to the daemon; any other tool answers -32602.
                              The grant token comes from --grant-file or, when
                              the flag is absent, PASSMGR_GRANT_FILE (a 0600
                              file written by 'grant create --out'); without
@@ -269,9 +270,7 @@ Notes:
     are RFC 3339 UTC strings, or null when the timestamp is unknown.
   - Tags are lowercase labels: 1-32 bytes starting with a letter or digit, then
     [a-z0-9._-]; at most 32 per credential. They are metadata, never secrets.
-  - Tags are metadata, not secrets. They are lowercase letters, digits, '-',
-    '_' and '.', at most 32 bytes, and at most 32 per credential. Tags are
-    stored sorted; 'list --tag' requires every given tag to match.
+    Tags are stored sorted; 'list --tag' requires every given tag to match.
   - 'edit' never prints the new password either; rotating prompts for it
     twice, and a generated one is only confirmed by name.
   - Creating a new vault asks for the master password twice.
