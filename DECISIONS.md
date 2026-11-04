@@ -816,6 +816,15 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   to the legacy era; a second legacy `initialize` is `-32600`; only
   `2026-07-28` is served statelessly, so a `_meta` naming `2025-11-25` gets
   `-32022` and must use `initialize` instead.
+- The stdio loop (`src/mcp/server.rs`, TODO 4.3) is deliberately thin and
+  sequential: era admission first, then either the era-owned reply or one
+  method dispatch, then the decorator. Tool definitions are a pure catalogue
+  (`src/mcp/tools.rs`) so schema shape and catalogue size are unit-testable
+  without a pipe; `tools/list` needs no daemon, which is why it landed
+  before any tool that does. `tools/call` is `-32601` until TODO 4.4 wires
+  the daemon, and its test pins that so a missing implementation cannot turn
+  into a fake success. `mcp serve` refuses `--db`/`PASSMGR_DB` even though it
+  opens no vault: accepting a path would suggest it had chosen one.
 - An out-of-scope ref answers exactly like a nonexistent one (no existence
   oracle). Agent-supplied text shown to a human is sanitized (control and
   bidi characters stripped) and labelled untrusted.

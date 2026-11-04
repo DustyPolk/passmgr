@@ -1,3 +1,35 @@
+## 2026-11-04 — MCP stdio loop and tool catalogue (TODO 4.3)
+
+- `src/mcp/server.rs`: sequential stdio loop over `LineReader`/`parse_line`,
+  era `admit` before dispatch, era-owned replies verbatim, `decorate` on every
+  own result, silent handling of notifications and peer responses. `tools/list`
+  and `ping` need no daemon; `tools/call` is `-32601` until 4.4. A malformed,
+  oversized or non-object-params line answers exactly once and the loop
+  resynchronizes; stdout is only JSON-RPC and flushed per batch.
+- `src/mcp/tools.rs`: pure catalogue of the five MCP tools with hand-written
+  schemas plus `list_result()`. Every object schema sets
+  `additionalProperties: false` (map inputs use `propertyNames`), no property
+  is named like a secret, output schemas carry references/metadata only, and
+  the whole catalogue is tested to fit one JSON-RPC line.
+- CLI: `passmgr mcp serve` (`src/cli/args/mcp.rs`, `src/cli/mcp.rs`), with
+  `--db`/`PASSMGR_DB` refused (exit 2) even though the server never opens a
+  vault. Help/golden file, README, MCP.md and DECISIONS updated.
+- Tests: 13 new unit tests (server) and 8 for the catalogue; a new
+  `tests/mcp_serve.rs` drives the binary over real pipes in both eras, parses
+  every stdout line with the crate codec, and pins empty stderr, the not-found
+  branches and the vault-selection refusal.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass. The diff is larger than the usual ~400-line budget
+  (mostly hand-written JSON Schemas and their tests); the loop and catalogue
+  were kept in this one item because `tools/list` is not useful without it.
+- **Next iteration must know:** TODO 4.4 must replace the `tools/call`
+  `-32601` branch in `Server::dispatch` (and its test
+  `tools_call_reports_that_it_is_not_available_yet`). `tools.rs` has schemas
+  but no input validation or execution yet. The catalogue order in `ALL`
+  (access_status first) is what the e2e test asserts; MCP.md's Tools section
+  is the reference for arguments. The MCP module still has no test grepping
+  it for `reveal`/`clipboard` reachability (MCP.md asks for one; not done).
+
 ## 2026-11-04 — MCP protocol era handling (TODO 4.2)
 
 - New `src/mcp/era.rs` (+ `src/mcp/era/tests.rs`, 20 tests). Pure, no I/O:

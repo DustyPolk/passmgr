@@ -2,12 +2,14 @@
 
 mod audit;
 mod grant;
+mod mcp;
 
 pub(crate) use audit::{AuditCommand, AuditListOptions, parse_audit};
 pub(crate) use grant::{
     GrantCommand, GrantCreateOptions, GrantListOptions, GrantRevokeOptions, GrantShowOptions,
     parse_grant,
 };
+pub(crate) use mcp::{McpCommand, parse_mcp};
 
 use std::env;
 use std::ffi::OsString;
@@ -51,6 +53,7 @@ pub(crate) enum Command {
     Lock,
     Run(RunOptions),
     Grant(GrantCommand),
+    Mcp(McpCommand),
     Audit(AuditCommand),
     Help,
     Version,
@@ -188,12 +191,25 @@ pub(crate) fn finish_parsing(
 /// the human, against the vault named by `--db`/`PASSMGR_DB`, so the choice is
 /// honoured. A grant token in the environment (not just on the command line)
 /// selects the daemon path and restores the refusal.
+///
+/// `mcp serve` is refused for a different reason: it never opens a vault at
+/// all, so accepting a path would be a lie even though there is nothing to
+/// choose between.
 fn refuse_daemon_vault_selection(
     command: &Command,
     flag_db: Option<&Path>,
     env_db: Option<&Path>,
     grant_from_env: bool,
 ) -> Result<(), String> {
+    if matches!(command, Command::Mcp(McpCommand::Serve)) {
+        let Some(source) = flag_db.map(|_| "--db").or(env_db.map(|_| "PASSMGR_DB")) else {
+            return Ok(());
+        };
+        return Err(format!(
+            "'mcp serve' never opens a vault and does not accept {source}; unset {source}, \
+             every credential decision is made by the running daemon"
+        ));
+    }
     let name = match command {
         Command::Run(options) if options.grant_file.is_none() && !grant_from_env => return Ok(()),
         Command::Run(_) => "run",
@@ -255,6 +271,7 @@ pub(crate) fn parse_command(command: OsString, rest: Vec<OsString>) -> Result<Co
         }
         "run" => parse_run(rest),
         "grant" => parse_grant(rest),
+        "mcp" => parse_mcp(rest),
         "audit" => parse_audit(rest),
         other => Err(format!("unknown command '{other}' (try 'passmgr --help')")),
     }

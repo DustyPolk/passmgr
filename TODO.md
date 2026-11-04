@@ -31,13 +31,15 @@ keeps the dependency tree small and stdout hygiene under our control.
       Note: a malformed `_meta` is `-32602`, never a legacy fallback; a
       second legacy `initialize` is `-32600`; `_meta` naming `2025-11-25`
       gets `-32022` (only `2026-07-28` is served statelessly). The server
-      loop still has to wire `admit`/`decorate` in (TODO 4.3).
-- [ ] **4.3 `pm mcp serve` loop + `tools/list`.** A stdio loop where stdout
+      loop still has to wire `admit`/`decorate` in (TODO 4.3, done).
+- [x] **4.3 `pm mcp serve` loop + `tools/list`.** A stdio loop where stdout
       carries only JSON and logs go to stderr. Tool definitions have
       hand-written JSON Schemas (`additionalProperties: false`), `title`,
       LLM-oriented `description`, `annotations`, and `outputSchema`. The
       `instructions` text is per `MCP.md`. Tests: an e2e session over pipes in
       both eras, and every stdout line parses.
+      Note: `tools/call` answers `-32601` until 4.4 wires the daemon; the
+      loop writes no diagnostics yet, so stderr is empty.
 - [ ] **4.4 Daemon `list`/`describe` requests** with grant-scoped results
       (out of scope = not found). Then the MCP tools `list_credentials` and
       `describe_credential`. Tests: scope filtering, tag/query filter, no

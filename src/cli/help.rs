@@ -176,13 +176,25 @@ Commands:
                              deleted or reordered record). A change to or
                              deletion of the final record, or of the whole
                              file, cannot be detected; see SECURITY.md.
+  mcp serve                  Speak the Model Context Protocol (JSON-RPC 2.0)
+                             over stdin and stdout for an agent host. Always
+                             agent context: never prompts, never opens the
+                             vault, and has no path that returns a secret.
+                             Implements both protocol eras, the legacy
+                             'initialize' handshake and the modern stateless
+                             '_meta' era, and answers 'tools/list' with five
+                             tools; credential calls go to the daemon (not
+                             wired yet, so 'tools/call' answers -32601).
+                             stdout carries only JSON-RPC lines; diagnostics
+                             go to stderr. Refuses --db and PASSMGR_DB
+                             (exit 2): the daemon owns every decision.
   help                       Show this help.
   version                    Show version information.
 
 Global options:
   --db PATH                  Vault file (default: ./passwords.dat, or $PASSMGR_DB).
-                             A grant-backed 'run' and 'grant revoke' do not
-                             accept it (see above).
+                             A grant-backed 'run', 'grant revoke' and
+                             'mcp serve' do not accept it (see above).
   --agent                    Force agent mode. This can only make the tool more
                              restrictive: 'get --reveal' is refused even on a
                              terminal. It never reveals a secret by itself.
@@ -224,6 +236,7 @@ Examples:
   passmgr audit --since 1h --limit 20
   passmgr audit --grant 0123456789abcdef0123456789abcdef --json
   passmgr audit verify
+  passmgr mcp serve
   passmgr --db ~/.secrets/work.dat list
 
 Notes:
@@ -291,4 +304,8 @@ Notes:
     undetectable without an external anchor.
   - Vaults are encrypted with Argon2id and AES-256-GCM.
   - The legacy C vault format is not readable; this version uses a new format.
+  - 'mcp serve' is the agent-facing entry point. It never reads the vault
+    and never prints a secret: it forwards credential work to the unlock
+    daemon, which is the only process that can inject one. Its protocol is
+    documented in MCP.md.
 "#;

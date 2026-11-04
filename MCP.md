@@ -117,6 +117,26 @@ Implementation notes (`src/mcp/era.rs`, TODO 4.2):
   other result is passed through the same decorator, which adds
   `resultType`/`_meta` for modern and nothing for legacy.
 
+Implementation notes (`src/mcp/server.rs`, `src/mcp/tools.rs`, TODO 4.3):
+
+- The loop is sequential and synchronous: one input buffer at a time, eight
+  KiB reads, each completed line offered to the era module before any method
+  dispatch. A notification and a peer response are consumed silently; a
+  request always gets exactly one line back. Every write is flushed, because
+  the peer waits on it.
+- Tool definitions live in one pure catalogue. Every input and output object
+  closes itself with `additionalProperties: false` (map-shaped inputs use
+  `propertyNames` instead), no schema property is named like a secret, and
+  the entry/grant shapes carry references, names and timestamps only. The
+  catalogue is tested to fit in one JSON-RPC line, so `tools/list` can never
+  be truncated by the 1 MiB line cap.
+- `tools/call` answers `-32601` in this build, with a message saying so: no
+  tool reaches the daemon yet. TODO 4.4 replaces that branch with the
+  dispatcher and updates the test that pins it. `ping` answers `{}`.
+- The loop does not write to stderr today. A future diagnostic must never
+  include a secret, a token, a reference the caller did not supply, or
+  agent-supplied text without escaping.
+
 ## Tools
 
 The tool set is deliberately small. Every input is validated against its

@@ -8,6 +8,7 @@ mod commands;
 mod grant;
 mod grant_summary;
 mod help;
+mod mcp;
 mod run;
 mod unlock;
 
@@ -16,6 +17,7 @@ pub(crate) use audit::*;
 pub(crate) use commands::*;
 pub(crate) use grant::*;
 pub(crate) use help::*;
+pub(crate) use mcp::*;
 pub(crate) use run::*;
 pub(crate) use unlock::*;
 
@@ -90,6 +92,7 @@ fn run() -> Result<std::process::ExitCode, CliError> {
         Command::Lock => command_lock()?,
         Command::Run(options) => return Ok(command_run(options, agent_mode, &path)?),
         Command::Grant(command) => command_grant(command, agent_mode, &path)?,
+        Command::Mcp(command) => command_mcp(command)?,
         Command::Audit(command) => command_audit(command)?,
     }
     Ok(std::process::ExitCode::SUCCESS)

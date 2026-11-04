@@ -256,6 +256,22 @@ copies of an injected value; retry once an earlier command finishes.
 `run` is the supported way to give an agent a credential. The agent supplies
 the reference (from `list --json`) and a command, never the value.
 
+### Use credentials from an agent (MCP, in progress)
+
+`passmgr mcp serve` speaks the Model Context Protocol on stdin/stdout so an
+agent host can discover and use credentials without ever receiving a value.
+The process is always in agent context: it never prompts, never opens the
+vault, and refuses `--db`/`PASSMGR_DB` (exit 2) because every credential
+decision belongs to the daemon.
+
+It implements the dual-era handshake (legacy `initialize` and modern
+stateless `_meta`) and `tools/list`, which returns five tools:
+`access_status`, `list_credentials`, `describe_credential`,
+`run_with_credentials` and `request_access`. Wiring `tools/call` to the
+daemon is the next step, so every call currently answers `-32601`;
+[MCP.md](MCP.md) is the contract for the rest. stdout carries only JSON-RPC
+lines and diagnostics go to stderr.
+
 ### Create a grant
 
 A grant is a human-authorized, scoped, expiring permission for an agent. It
