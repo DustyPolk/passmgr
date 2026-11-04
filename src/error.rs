@@ -19,7 +19,8 @@ pub const EXIT_NOT_FOUND: u8 = 3;
 pub const EXIT_AUTH_FAILED: u8 = 4;
 /// The operation was refused (for example a plaintext reveal outside a TTY).
 pub const EXIT_REFUSED: u8 = 5;
-/// The vault file is malformed, truncated, or in an unsupported format.
+/// The vault file or the audit log is malformed, truncated, or its hash chain
+/// does not verify.
 pub const EXIT_MALFORMED_VAULT: u8 = 6;
 /// `run` could not relay its own output because the caller closed the pipe.
 /// 141 is the shell's SIGPIPE status (128 + 13): the child's status can no
@@ -62,6 +63,13 @@ pub enum Error {
     /// answered an error. The detail is user-facing and never contains secret
     /// material. Maps to exit code 1.
     Daemon(String),
+    /// The audit log could not be read or written. The detail is a path and a
+    /// fixed reason, never a record. Maps to exit code 1.
+    Audit(String),
+    /// The audit log is malformed or its hash chain does not verify. The
+    /// detail names the first broken line and is safe to print. Maps to exit
+    /// code 6, like a malformed vault.
+    AuditBroken(String),
     InvalidInput(String),
 }
 
@@ -79,7 +87,8 @@ impl Error {
             | Self::LegacyVault
             | Self::UnsupportedVersion(_)
             | Self::UnsupportedFormat(_)
-            | Self::MalformedVault(_) => EXIT_MALFORMED_VAULT,
+            | Self::MalformedVault(_)
+            | Self::AuditBroken(_) => EXIT_MALFORMED_VAULT,
             Self::InvalidInput(_) => EXIT_USAGE,
             // Duplicate entries, I/O failures, crypto failures (RNG or
             // encryption setup) and daemon failures are plain runtime errors.
@@ -89,7 +98,8 @@ impl Error {
             | Self::Daemon(_)
             | Self::ReadOnlyVault(_)
             | Self::VaultBusy(_)
-            | Self::VaultChanged(_) => EXIT_FAILURE,
+            | Self::VaultChanged(_)
+            | Self::Audit(_) => EXIT_FAILURE,
         }
     }
 }
@@ -154,6 +164,14 @@ impl fmt::Display for Error {
                 escape_path(path)
             ),
             Self::Daemon(detail) => f.write_str(&escape_hidden(detail)),
+            Self::Audit(detail) => write!(f, "audit log: {}", escape_hidden(detail)),
+            Self::AuditBroken(detail) => {
+                write!(
+                    f,
+                    "audit log verification failed: {}",
+                    escape_hidden(detail)
+                )
+            }
             Self::InvalidInput(detail) => f.write_str(&escape_hidden(detail)),
         }
     }
@@ -171,6 +189,18 @@ impl std::error::Error for Error {
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+impl From<crate::audit::AuditError> for Error {
+    /// A malformed log is a verification failure (exit 6); every other audit
+    /// error is a read/write problem (exit 1). The conversion keeps the
+    /// detail, which never contains a record or a secret.
+    fn from(error: crate::audit::AuditError) -> Self {
+        match error {
+            crate::audit::AuditError::Malformed(detail) => Self::AuditBroken(detail),
+            other => Self::Audit(other.to_string()),
+        }
     }
 }
 
@@ -198,6 +228,8 @@ mod tests {
             (Error::ReadOnlyVault(PathBuf::from("v.dat")), EXIT_FAILURE),
             (Error::VaultBusy(PathBuf::from("v.dat")), EXIT_FAILURE),
             (Error::VaultChanged(PathBuf::from("v.dat")), EXIT_FAILURE),
+            (Error::Audit("x".into()), EXIT_FAILURE),
+            (Error::AuditBroken("x".into()), EXIT_MALFORMED_VAULT),
             (Error::Io(std::io::Error::other("x")), EXIT_FAILURE),
         ];
         for (error, expected) in cases {

@@ -198,7 +198,7 @@ when stdin or stdout is not a terminal or when an agent marker (or `--agent`)
 is present; the check happens before the password prompt, so a refusal never
 reads the vault. Local runs are written to the same hash-chained audit log as
 daemon runs, with `source: local` and no grant (TODO 3.8); the record never
-holds the secret or a token.
+holds the secret or a token, and `passmgr audit` shows it without a password.
 
 On the grant path, `run` needs both the unlock session token and a grant token
 that covers the credential and command. The grant token is read from `--grant-file` or
@@ -328,6 +328,37 @@ key the daemon already holds, so a revoked grant is refused on the next
 request. Revoking an already-revoked id succeeds and changes nothing, and an
 unknown id is exit code 3. Like `run`, it refuses `--db` and `PASSMGR_DB`
 because it always acts on the daemon's vault.
+
+### Read the audit log
+
+Every allowed and denied `run` appends one line to
+`$XDG_STATE_HOME/passmgr/audit.jsonl` (fallback `~/.local/state`). A line
+records the time, source (`daemon` or `local`), outcome, grant id, credential
+reference, program, arguments and exit status -- never a secret or a grant
+token:
+
+```bash
+passmgr audit
+passmgr audit --since 1h --limit 20
+passmgr audit --grant 0123456789abcdef0123456789abcdef --json
+passmgr audit verify
+```
+
+`audit` prints the oldest matching record first and ends with a header such as
+`Audit records (showing 20 of 143):`. `--json` prints `{"records":[...]}`; each
+record has `v`, `ts`, `source`, `event`, `outcome`, `grant`, `ref`, `command`,
+`args`, `exit`, `signal` and `prev`. `--since` accepts `30s`, `15m`, `1h`,
+`7d`; `--limit` defaults to 50.
+
+No master password is needed: the log is metadata only, so reading it cannot
+expose a credential. It also means any same-user process can read the log, and
+can rewrite it.
+
+`audit verify` recomputes the hash chain over the whole file and exits 6 on the
+first broken link, naming the line, e.g. after an edited, deleted or reordered
+record. It cannot detect a changed or deleted *final* record, or a deleted
+file, because nothing after them disagrees: see
+[SECURITY.md](SECURITY.md#8-the-audit-chain-cannot-detect-a-truncated-tail).
 
 ### List services
 
@@ -572,7 +603,7 @@ These codes are stable: scripts and agents may rely on them.
 | 3 | Not found (missing vault file, unknown service, unknown reference, or unknown grant id) |
 | 4 | Authentication failed (wrong master password) |
 | 5 | Refused: a security check said no (plaintext reveal without a terminal or in agent mode, a run without a usable grant, a missing or insecure grant file, a refused environment variable, or creating a grant in agent mode) |
-| 6 | Malformed, truncated, or unsupported vault file |
+| 6 | Malformed, truncated, or unsupported vault file, or an audit log whose hash chain does not verify |
 | 141 | `run` could not relay its output because the pipe was closed; the run was cancelled |
 
 ## License

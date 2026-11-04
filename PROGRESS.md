@@ -1,3 +1,33 @@
+## 2026-11-04 — `pm audit` listing and `pm audit verify` (TODO 3.9)
+
+- `src/audit/read.rs` (new; `audit.rs` re-exports it): strict `Record` parser
+  for the writer's schema, `verify` walking `prev` from the all-zero genesis,
+  `load`/`select` for listings. The first impossible link is named
+  (`line N: prev does not match line N-1`), and a file not ending in `\n` is
+  refused.
+- `pm audit [--json] [--grant ID] [--since 30s|15m|1h|7d] [--limit N]` lists
+  oldest first, newest N (default 50) of the filtered set, header
+  `Audit records (showing N of M):`, `{"records":[...]}` for `--json`.
+  `pm audit verify` prints `Audit log verified: N records.` and exits 6 on a
+  broken chain. Neither needs a password: records hold no secret or token.
+- `Error::Audit` (exit 1) is an unreadable/loose log; `Error::AuditBroken`
+  (exit 6) a broken chain. Reads take a shared `flock` (a concurrent append
+  cannot look like tampering) and refuse over 64 MiB. `timestamp::parse_utc`
+  parses exactly the 20-byte format `format_utc` writes.
+- Tests: 8 units in `src/audit/read.rs` (edited/deleted/reordered/torn, schema
+  matrix, loose path, filter/tail) and 12 in `tests/audit_cli.rs` (listing,
+  JSON shape, filters, edited→exit 6 naming lines 3 and 2, deleted→line 2,
+  reordered→line 1, torn tail, empty log, 0644 refused, no prompt, `$HOME`
+  fallback). `tests/docs.rs` pins the new tail limit.
+- Docs: SECURITY limit 8 (Out of scope → 9), README, HELP (+ golden file),
+  DECISIONS, MCP, TODO. Gate: fmt, clippy `-D warnings`, full `cargo test`
+  green; `cargo audit` skipped (not installed).
+- **Next iteration must know:** `--since` is an age, not a date. A denial whose
+  token matched an expired/out-of-scope grant still has `grant: null` (3.8
+  note), so `--grant` misses it; returning the matched id from `record_use` is
+  a follow-up. Verify cannot see a changed/deleted final record or the file's
+  deletion (SECURITY limit 8).
+
 ## 2026-11-04 — Hash-chained audit log for daemon and local runs (TODO 3.8)
 
 - New `src/audit.rs`: `$XDG_STATE_HOME/passmgr/audit.jsonl` (fallback

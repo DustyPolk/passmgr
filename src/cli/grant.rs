@@ -576,7 +576,7 @@ fn load_session(paths: &socket::RuntimePaths) -> Result<SessionToken, Error> {
     }
 }
 
-fn unix_now() -> Result<u64, Error> {
+pub(crate) fn unix_now() -> Result<u64, Error> {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| Error::InvalidInput("the system clock is before the Unix epoch".to_owned()))?

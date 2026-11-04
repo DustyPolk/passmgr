@@ -49,12 +49,18 @@ use sha2::{Digest, Sha256};
 use crate::grant::GrantId;
 use crate::timestamp;
 
+mod read;
+
+pub use read::{Filter, MAX_LOG_BYTES, Record, VerifyError, load, select};
+
 /// Directory under the state home that passmgr owns.
 pub const STATE_DIR_NAME: &str = "passmgr";
 /// The audit file inside [`STATE_DIR_NAME`].
 pub const AUDIT_FILE_NAME: &str = "audit.jsonl";
 /// `prev` of the first record: 64 lowercase hex zeros.
 pub const GENESIS_PREV: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+/// The only `event` value this format version defines.
+pub const EVENT_RUN: &str = "run";
 /// Largest line this build writes or accepts as the previous line.
 ///
 /// The per-field caps below keep every record well under this even when JSON
@@ -81,7 +87,7 @@ pub enum Source {
 }
 
 impl Source {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Daemon => "daemon",
             Self::Local => "local",
@@ -111,7 +117,7 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Allowed => "allowed",
             Self::Denied => "denied",
@@ -216,8 +222,8 @@ pub fn check_writable(path: &Path) -> Result<(), AuditError> {
 
 /// The lowercase SHA-256 of one record line, without its newline.
 ///
-/// Exposed so `pm audit verify` (TODO 3.9) and tests use exactly the rule the
-/// writer used.
+/// Exposed so `pm audit verify` and tests use exactly the rule the writer
+/// used.
 pub fn chain_hash(line: &[u8]) -> String {
     let digest = Sha256::digest(line);
     let mut hex = String::with_capacity(digest.len() * 2);
@@ -237,7 +243,7 @@ pub fn encode_line(prev: &str, event: &Event<'_>, now: u64) -> String {
     object.insert("v".into(), json!(1));
     object.insert("ts".into(), json!(timestamp::format_utc(now)));
     object.insert("source".into(), json!(event.source.as_str()));
-    object.insert("event".into(), json!("run"));
+    object.insert("event".into(), json!(EVENT_RUN));
     object.insert("outcome".into(), json!(event.outcome.as_str()));
     object.insert(
         "grant".into(),
@@ -315,6 +321,13 @@ fn open_locked(path: &Path) -> Result<File, AuditError> {
         path: path.to_path_buf(),
         source,
     })?;
+    validate_file(&metadata, path)?;
+    lock(&file, path, libc::LOCK_EX)?;
+    Ok(file)
+}
+
+/// Check that an already-open descriptor is the private regular file we wrote.
+fn validate_file(metadata: &fs::Metadata, path: &Path) -> Result<(), AuditError> {
     if !metadata.is_file() {
         return Err(AuditError::Insecure {
             path: path.to_path_buf(),
@@ -335,11 +348,12 @@ fn open_locked(path: &Path) -> Result<File, AuditError> {
             detail: "not owned by the current user".into(),
         });
     }
-    lock_exclusive(&file, path)?;
-    Ok(file)
+    Ok(())
 }
 
-fn ensure_directory(directory: &Path) -> Result<(), AuditError> {
+/// Validate a directory without creating it. `Ok(false)` means it does not
+/// exist yet; a reader treats that as an empty log, a writer creates it.
+fn validate_directory(directory: &Path) -> Result<bool, AuditError> {
     match fs::symlink_metadata(directory) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -362,20 +376,9 @@ fn ensure_directory(directory: &Path) -> Result<(), AuditError> {
                     detail: "not owned by the current user".into(),
                 });
             }
-            Ok(())
+            Ok(true)
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            DirBuilder::new()
-                .recursive(true)
-                .mode(STATE_DIR_MODE)
-                .create(directory)
-                .map_err(|source| AuditError::Io {
-                    path: directory.to_path_buf(),
-                    source,
-                })?;
-            // Re-check rather than trusting the umask or a racing creator.
-            ensure_directory(directory)
-        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(source) => Err(AuditError::Io {
             path: directory.to_path_buf(),
             source,
@@ -383,12 +386,34 @@ fn ensure_directory(directory: &Path) -> Result<(), AuditError> {
     }
 }
 
-fn lock_exclusive(file: &File, path: &Path) -> Result<(), AuditError> {
+fn ensure_directory(directory: &Path) -> Result<(), AuditError> {
+    if validate_directory(directory)? {
+        return Ok(());
+    }
+    DirBuilder::new()
+        .recursive(true)
+        .mode(STATE_DIR_MODE)
+        .create(directory)
+        .map_err(|source| AuditError::Io {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+    // Re-check rather than trusting the umask or a racing creator.
+    if !validate_directory(directory)? {
+        return Err(AuditError::Io {
+            path: directory.to_path_buf(),
+            source: io::Error::new(io::ErrorKind::NotFound, "the directory disappeared"),
+        });
+    }
+    Ok(())
+}
+
+fn lock(file: &File, path: &Path, operation: i32) -> Result<(), AuditError> {
     let deadline = Instant::now() + LOCK_TIMEOUT;
     loop {
         // SAFETY: `as_raw_fd` returns a descriptor owned by `file`, which
         // outlives this call.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        let rc = unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) };
         if rc == 0 {
             return Ok(());
         }

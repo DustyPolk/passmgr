@@ -338,8 +338,36 @@ fn security_current_status_matches_the_implemented_grant_flow() {
         "SECURITY.md Current status must not say no audit record is written"
     );
     assert!(
-        status.contains("TODO 3.9") && status.contains("pm audit verify"),
-        "SECURITY.md Current status must say pm audit verify is still TODO 3.9"
+        status.contains("pm audit") && status.contains("pm audit verify"),
+        "SECURITY.md Current status must say the audit reader and verifier exist"
+    );
+    assert!(
+        !status.contains("still open"),
+        "SECURITY.md Current status must not say pm audit is still open"
+    );
+    assert!(
+        status.contains("exit 6"),
+        "SECURITY.md Current status must say a broken chain exits 6"
+    );
+}
+
+/// TODO 3.9: an attacker who can rewrite the log can also truncate its tail,
+/// and no in-file chain can notice. The limit must stay visible next to the
+/// verifier it qualifies.
+#[test]
+fn security_documents_the_audit_tail_limit() {
+    let limit = security_limit(8);
+    assert!(
+        limit.contains("cannot prove") && limit.contains("final record"),
+        "SECURITY.md limit 8 must name what the chain cannot prove"
+    );
+    assert!(
+        limit.contains("deleting the last record") && limit.contains("whole file"),
+        "SECURITY.md limit 8 must name both undetectable deletions"
+    );
+    assert!(
+        limit.contains("tamper-evidence for the records that remain"),
+        "SECURITY.md limit 8 must say what verification does prove"
     );
 }
 

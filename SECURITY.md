@@ -15,8 +15,11 @@ Grant-based authorization is implemented for `run` (TODO 3.1–3.6): every
 agent-facing use needs a grant token that matches an active, in-scope grant in
 the vault, and the daemon records the use before it injects. Every `run` that
 reaches `pmd` appends one metadata-only record to the hash-chained audit log
-at `$XDG_STATE_HOME/passmgr/audit.jsonl` (TODO 3.8); the `pm audit` reader and
-`pm audit verify` are still open (TODO 3.9). `run` also has a human-only local
+at `$XDG_STATE_HOME/passmgr/audit.jsonl` (TODO 3.8). `pm audit` lists those
+records (filtered by grant, age or count) and `pm audit verify` re-checks the
+whole chain, reporting the first broken line with exit 6 (TODO 3.9). Reading
+needs no master password because a record holds no secret or token. `run`
+also has a human-only local
 path (TODO 3.7): without a grant token, at a terminal, the CLI prompts for the
 master password, opens the named vault, and injects under the same TTY/agent
 gate as reveal. A local run is audited too, with `source: local` and no grant.
@@ -102,8 +105,8 @@ inherits every limit below.
   with the key it already holds. A running `pmd` also remembers the furthest
   `uses` and any revocation it has seen per grant id, so putting an older
   vault back cannot undo either (limit 7). The hash-chained audit log records
-  every allowed and denied `run` without values or tokens (TODO 3.8); the
-  `pm audit` reader and chain verifier are still open (TODO 3.9).
+  every allowed and denied `run` without values or tokens, and `pm audit` /
+  `pm audit verify` read and check it without a password (TODO 3.8, 3.9).
 
 ## Known limits
 
@@ -258,7 +261,24 @@ daemon is running needs a `pm lock`/restart (or it answers `denied` until one).
 This is the same class as limit 1 -- a hostile same-user process -- and is not
 defended against beyond the running daemon's memory.
 
-### 8. Out of scope
+### 8. The audit chain cannot detect a truncated tail
+
+`pm audit verify` proves that every record still present commits to the record
+before it. It cannot prove that the final record is the one the writer wrote,
+because nothing follows the final record to disagree with a change, and it
+cannot prove the file is complete: deleting the last record, or the whole
+file, leaves a chain that verifies. An attacker running as the same user can
+do either; so can a crash before `fsync`, which is why a write failure is
+reported rather than hidden.
+
+Detecting this needs an anchor outside the file the attacker can rewrite --
+a remote log, a monotonic counter in protected storage, or a hardware root of
+trust. passmgr has no network and no such storage, so this is accepted. Treat
+`pm audit verify` as tamper-evidence for the records that remain, not proof
+that nothing was removed. Keep the log on a filesystem the attacker cannot
+roll back (limit 7 is the same class of problem).
+
+### 9. Out of scope
 
 passmgr does not and cannot protect against:
 

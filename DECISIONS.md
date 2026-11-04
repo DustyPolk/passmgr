@@ -810,6 +810,21 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   refused before decryption or spawn (fail closed). `O_NOFOLLOW`, regular-file
   and owner checks match the session file; a group/world-readable file or
   directory is refused, not repaired.
+- Audit reading (TODO 3.9): the reader and verifier live in
+  `src/audit/read.rs` and parse the same schema the writer emits, strictly
+  (unknown version, event, outcome or source; a non-`pm://` reference; a
+  control character; an oversized line; more than 16 arguments or 128 bytes
+  per argument are all a broken chain, not a skipped line). `pm audit` lists
+  metadata only and needs no password: a record holds no secret, so a prompt
+  would add nothing but friction, and the log is same-user readable anyway.
+  `pm audit verify` reads the file under a shared `flock` (so a concurrent
+  append cannot look like tampering) with a 64 MiB cap, checks every
+  `prev` link starting from the all-zero genesis, and reports the first
+  impossible link (`line N: prev does not match line N-1`) with exit 6. A
+  missing log verifies as zero records. Editing, deleting a middle record,
+  inserting one or reordering records is detected; changing or deleting the
+  final record is not, and is documented as SECURITY limit 8 rather than
+  papered over.
 
 ## Dependencies
 

@@ -183,9 +183,12 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       `grant`, `ref`, `command`, `args`, `exit`/`signal` and `prev`; appends
       are serialized with `flock` and `fsync`ed, and an unrecordable run is
       refused before decrypting (fail closed). MCP fields stay with 4.11.
-- [ ] **3.9 `pm audit [--json] [--grant ID] [--since DUR] [--limit N]` and
+- [x] **3.9 `pm audit [--json] [--grant ID] [--since DUR] [--limit N]` and
       `pm audit verify`.** verify reports the first broken link with exit 6.
       Tests: tampering with, deleting or reordering a line is detected.
+      Note: `--since` takes an age (`1h`, `7d`), not a date; denied records
+      whose token matched no active grant carry `grant: null`, so `--grant`
+      cannot show them.
 
 ## Phase 4 — MCP server (`pm mcp serve`)
 

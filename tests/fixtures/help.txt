@@ -155,6 +155,22 @@ Commands:
                              an already-revoked id succeeds and changes
                              nothing. Like 'run', it refuses --db and
                              PASSMGR_DB: it uses the running daemon's vault.
+  audit [options]            Show audit records, metadata only, oldest first.
+                             No master password is needed: a record holds the
+                             time, outcome, grant id, reference, program,
+                             arguments and exit status, never a secret or a
+                             token. Allowed options:
+                               --json         Print {"records":[...]}.
+                               --grant ID     Records authorized by that grant.
+                               --since 30s|15m|1h|7d
+                                              Records at or after that age.
+                               --limit N      Show the most recent N (default
+                                              50, at least 1).
+  audit verify               Verify every record's hash chain and exit 6 on
+                             the first broken link (an edited, inserted,
+                             deleted or reordered record). A change to or
+                             deletion of the final record, or of the whole
+                             file, cannot be detected; see SECURITY.md.
   help                       Show this help.
   version                    Show version information.
 
@@ -199,6 +215,10 @@ Examples:
   passmgr grant show 0123456789abcdef0123456789abcdef
   passmgr grant revoke 0123456789abcdef0123456789abcdef
   passmgr grant revoke --all
+  passmgr audit
+  passmgr audit --since 1h --limit 20
+  passmgr audit --grant 0123456789abcdef0123456789abcdef --json
+  passmgr audit verify
   passmgr --db ~/.secrets/work.dat list
 
 Notes:
@@ -240,8 +260,9 @@ Notes:
   - Exit codes are stable: 0 success, 1 runtime failure, 2 usage or invalid
     input, 3 not found, 4 wrong master password, 5 refused (for example
     'get --reveal' without a terminal, in an agent context, or with --agent),
-    6 malformed, truncated or unsupported vault file, and 141 when 'run'
-    cannot relay its output because its pipe was closed.
+    6 malformed, truncated or unsupported vault file, or an audit log whose
+    hash chain does not verify, and 141 when 'run' cannot relay its output
+    because its pipe was closed.
   - 'unlock' starts a per-user background daemon that keeps the vault key in
     memory, so later commands do not prompt again. The daemon listens on a
     socket inside $XDG_RUNTIME_DIR/passmgr that only the owning user can
@@ -258,5 +279,10 @@ Notes:
     receives only the fixed inherited environment listed above, then NAME; it
     never inherits the rest of the caller's environment. The secret is used,
     not read: output is redacted, and it never crosses a socket.
+  - 'audit' reads the log at $XDG_STATE_HOME/passmgr/audit.jsonl (fallback
+    ~/.local/state). Reading needs no password because the log holds metadata
+    only. 'audit verify' proves the chain is intact, not that the whole file
+    is present: the last record, its deletion, and the file's deletion are
+    undetectable without an external anchor.
   - Vaults are encrypted with Argon2id and AES-256-GCM.
   - The legacy C vault format is not readable; this version uses a new format.

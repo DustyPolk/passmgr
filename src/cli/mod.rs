@@ -3,6 +3,7 @@
 //! `src/main.rs` is only the process entry point; everything else lives here.
 
 mod args;
+mod audit;
 mod commands;
 mod grant;
 mod grant_summary;
@@ -11,6 +12,7 @@ mod run;
 mod unlock;
 
 pub(crate) use args::*;
+pub(crate) use audit::*;
 pub(crate) use commands::*;
 pub(crate) use grant::*;
 pub(crate) use help::*;
@@ -88,6 +90,7 @@ fn run() -> Result<std::process::ExitCode, CliError> {
         Command::Lock => command_lock()?,
         Command::Run(options) => return Ok(command_run(options, agent_mode, &path)?),
         Command::Grant(command) => command_grant(command, agent_mode, &path)?,
+        Command::Audit(command) => command_audit(command)?,
     }
     Ok(std::process::ExitCode::SUCCESS)
 }

@@ -1,7 +1,9 @@
 //! Command-line argument parsing.
 
+mod audit;
 mod grant;
 
+pub(crate) use audit::{AuditCommand, AuditListOptions, parse_audit};
 pub(crate) use grant::{
     GrantCommand, GrantCreateOptions, GrantListOptions, GrantRevokeOptions, GrantShowOptions,
     parse_grant,
@@ -49,6 +51,7 @@ pub(crate) enum Command {
     Lock,
     Run(RunOptions),
     Grant(GrantCommand),
+    Audit(AuditCommand),
     Help,
     Version,
 }
@@ -252,6 +255,7 @@ pub(crate) fn parse_command(command: OsString, rest: Vec<OsString>) -> Result<Co
         }
         "run" => parse_run(rest),
         "grant" => parse_grant(rest),
+        "audit" => parse_audit(rest),
         other => Err(format!("unknown command '{other}' (try 'passmgr --help')")),
     }
 }
