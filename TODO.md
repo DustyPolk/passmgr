@@ -46,7 +46,7 @@ Fix these before the feature phases below; most severe first.
       the log the preflight created. Pre-spawn denials keep their answer and
       log a warning; only the allowed branch fails the run.
 
-- [ ] **R.69 (Medium) The "reveal/clipboard cannot be reached from `mcp`"
+- [x] **R.69 (Medium) The "reveal/clipboard cannot be reached from `mcp`"
       guard has no test.** `MCP.md:33-35` requires a test that greps the `mcp`
       module sources for `reveal`/`clipboard` calls, so a future change cannot
       quietly add one. No such test exists: `grep -rn "reveal\|clipboard"
@@ -62,6 +62,11 @@ Fix these before the feature phases below; most severe first.
       line).
       Test: the grep test must fail on a scratch copy with one added
       `crate::reveal::…` reference, and pass on the real tree.
+      Note: `tests/mcp_source_guard.rs` strips comments and literal contents,
+      then rejects any *identifier* containing `reveal`/`clipboard`, which
+      also covers `use`, `mod` and `as` renames; a synthetic-source test pins
+      the detector. Verified in a scratch edit that adding
+      `use crate::agent::reveal_refusal;` makes the real-tree test fail.
 
 ## Phase 4 — MCP server (`pm mcp serve`)
 

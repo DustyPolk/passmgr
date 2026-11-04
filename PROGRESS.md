@@ -1,3 +1,28 @@
+## 2026-11-04 — Source guard for reveal/clipboard in `mcp` (TODO R.69)
+
+- New `tests/mcp_source_guard.rs`: recursively scans every `.rs` file under
+  `src/mcp/`, strips comments (line, nested block) and string/char/raw-string
+  contents with a small line-spanning lexer, then rejects any remaining
+  **identifier** containing `reveal` or `clipboard`. Broader than literal
+  call shapes on purpose: `use crate::agent::reveal_refusal;`, `mod reveal;`,
+  `reveal::print(…)` and an `as` rename are all caught.
+- The detector is a pure `scan_source` helper, tested on synthetic sources
+  for both the dangerous routes and the benign cases (docs, comments, tool
+  description, raw strings, `'"'`, `'\''`, lifetimes). The real-tree test
+  first asserts the expected five files were found, so a bad path cannot
+  make it vacuously pass.
+- Verified the guard fails as required: a scratch append of
+  `use crate::agent::reveal_refusal;` to `src/mcp/mod.rs` made it report
+  `src/mcp/mod.rs:23: reveal_refusal`; the file was restored afterwards.
+- `MCP.md` now names the test instead of asking for one; `TODO.md` R.69 is
+  checked with a note.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass (`cargo audit` skipped, not installed).
+- **Next iteration must know:** future code or test identifiers under
+  `src/mcp/` must avoid the substrings `reveal`/`clipboard` entirely (even a
+  local variable like `revealed`); put such names in strings or comments, or
+  in a test outside `src/mcp/`. Next unchecked item is 4.4b (daemon `list`).
+
 ## 2026-11-04 — A run that cannot be recorded never reports success (TODO R.68)
 
 - `src/daemon/run.rs`: the metadata `record` closure now returns

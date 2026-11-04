@@ -31,8 +31,9 @@ any time. Every use is audited.
   **always** in agent context: it never prompts, never opens the vault file,
   never holds the vault key, and has no code path that can return plaintext.
   The reveal and clipboard code must not even be reachable from the `mcp`
-  module. Add a test that greps the `mcp` module sources for
-  `reveal`/`clipboard` calls, so a future change cannot quietly add one.
+  module. `tests/mcp_source_guard.rs` greps every source under `src/mcp/`
+  (comments and literal contents excluded) for `reveal`/`clipboard`
+  identifiers, so a future change cannot quietly add one.
 - All credential work goes through `pmd` over the existing socket protocol,
   authorized by a **grant token**. `run` carries that token in its request;
   `pmd` checks it against the vault grant before reading any secret.
