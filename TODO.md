@@ -1297,7 +1297,7 @@ Rules that apply to every item:
       session-token check (R.32) was already fixed; only the list itself was
       hardcoded.
 
-- [ ] **R.52 Unit tests depend on the caller's agent environment markers.**
+- [x] **R.52 Unit tests depend on the caller's agent environment markers.**
       `agent::tests::the_agent_flag_refuses_even_with_two_terminals` and
       `the_agent_flag_cannot_weaken_the_check` fail when `CLAUDECODE=1` or
       `AI_AGENT` is set (any Claude Code shell), and pass otherwise. The
@@ -1307,6 +1307,13 @@ Rules that apply to every item:
       Fix: make the detection take its environment as a parameter in tests,
       or clear the markers in the test setup.
       Test: `CLAUDECODE=1 AI_AGENT=1 cargo test --lib agent` passes.
+      Done: `agent_source` delegates to a private
+      `agent_source_from(agent_flag, is_set)`; the two flag tests use a
+      `clean_source` helper built on it instead of reading the real
+      environment. A new test
+      `an_inherited_marker_wins_over_the_flag_in_the_real_detection` pins that
+      a set marker still wins over `--agent`. Ran with all five markers set:
+      9/9 lib tests pass (both old tests failed before the change).
 
 - [ ] **R.55 `SECURITY.md`'s terminal-safety bullet claims more than the code
       does, and nothing pins it.**

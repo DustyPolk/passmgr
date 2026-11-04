@@ -131,7 +131,16 @@ pub fn reveal_refusal(
 /// The flag can only add refusal: passing `false` changes nothing, passing
 /// `true` refuses even when the environment is clean.
 pub fn agent_source(agent_flag: bool) -> Option<AgentSource> {
-    agent_marker().map(AgentSource::Env).or(if agent_flag {
+    agent_source_from(agent_flag, |name| env::var_os(name).is_some())
+}
+
+/// Testable core of [`agent_source`]: `is_set` decides whether a marker exists.
+///
+/// Taking the environment as a parameter keeps the unit tests independent of
+/// the markers inherited by whoever runs `cargo test` (for example a shell
+/// started by Claude Code).
+fn agent_source_from(agent_flag: bool, is_set: impl Fn(&str) -> bool) -> Option<AgentSource> {
+    marker_from(is_set).map(AgentSource::Env).or(if agent_flag {
         Some(AgentSource::Flag)
     } else {
         None
@@ -169,6 +178,12 @@ mod tests {
 
     fn env_source(marker: &'static str) -> Option<AgentSource> {
         Some(AgentSource::Env(marker))
+    }
+
+    /// `agent_source` against a clean environment, regardless of the markers
+    /// the test runner inherited.
+    fn clean_source(agent_flag: bool) -> Option<AgentSource> {
+        agent_source_from(agent_flag, |_| false)
     }
 
     #[test]
@@ -221,11 +236,11 @@ mod tests {
     #[test]
     fn the_agent_flag_refuses_even_with_two_terminals() {
         assert_eq!(
-            reveal_refusal(true, true, agent_source(true)),
+            reveal_refusal(true, true, clean_source(true)),
             Some(RevealRefusal::AgentContext(AgentSource::Flag))
         );
         assert_eq!(
-            reveal_refusal(false, true, agent_source(true)),
+            reveal_refusal(false, true, clean_source(true)),
             Some(RevealRefusal::AgentContext(AgentSource::Flag))
         );
     }
@@ -233,11 +248,26 @@ mod tests {
     #[test]
     fn the_agent_flag_cannot_weaken_the_check() {
         // Without the flag, the decision is unchanged.
-        assert_eq!(agent_source(false), None);
-        assert_eq!(reveal_refusal(true, true, agent_source(false)), None);
+        assert_eq!(clean_source(false), None);
+        assert_eq!(reveal_refusal(true, true, clean_source(false)), None);
         assert_eq!(
-            reveal_refusal(false, true, agent_source(false)),
+            reveal_refusal(false, true, clean_source(false)),
             Some(RevealRefusal::StdinNotTerminal)
+        );
+    }
+
+    #[test]
+    fn an_inherited_marker_wins_over_the_flag_in_the_real_detection() {
+        // The parameterized core is what the other tests use; this one pins
+        // that a set marker is reported ahead of `--agent` even when the flag
+        // is asked for too.
+        assert_eq!(
+            agent_source_from(true, |name| name == "CURSOR_AGENT"),
+            Some(AgentSource::Env("CURSOR_AGENT"))
+        );
+        assert_eq!(
+            agent_source_from(false, |name| name == "PASSMGR_AGENT"),
+            Some(AgentSource::Env("PASSMGR_AGENT"))
         );
     }
 

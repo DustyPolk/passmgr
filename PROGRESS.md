@@ -1,4 +1,24 @@
-## 2026-11-03 — Reprioritize: features before low-severity review findings (human)
+## 2026-11-03 — Make the agent-source unit tests independent of inherited markers (TODO R.52)
+
+- `src/agent.rs`: `agent_source(agent_flag)` now delegates to a private
+  `agent_source_from(agent_flag, is_set)`, the same seam `marker_from` already
+  gave `agent_marker`. The env lookup happens only in the real caller, so a
+  `cargo test` run from a Claude Code (or Cursor/Codex) shell is deterministic.
+- Tests: `the_agent_flag_refuses_even_with_two_terminals` and
+  `the_agent_flag_cannot_weaken_the_check` use a new `clean_source` helper
+  (predicate always false). Added
+  `an_inherited_marker_wins_over_the_flag_in_the_real_detection` so the
+  precedence of a real marker over `--agent` stays pinned through the new core.
+- Reproduced first: `CLAUDECODE=1 AI_AGENT=1 cargo test --lib agent::` failed
+  both tests with `Some(Env("CLAUDECODE"))`; after the change all nine lib
+  tests pass with all five `AGENT_MARKERS` set in the environment.
+- No behavior change to the real gates (`check_human`, `check_reveal`):
+  `agent_source` reads the same variables in the same order.
+- Gate: fmt, clippy, full `cargo test` green; `cargo audit` skipped.
+- **Next iteration must know:** the next unchecked item is R.55
+  (`SECURITY.md`'s terminal-safety bullet vs R.48). R.48 has landed since that
+  finding was written, so re-check whether R.55 is now satisfied or only needs
+  a reword; do not assume the finding is still accurate.
 
 - 62 of ~90 work iterations had gone to review findings while Phase 4 (the MCP
   server, the reason passmgr exists) had none started. Reviews now tag each
