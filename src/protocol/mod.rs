@@ -713,6 +713,13 @@ fn validate_request(request: &Request) -> Result<(), ProtocolError> {
                 "run.command[{index}] exceeds {MAX_ARG_BYTES} bytes"
             )));
         }
+        // `execve` takes C strings; a NUL here would fail the spawn after the
+        // grant use is spent.
+        if argument.contains('\0') {
+            return Err(ProtocolError::InvalidRequest(format!(
+                "run.command[{index}] must not contain a NUL byte"
+            )));
+        }
         if index == 0 {
             // Never let the daemon resolve a program through its own PATH:
             // that PATH belongs to the shell that started `unlock`, not to the
