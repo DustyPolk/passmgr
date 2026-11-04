@@ -14,7 +14,7 @@ Rules that apply to every item:
 Confirmed defects from the review of `47c64ac..7fd2997` (see `PROGRESS.md`).
 Fix these before the feature phases below; most severe first.
 
-- [ ] **R.68 (Medium) A run whose audit record cannot be written still
+- [x] **R.68 (Medium) A run whose audit record cannot be written still
       succeeds, injects the secret and consumes the use.**
       `src/daemon/run.rs:93` refuses the run when `audit::check_writable`
       fails, but the `record` closure at `src/daemon/run.rs:105-120` only
@@ -42,6 +42,9 @@ Fix these before the feature phases below; most severe first.
       chmod/removal race driven by the child) and assert the client never
       receives `Exit(0)`, the local command exits non-zero, and stderr names
       the audit log.
+      Note: no test seam was needed; both tests use a child that `chmod 400`s
+      the log the preflight created. Pre-spawn denials keep their answer and
+      log a warning; only the allowed branch fails the run.
 
 - [ ] **R.69 (Medium) The "reveal/clipboard cannot be reached from `mcp`"
       guard has no test.** `MCP.md:33-35` requires a test that greps the `mcp`

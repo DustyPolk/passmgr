@@ -101,11 +101,14 @@ pub(super) fn serve_run(
     }
     // Metadata only: the reference and argv the client sent, the grant that
     // authorized (if any) and how the run ended. No secret or token is in
-    // scope here, and `Event` has no field that could carry one.
+    // scope here, and `Event` has no field that could carry one. The result is
+    // returned, not swallowed: a run that reports success must have a record
+    // on disk (TODO R.68).
     let record = |outcome: audit::Outcome,
                   grant: Option<GrantId>,
                   command: Option<&str>,
-                  termination: Option<audit::Termination>| {
+                  termination: Option<audit::Termination>|
+     -> Result<(), audit::AuditError> {
         let event = audit::Event {
             source: audit::Source::Daemon,
             outcome,
@@ -115,19 +118,24 @@ pub(super) fn serve_run(
             args: request.command.get(1..).unwrap_or(&[]),
             termination,
         };
-        if let Err(error) = audit::append(&audit_path, &event) {
+        audit::append(&audit_path, &event)
+    };
+    // Branches that already report a failure keep their answer; only the
+    // warning needs to be said out loud.
+    let warn = |result: Result<(), audit::AuditError>| {
+        if let Err(error) = result {
             eprintln!("pmd: could not append the audit record: {error}");
         }
     };
     // The protocol guarantees these, but the daemon must not rely on a
     // client-side check for a security decision.
     let Ok(id) = EntryId::parse_ref(&request.reference) else {
-        record(
+        warn(record(
             audit::Outcome::BadRequest,
             None,
             request.command.first().map(String::as_str),
             None,
-        );
+        ));
         let _ = write_client_frame(
             &mut stream,
             &RunFrame::Error(ResponseError::BadRequest),
@@ -136,12 +144,12 @@ pub(super) fn serve_run(
         return;
     };
     if runner::denied_env_name(&request.env) {
-        record(
+        warn(record(
             audit::Outcome::BadRequest,
             None,
             request.command.first().map(String::as_str),
             None,
-        );
+        ));
         let _ = write_client_frame(
             &mut stream,
             &RunFrame::Error(ResponseError::BadRequest),
@@ -150,7 +158,7 @@ pub(super) fn serve_run(
         return;
     }
     let Some(program) = request.command.first() else {
-        record(audit::Outcome::BadRequest, None, None, None);
+        warn(record(audit::Outcome::BadRequest, None, None, None));
         let _ = write_client_frame(
             &mut stream,
             &RunFrame::Error(ResponseError::BadRequest),
@@ -165,12 +173,12 @@ pub(super) fn serve_run(
     let Ok(program) = std::fs::canonicalize(program) else {
         // A program that cannot be resolved can never match a grant, and
         // saying so is not an oracle: the grant is checked on the same path.
-        record(
+        warn(record(
             audit::Outcome::Denied,
             None,
             request.command.first().map(String::as_str),
             None,
-        );
+        ));
         let _ = write_client_frame(&mut stream, &RunFrame::Error(ResponseError::Denied), &stop);
         return;
     };
@@ -178,22 +186,22 @@ pub(super) fn serve_run(
     let (grant_id, secret) = match record_use(vault_path, key, watermarks, request, id, &program) {
         Ok(value) => value,
         Err(RecordError::Denied) => {
-            record(
+            warn(record(
                 audit::Outcome::Denied,
                 None,
                 Some(program_text.as_ref()),
                 None,
-            );
+            ));
             let _ = write_client_frame(&mut stream, &RunFrame::Error(ResponseError::Denied), &stop);
             return;
         }
         Err(RecordError::NotFound) => {
-            record(
+            warn(record(
                 audit::Outcome::NotFound,
                 None,
                 Some(program_text.as_ref()),
                 None,
-            );
+            ));
             let _ = write_client_frame(
                 &mut stream,
                 &RunFrame::Error(ResponseError::NotFound),
@@ -202,12 +210,12 @@ pub(super) fn serve_run(
             return;
         }
         Err(RecordError::Internal) => {
-            record(
+            warn(record(
                 audit::Outcome::Internal,
                 None,
                 Some(program_text.as_ref()),
                 None,
-            );
+            ));
             let _ = write_client_frame(
                 &mut stream,
                 &RunFrame::Error(ResponseError::Internal),
@@ -221,12 +229,12 @@ pub(super) fn serve_run(
     // Re-check after decrypting: a shutdown may have started while the vault
     // was open, and no child may be spawned once the key is being wiped.
     if cancel.load(Ordering::SeqCst) {
-        record(
+        warn(record(
             audit::Outcome::Cancelled,
             Some(grant_id),
             Some(program_text.as_ref()),
             None,
-        );
+        ));
         return;
     }
     let result = runner::execute(
@@ -245,21 +253,33 @@ pub(super) fn serve_run(
                 protocol::RunExit::Code(code) => audit::Termination::Code(code),
                 protocol::RunExit::Signal(signal) => audit::Termination::Signal(signal),
             };
-            record(
+            // The child ran and the grant use is spent, but the client must
+            // not be told the run succeeded when no record attests to it
+            // (TODO R.68). `pmd`'s stderr is not relayed, so the error frame
+            // is the only signal an agent receives.
+            if let Err(error) = record(
                 audit::Outcome::Allowed,
                 Some(grant_id),
                 Some(program_text.as_ref()),
                 Some(termination),
-            );
+            ) {
+                eprintln!("pmd: the run finished but its record could not be written: {error}");
+                let _ = write_client_frame(
+                    &mut stream,
+                    &RunFrame::Error(ResponseError::Internal),
+                    &stop,
+                );
+                return;
+            }
             let _ = write_client_frame(&mut stream, &RunFrame::Exit(exit), &stop);
         }
         Err(runner::RunError::Spawn(_)) => {
-            record(
+            warn(record(
                 audit::Outcome::SpawnFailed,
                 Some(grant_id),
                 Some(program_text.as_ref()),
                 None,
-            );
+            ));
             let _ = write_client_frame(
                 &mut stream,
                 &RunFrame::Error(ResponseError::SpawnFailed),
@@ -267,22 +287,22 @@ pub(super) fn serve_run(
             );
         }
         Err(runner::RunError::Output(_)) => {
-            record(
+            warn(record(
                 audit::Outcome::OutputError,
                 Some(grant_id),
                 Some(program_text.as_ref()),
                 None,
-            );
+            ));
         }
         // The daemon is stopping: the child is gone and there is nobody left
         // to tell.
         Err(runner::RunError::Cancelled) => {
-            record(
+            warn(record(
                 audit::Outcome::Cancelled,
                 Some(grant_id),
                 Some(program_text.as_ref()),
                 None,
-            );
+            ));
         }
     }
 }

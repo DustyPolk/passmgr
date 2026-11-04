@@ -198,6 +198,50 @@ fn a_run_is_refused_when_the_audit_log_cannot_be_written() {
 }
 
 #[test]
+fn a_run_whose_audit_append_fails_is_not_reported_as_success() {
+    // The preflight creates and checks the file; the child then makes it
+    // unwritable, so the append *after* the child ran is the one that fails
+    // (TODO R.68). The daemon must not answer `Exit(0)` for a use it could
+    // not record, and the secret-bearing child output must say it ran.
+    let fixture = Fixture::new();
+    let mut daemon = fixture.start();
+    let audit = audit_file(&fixture);
+    let audit_arg = audit.to_str().expect("UTF-8 audit path");
+    let request = fixture.run_request(
+        "TOKEN",
+        &[
+            "/bin/sh",
+            "-c",
+            "printf ran; chmod 400 \"$1\"",
+            "sh",
+            audit_arg,
+        ],
+    );
+
+    let (frames, _) = read_run(&fixture.socket(), &fixture.token, &request);
+    assert!(
+        !frames
+            .iter()
+            .any(|frame| matches!(frame, RunFrame::Exit(_))),
+        "an unrecorded run must not report an exit status: {frames:?}"
+    );
+    assert_eq!(
+        frames.last(),
+        Some(&RunFrame::Error(ResponseError::Internal)),
+        "an unrecorded run must fail closed: {frames:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&stdout_bytes(&frames)).contains("ran"),
+        "the child must have run before the append failed: {frames:?}"
+    );
+    let text = fs::read_to_string(&audit).expect("the 0400 log is still readable");
+    assert!(text.is_empty(), "nothing was recorded: {text}");
+
+    daemon.kill().expect("kill pmd");
+    wait_for_exit(&mut daemon, WAIT);
+}
+
+#[test]
 fn the_audit_file_is_private_and_its_directory_is_private() {
     let fixture = Fixture::new();
     let mut daemon = fixture.start();

@@ -352,3 +352,69 @@ fn local_run_reports_an_unknown_reference_with_exit_3() {
     assert!(!output.stdout.contains(EXAMPLE_SECRET));
     assert!(!output.stderr.contains(EXAMPLE_SECRET));
 }
+
+#[test]
+fn a_local_run_whose_audit_append_fails_exits_non_zero() {
+    // The preflight creates the log; the child makes it unwritable so the
+    // *post-run* append fails. The human must not see exit 0 for a use that
+    // is missing from the audit trail (TODO R.68), and stderr must name the
+    // log so the cause is actionable.
+    let _guard = serial();
+    let local = LocalVault::new();
+    let audit = format!("{}/passmgr/audit.jsonl", local.state());
+    let program = write_program(
+        local.dir.path(),
+        "break-audit.sh",
+        "#!/bin/sh\nprintf 'ran\\n'\nchmod 400 \"$1\"\n",
+    );
+    let env_argument = local.env_argument();
+    let state = local.state();
+    let output = run_on_pty(
+        &[
+            "--db",
+            &local.vault,
+            "run",
+            "--env",
+            &env_argument,
+            "--",
+            program.to_str().expect("UTF-8 path"),
+            &audit,
+        ],
+        "master\n",
+        true,
+        true,
+        &[
+            ("XDG_RUNTIME_DIR", local.runtime()),
+            ("XDG_STATE_HOME", state.as_str()),
+        ],
+    );
+
+    assert!(
+        output.stdout.contains("ran"),
+        "the child must have run before the append failed: {}",
+        output.stdout
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "an unrecorded run must exit non-zero\nstdout: {}\nstderr: {}",
+        output.stdout,
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("audit record could not be written"),
+        "stderr must name the failure: {}",
+        output.stderr
+    );
+    assert!(
+        output.stderr.contains("audit.jsonl"),
+        "stderr must name the audit log: {}",
+        output.stderr
+    );
+    for stream in [&output.stdout, &output.stderr] {
+        assert!(
+            !stream.contains(EXAMPLE_SECRET),
+            "the canary must never be relayed: {stream}"
+        );
+    }
+}

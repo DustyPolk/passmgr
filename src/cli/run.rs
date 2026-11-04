@@ -240,7 +240,11 @@ fn run_locally(
         Error::Refused(format!("refusing to run without an audit log: {error}"))
     })?;
     let program_text = program.to_string_lossy();
-    let record = |outcome: audit::Outcome, termination: Option<audit::Termination>| {
+    // The result is returned so a run that reports success cannot hide a
+    // missing record (TODO R.68).
+    let record = |outcome: audit::Outcome,
+                  termination: Option<audit::Termination>|
+     -> Result<(), audit::AuditError> {
         let event = audit::Event {
             source: audit::Source::Local,
             outcome,
@@ -250,14 +254,17 @@ fn run_locally(
             args: command.get(1..).unwrap_or(&[]),
             termination,
         };
-        if let Err(error) = audit::append(&audit_path, &event) {
+        audit::append(&audit_path, &event)
+    };
+    let warn = |result: Result<(), audit::AuditError>| {
+        if let Err(error) = result {
             eprintln!("passmgr: could not append the audit record: {error}");
         }
     };
     let secret = {
         let (vault, _master) = super::unlock(db_path)?;
         let Some(credential) = vault.get_by_ref(id) else {
-            record(audit::Outcome::NotFound, None);
+            warn(record(audit::Outcome::NotFound, None));
             return Err(Error::EntryNotFound(reference.clone()));
         };
         Zeroizing::new(credential.password().to_owned())
@@ -296,11 +303,18 @@ fn run_locally(
                 RunExit::Code(code) => audit::Termination::Code(code),
                 RunExit::Signal(signal) => audit::Termination::Signal(signal),
             };
-            record(audit::Outcome::Allowed, Some(termination));
+            // The child ran, but the human must not see the child's success
+            // status when the use is missing from the audit trail (TODO
+            // R.68). Exit 5, like the pre-spawn refusal, and name the log.
+            if let Err(error) = record(audit::Outcome::Allowed, Some(termination)) {
+                return Err(Error::Refused(format!(
+                    "the run finished but its audit record could not be written: {error}"
+                )));
+            }
             Ok(ExitCode::from(status_code(exit)))
         }
         Err(runner::RunError::Output(_)) if output_closed.get() => {
-            record(audit::Outcome::OutputError, None);
+            warn(record(audit::Outcome::OutputError, None));
             let _ = writeln!(
                 err,
                 "passmgr: output pipe closed; cancelled the run (exit {EXIT_OUTPUT_CLOSED})"
@@ -308,17 +322,17 @@ fn run_locally(
             Ok(ExitCode::from(EXIT_OUTPUT_CLOSED))
         }
         Err(runner::RunError::Spawn(error)) => {
-            record(audit::Outcome::SpawnFailed, None);
+            warn(record(audit::Outcome::SpawnFailed, None));
             Err(Error::Daemon(format!(
                 "could not start the command: {error}"
             )))
         }
         Err(runner::RunError::Output(error)) => {
-            record(audit::Outcome::OutputError, None);
+            warn(record(audit::Outcome::OutputError, None));
             Err(Error::Io(error))
         }
         Err(runner::RunError::Cancelled) => {
-            record(audit::Outcome::Cancelled, None);
+            warn(record(audit::Outcome::Cancelled, None));
             Err(Error::Daemon("the run was cancelled".into()))
         }
     }

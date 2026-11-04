@@ -199,6 +199,8 @@ is present; the check happens before the password prompt, so a refusal never
 reads the vault. Local runs are written to the same hash-chained audit log as
 daemon runs, with `source: local` and no grant (TODO 3.8); the record never
 holds the secret or a token, and `passmgr audit` shows it without a password.
+If that record cannot be written after the command finishes, the run exits 5
+instead of reporting the child's status (TODO R.68).
 
 On the grant path, `run` needs both the unlock session token and a grant token
 that covers the credential and command. The grant token is read from `--grant-file` or
@@ -618,7 +620,7 @@ These codes are stable: scripts and agents may rely on them.
 | 2 | Usage error (unknown command or option, bad arguments) or invalid input at a prompt |
 | 3 | Not found (missing vault file, unknown service, unknown reference, or unknown grant id) |
 | 4 | Authentication failed (wrong master password) |
-| 5 | Refused: a security check said no (plaintext reveal without a terminal or in agent mode, a run without a usable grant, a missing or insecure grant file, a refused environment variable, or creating a grant in agent mode) |
+| 5 | Refused: a security check said no (plaintext reveal without a terminal or in agent mode, a run without a usable grant, a missing or insecure grant file, a refused environment variable, creating a grant in agent mode, or a run that finished but could not be recorded) |
 | 6 | Malformed, truncated, or unsupported vault file, or an audit log whose hash chain does not verify |
 | 141 | `run` could not relay its output because the pipe was closed; the run was cancelled |
 

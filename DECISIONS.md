@@ -849,7 +849,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   link with exit 6. Implemented in `src/audit.rs` (TODO 3.8): appends read only
   the last line under an exclusive `flock`, refuse a torn or oversized last
   line, `fsync` each record, and a run whose audit record cannot be written is
-  refused before decryption or spawn (fail closed). `O_NOFOLLOW`, regular-file
+  refused before decryption or spawn (fail closed). An append failure after
+  the child ran is a failed run: the daemon sends `Internal` instead of
+  `Exit`, the local path exits 5, and a pre-spawn denial keeps its denial
+  answer plus a warning (TODO R.68). `O_NOFOLLOW`, regular-file
   and owner checks match the session file; a group/world-readable file or
   directory is refused, not repaired.
 - Audit reading (TODO 3.9): the reader and verifier live in

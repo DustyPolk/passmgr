@@ -1,3 +1,31 @@
+## 2026-11-04 — A run that cannot be recorded never reports success (TODO R.68)
+
+- `src/daemon/run.rs`: the metadata `record` closure now returns
+  `Result<(), audit::AuditError>`. The allowed branch appends *before*
+  sending `RunFrame::Exit`; a failure logs `pmd: the run finished but its
+  record could not be written: …` and sends `RunFrame::Error(Internal)`
+  instead. Branches that already report a failure (bad request, denied, not
+  found, spawn failure, output error, cancel) keep their answer and log the
+  append error through a small `warn` closure.
+- `src/cli/run.rs` mirrors this for the local path: a failed append after the
+  child exits returns `Error::Refused`, so the human gets exit 5 and a message
+  naming the log. Decision: the child's status is deliberately not passed
+  through; `Refused` reuses the preflight wording/escaping and exit 5.
+- Tests: `tests/audit.rs::a_run_whose_audit_append_fails_is_not_reported_as_success`
+  and
+  `tests/run_local.rs::a_local_run_whose_audit_append_fails_exits_non_zero`.
+  Both let the child `chmod 400` the log the preflight created, then assert
+  the child did run, no `Exit` frame / exit 5, and stderr names the log.
+  Both were run against the pre-fix code and fail there.
+- Docs: `SECURITY.md`, `DECISIONS.md`, and `README.md` (local-run paragraph
+  and the exit-code 5 row) state the post-run rule.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass (`cargo audit` skipped, not installed).
+- **Next iteration must know:** pre-spawn denials still record best-effort; a
+  failed append there keeps the denial answer and only warns, because no use
+  happened. The local path now masks the child's exit status when the append
+  fails — that is the conservative choice, not an accident.
+
 ## 2026-11-04 — Review of `47c64ac..7fd2997`
 
 - 7 findings: **2 Medium, 0 High, 5 Low**. Categories: audit

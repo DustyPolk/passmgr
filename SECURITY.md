@@ -15,7 +15,10 @@ Grant-based authorization is implemented for `run` (TODO 3.1–3.6): every
 agent-facing use needs a grant token that matches an active, in-scope grant in
 the vault, and the daemon records the use before it injects. Every `run` that
 reaches `pmd` appends one metadata-only record to the hash-chained audit log
-at `$XDG_STATE_HOME/passmgr/audit.jsonl` (TODO 3.8). `pm audit` lists those
+at `$XDG_STATE_HOME/passmgr/audit.jsonl` (TODO 3.8); a run whose record
+cannot be written is refused before decryption or spawn, and an append that
+fails after the child ran is reported as an internal error (daemon) or exit 5
+(local), never as success (TODO R.68). `pm audit` lists those
 records (filtered by grant, age or count) and `pm audit verify` re-checks the
 whole chain, reporting the first broken line with exit 6 (TODO 3.9). Reading
 needs no master password because a record holds no secret or token. `run`
