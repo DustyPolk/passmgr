@@ -30,8 +30,9 @@ pub fn format_utc(unix: u64) -> String {
 /// seconds.
 ///
 /// Only the exact `YYYY-MM-DDTHH:MM:SSZ` shape is accepted: four ASCII digits
-/// for the year (0000-9999), a valid proleptic Gregorian date, and a time with
-/// an hour below 24 and minute/second below 60 (there are no leap seconds).
+/// for the year, a valid proleptic Gregorian date no earlier than 1970-01-01,
+/// and a time with an hour below 24 and minute/second below 60 (there are no
+/// leap seconds).
 /// Anything else returns `None`. This is the parser for untrusted input such
 /// as an audit record's `ts`, so it is strict instead of permissive.
 pub fn parse_utc(text: &str) -> Option<u64> {
@@ -64,10 +65,8 @@ pub fn parse_utc(text: &str) -> Option<u64> {
     if hour >= 24 || minute >= 60 || second >= 60 {
         return None;
     }
-    let days = days_from_civil(year as i64, month, day);
-    Some(
-        days as u64 * 86_400 + u64::from(hour) * 3_600 + u64::from(minute) * 60 + u64::from(second),
-    )
+    let days = u64::try_from(days_from_civil(year as i64, month, day)).ok()?;
+    Some(days * 86_400 + u64::from(hour) * 3_600 + u64::from(minute) * 60 + u64::from(second))
 }
 
 fn digits(text: &str) -> Option<u32> {
@@ -189,6 +188,7 @@ mod tests {
         // wrong, round-trips.
         assert_eq!(parse_utc("2024-02-29T00:00:00Z"), Some(1_709_164_800));
         assert_eq!(parse_utc("2000-02-29T00:00:00Z"), Some(951_782_400));
+        assert_eq!(parse_utc("1970-01-01T00:00:00Z"), Some(0));
     }
 
     #[test]
@@ -210,6 +210,8 @@ mod tests {
             "2025-01-01T00:00:00z",
             "+025-01-01T00:00:00Z",
             "2025-01-01T00:00:00+00:00",
+            "1969-12-31T23:59:59Z", // before the epoch
+            "0000-01-01T00:00:00Z",
         ] {
             assert_eq!(parse_utc(text), None, "{text:?} must be refused");
         }
