@@ -107,7 +107,7 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(err) => write!(f, "I/O error: {err}"),
+            Self::Io(err) => write!(f, "I/O error: {}", escape_hidden(&err.to_string())),
             Self::VaultNotFound(path) => {
                 write!(f, "no vault found at '{}'", escape_path(path))
             }
@@ -244,5 +244,22 @@ mod tests {
         assert_eq!(EXIT_AUTH_FAILED, 4);
         assert_eq!(EXIT_REFUSED, 5);
         assert_eq!(EXIT_MALFORMED_VAULT, 6);
+    }
+
+    #[test]
+    fn an_io_error_renders_hidden_characters_in_its_path_as_text() {
+        let directory = tempfile::tempdir().unwrap();
+        let not_a_directory = directory.path().join("plain\u{1b}]0;title\u{7}");
+        std::fs::write(&not_a_directory, b"").unwrap();
+        let error = crate::Vault::open(not_a_directory.join("vault.dat"), "pw")
+            .map(drop)
+            .unwrap_err();
+        assert!(matches!(error, Error::Io(_)), "{error:?}");
+        let text = error.to_string();
+        assert!(text.contains(r"\u{1b}"), "{text}");
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{7}'),
+            "{text:?}"
+        );
     }
 }

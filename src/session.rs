@@ -21,6 +21,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::socket::{RuntimePaths, SocketError};
+use crate::text::escape_path;
 use crate::token::{SessionToken, TokenError};
 use zeroize::Zeroizing;
 
@@ -200,12 +201,12 @@ impl fmt::Display for SessionError {
         match self {
             Self::Socket(err) => write!(f, "{err}"),
             Self::Io { path, source } => {
-                write!(f, "cannot access '{}': {source}", path.display())
+                write!(f, "cannot access '{}': {source}", escape_path(path))
             }
             Self::Insecure { path, detail } => write!(
                 f,
                 "refusing the session token file '{}': {detail}",
-                path.display()
+                escape_path(path)
             ),
             Self::Token(err) => write!(f, "invalid session token file: {err}"),
             Self::Invalid(detail) => f.write_str(detail),
@@ -360,6 +361,24 @@ mod tests {
         assert!(paths.session().exists(), "the FIFO is not removed");
         let error = load(&paths).expect_err("a FIFO is not a session file");
         assert!(matches!(error, SessionError::Insecure { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn a_hidden_character_in_the_runtime_path_is_rendered_as_text() {
+        let directory = TempDir::new().expect("tempdir");
+        let runtime = directory.path().join("run\u{1b}]0;x\u{7}");
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&runtime)
+            .expect("create runtime dir");
+        let text = load(&RuntimePaths::at(&runtime))
+            .expect_err("no session file")
+            .to_string();
+        assert!(text.contains(r"\u{1b}"), "{text:?}");
+        assert!(
+            !text.contains('\u{1b}') && !text.contains('\u{7}'),
+            "{text:?}"
+        );
     }
 
     #[test]
