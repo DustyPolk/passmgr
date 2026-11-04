@@ -39,13 +39,16 @@
 //! The readers also poll a stop flag while waiting for input, so a process
 //! that somehow escaped the group still cannot make the join unbounded.
 //!
-//! Two external conditions stop a run, both checked in the relay loop and in
-//! the wait-for-exit loop: the daemon is shutting down ([`Stop::on_cancel`]),
-//! and the run's client is gone (`Stop::new`). The second matters because a
-//! client that drops its connection is how an agent host reports a timed-out
-//! tool call: without it the child keeps running with the secret in its
-//! environment, and the idle timeout stays suspended for as long as the child
-//! lives.
+//! Three conditions stop a run, all checked in the relay loop, in the
+//! wait-for-exit loop and by the caller's frame writer: the daemon is shutting
+//! down ([`Stop::on_cancel`]), the run's client is gone (`Stop::new`), and the
+//! run's deadline has passed ([`Limits::timeout`], armed on the same [`Stop`]
+//! at the spawn). The second matters because a client that drops its
+//! connection is how an agent host reports a timed-out tool call: without it
+//! the child keeps running with the secret in its environment, and the idle
+//! timeout stays suspended for as long as the child lives. The third has to
+//! reach the writer too: a client that is connected but not reading parks the
+//! relay in a socket write, and the deadline must end the child from there.
 //!
 //! A run that finishes normally also kills whatever is left in its process
 //! group before returning: a child that backgrounds a daemon (`gradle`,
@@ -55,6 +58,7 @@
 //! (`setsid`) escapes that cleanup; that is an accepted limit, documented in
 //! `SECURITY.md` limit 1.
 
+use std::cell::Cell;
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -174,20 +178,24 @@ impl std::fmt::Display for RunError {
 
 impl std::error::Error for RunError {}
 
-/// The external conditions that stop a run.
+/// The conditions that stop a run.
 ///
 /// A run stops when the daemon is shutting down (`lock`, a signal, the idle
-/// timeout) or when the caller that asked for it is gone. Both are polled by
-/// the output loop and by the wait-for-exit loop, so neither a noisy child nor
-/// a silent one can delay the kill.
+/// timeout), when the caller that asked for it is gone, or when its deadline
+/// has passed. All three are polled by the output loop, by the wait-for-exit
+/// loop and by the caller's frame writer, so neither a noisy child, a silent
+/// one, nor a client that stopped reading can delay the kill.
 ///
 /// The client predicate is a closure rather than a flag so the caller can
 /// poll its own socket without a watchdog thread; it runs at most once per
 /// [`CANCEL_POLL`] slice in the silent case (and once per relayed frame while
-/// output flows).
+/// output flows). The deadline is armed by [`execute`] at the spawn, from
+/// [`Limits::timeout`], and left in place when it returns so the caller can
+/// bound its terminal write against it.
 pub struct Stop<'a> {
     cancel: &'a AtomicBool,
     client_gone: Option<&'a dyn Fn() -> bool>,
+    deadline: Cell<Option<Instant>>,
 }
 
 impl<'a> Stop<'a> {
@@ -196,6 +204,7 @@ impl<'a> Stop<'a> {
         Self {
             cancel,
             client_gone: None,
+            deadline: Cell::new(None),
         }
     }
 
@@ -204,16 +213,38 @@ impl<'a> Stop<'a> {
         Self {
             cancel,
             client_gone: Some(client_gone),
+            deadline: Cell::new(None),
         }
     }
 
-    /// Whether the run must stop now.
+    /// Whether the run must stop now, for any of the three reasons.
     ///
     /// Also polled by the daemon's run-stream writer, so a write that is
-    /// waiting for a slow reader still observes `lock`, a signal or a vanished
-    /// client (TODO R.49).
+    /// waiting for a slow reader still observes `lock`, a signal, a vanished
+    /// client (TODO R.49) or the run's deadline.
     pub(crate) fn requested(&self) -> bool {
+        self.cancelled() || self.timed_out()
+    }
+
+    /// The daemon is stopping or the client is gone: the run ends without a
+    /// result.
+    fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst) || self.client_gone.is_some_and(|gone| gone())
+    }
+
+    /// The deadline has passed: the run ends with a `timed_out` result.
+    pub(crate) fn timed_out(&self) -> bool {
+        self.deadline
+            .get()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.deadline.get()
+    }
+
+    pub(crate) fn set_deadline(&self, deadline: Option<Instant>) {
+        self.deadline.set(deadline);
     }
 }
 
@@ -275,7 +306,7 @@ where
     // A client that left between sending the request and the spawn gets no
     // child at all. The caller checks the same condition before decrypting,
     // but a request can be authorized and then wait behind the vault lock.
-    if stop.requested() {
+    if stop.cancelled() {
         return Err(RunError::Cancelled);
     }
     if program.as_os_str().is_empty() {
@@ -359,7 +390,7 @@ where
     // request.
     let started = Instant::now();
     let pgid = child.id() as libc::pid_t;
-    let deadline = limits.timeout.map(|timeout| Instant::now() + timeout);
+    stop.set_deadline(limits.timeout.map(|timeout| started + timeout));
     let stdout_truncated = Arc::new(AtomicBool::new(false));
     let stderr_truncated = Arc::new(AtomicBool::new(false));
     // One counter for both streams: `redactions` is about the run, not about
@@ -404,7 +435,7 @@ where
     }
     drop(sender);
 
-    let emit_result = relay(&receiver, stop, deadline, &mut emit);
+    let emit_result = relay(&receiver, stop, &mut emit);
     match emit_result {
         Relay::Finished => {
             // Both pipes reached EOF. The child may have closed them and kept
@@ -440,7 +471,7 @@ where
                             .map_err(RunError::Output);
                     }
                     Ok(false) => {
-                        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                        if stop.timed_out() {
                             let status = abort(&mut child, receiver, readers, &readers_stop);
                             return timed_out(
                                 status,
@@ -450,7 +481,7 @@ where
                                 started,
                             );
                         }
-                        if stop.requested() {
+                        if stop.cancelled() {
                             abort(&mut child, receiver, readers, &readers_stop);
                             return Err(RunError::Cancelled);
                         }
@@ -536,12 +567,7 @@ enum Relay {
 /// still holds the output pipes: the run must keep waiting for the pipes, and
 /// a cancel may arrive minutes later. The `Finished` path below reaps the
 /// child only after both pipes reached EOF.
-fn relay<F>(
-    receiver: &Receiver<Message>,
-    stop: &Stop<'_>,
-    deadline: Option<Instant>,
-    emit: &mut F,
-) -> Relay
+fn relay<F>(receiver: &Receiver<Message>, stop: &Stop<'_>, emit: &mut F) -> Relay
 where
     F: FnMut(RunFrame) -> io::Result<()>,
 {
@@ -550,16 +576,23 @@ where
         // Observe a stop even while a noisy child keeps the channel full: a
         // `lock`, a signal, a vanished client or an expired deadline must not
         // wait for the output to pause.
-        if stop.requested() {
+        if stop.cancelled() {
             return Relay::Cancelled;
         }
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if stop.timed_out() {
             return Relay::TimedOut;
         }
         match receiver.recv_timeout(CANCEL_POLL) {
             Ok(Message::Frame(frame)) => {
                 if let Err(err) = emit(frame) {
-                    return Relay::OutputError(err);
+                    // The writer gives up on the same conditions; a deadline
+                    // that passed while it waited for the client is a
+                    // timeout, not a delivery failure.
+                    return if stop.timed_out() {
+                        Relay::TimedOut
+                    } else {
+                        Relay::OutputError(err)
+                    };
                 }
             }
             Ok(Message::Done) => {

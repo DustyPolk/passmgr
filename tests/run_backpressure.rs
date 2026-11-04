@@ -18,9 +18,11 @@ mod support;
 
 use support::*;
 
+use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use passmgr::protocol::{self, MAX_RUN_OUTPUT_BYTES, Request, Response, RunExit, RunFrame};
@@ -173,5 +175,90 @@ fn lock_is_not_delayed_by_a_stalled_run_client() {
     // EOF without an exit frame, so nothing claims the child finished.
     let frames = read_until_eof(stream);
     assert!(!is_exited(&frames, 0), "a cancelled run claimed to finish");
+    assert!(wait_for_exit(&mut child, WAIT).success());
+}
+
+/// Poll until the child has written its pid to `path`.
+fn wait_for_pid(path: &Path) -> libc::pid_t {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(pid) = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.trim().parse::<libc::pid_t>().ok())
+        {
+            return pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the child did not report its pid"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether `pid` is gone, by signal 0.
+fn process_is_gone(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only probes for existence; the pid came from a child
+    // of this test's daemon.
+    unsafe { libc::kill(pid, 0) != 0 }
+}
+
+/// `timeout_secs` bounds the child even when the client is not reading. The
+/// worker used to observe the deadline only between frames, so a client that
+/// filled its socket and then paused kept the child, its injected secret, a
+/// run slot and the suspended idle timer alive until it read again.
+#[test]
+fn the_run_deadline_kills_the_child_while_the_client_is_not_reading() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let pid_file = fixture.temp_path("child.pid");
+    let script = format!("echo $$ > {}; exec yes", pid_file.display());
+    let mut ask = fixture.run_request("API_KEY", &["/bin/sh", "-c", &script]);
+    if let Request::Run(run) = &mut ask {
+        run.limits.timeout_secs = 1;
+        run.limits.max_output_bytes = MAX_RUN_OUTPUT_BYTES;
+    }
+    let mut stream = UnixStream::connect(fixture.socket()).expect("connect");
+    stream
+        .set_read_timeout(Some(WAIT))
+        .expect("set read timeout");
+    stream
+        .write_all(&protocol::encode(&fixture.token, &ask).expect("encode request"))
+        .expect("write request");
+    let pid = wait_for_pid(&pid_file);
+
+    // Read nothing: `yes` fills the pipe, the frame channel and the socket,
+    // and the worker waits for room. The 1 s deadline alone must end the
+    // child, within its 2 s SIGTERM grace.
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !process_is_gone(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "the child outlived its run deadline while the client was not reading"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // A client that resumes reading gets a well-framed stream ending in the
+    // terminal frame, even though the deadline cut a frame in half.
+    let frames = read_until_eof(stream);
+    let finished = exit_frame(&frames);
+    assert!(
+        finished.timed_out,
+        "the terminal frame must report the timeout"
+    );
+    assert_eq!(finished.exit, RunExit::Signal(libc::SIGTERM as u8));
+    let stdout = stdout_bytes(&frames);
+    assert!(
+        !stdout
+            .windows(SECRET.len())
+            .any(|window| window == SECRET.as_bytes()),
+        "the secret reached the run stream"
+    );
+
+    assert_eq!(
+        request(&fixture.socket(), &fixture.token, &Request::Lock),
+        Response::Locked
+    );
     assert!(wait_for_exit(&mut child, WAIT).success());
 }

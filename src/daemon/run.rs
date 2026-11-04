@@ -49,7 +49,7 @@ enum RecordError {
 /// `cancel` is shared with the accept loop and is set by `lock`, a signal or
 /// the idle timeout; the runner kills and reaps the child when it observes it.
 pub(super) fn serve_run(
-    mut stream: UnixStream,
+    stream: UnixStream,
     request: &protocol::RunRequest,
     vault_path: &Path,
     key: &LockedKey,
@@ -64,8 +64,8 @@ pub(super) fn serve_run(
     }
     // The run stream is write-driven from here on: the worker never reads
     // another request. Make it non-blocking so a client that stops reading
-    // cannot park the daemon in a socket write; `write_client_frame` waits in
-    // `poll` and checks the stop conditions instead (TODO R.49). A failure
+    // cannot park the daemon in a socket write; `ClientStream::write` waits
+    // in `poll` and checks the stop conditions instead (TODO R.49). A failure
     // here means the socket is unusable, so there is nobody to answer.
     if stream.set_nonblocking(true).is_err() {
         return;
@@ -77,6 +77,11 @@ pub(super) fn serve_run(
     let fd = stream.as_raw_fd();
     let client_gone = || client_closed(fd);
     let stop = runner::Stop::new(cancel, &client_gone);
+    let mut client = ClientStream {
+        stream,
+        stop: &stop,
+        pending: Vec::new(),
+    };
     // Resolve and check the audit log before doing any work. A use that
     // cannot be recorded is refused: a run the human cannot see in the audit
     // trail is worse than a run that did not happen (TODO 3.8).
@@ -84,21 +89,13 @@ pub(super) fn serve_run(
         Ok(path) => path,
         Err(error) => {
             eprintln!("pmd: refusing the run: {error}");
-            let _ = write_client_frame(
-                &mut stream,
-                &RunFrame::Error(ResponseError::Internal),
-                &stop,
-            );
+            let _ = client.write(&RunFrame::Error(ResponseError::Internal));
             return;
         }
     };
     if let Err(error) = audit::check_writable(&audit_path) {
         eprintln!("pmd: refusing the run: {error}");
-        let _ = write_client_frame(
-            &mut stream,
-            &RunFrame::Error(ResponseError::Internal),
-            &stop,
-        );
+        let _ = client.write(&RunFrame::Error(ResponseError::Internal));
         return;
     }
     // Metadata only: the first reference and argv the client sent, the grant
@@ -172,20 +169,12 @@ pub(super) fn serve_run(
             request.command.first().map(String::as_str),
             None,
         ));
-        let _ = write_client_frame(
-            &mut stream,
-            &RunFrame::Error(ResponseError::BadRequest),
-            &stop,
-        );
+        let _ = client.write(&RunFrame::Error(ResponseError::BadRequest));
         return;
     }
     let Some(program) = request.command.first() else {
         warn(record(audit::Outcome::BadRequest, None, None, None));
-        let _ = write_client_frame(
-            &mut stream,
-            &RunFrame::Error(ResponseError::BadRequest),
-            &stop,
-        );
+        let _ = client.write(&RunFrame::Error(ResponseError::BadRequest));
         return;
     };
     // Resolve the program before matching it against the grant, so a symlink
@@ -201,7 +190,7 @@ pub(super) fn serve_run(
             request.command.first().map(String::as_str),
             None,
         ));
-        let _ = write_client_frame(&mut stream, &RunFrame::Error(ResponseError::Denied), &stop);
+        let _ = client.write(&RunFrame::Error(ResponseError::Denied));
         return;
     };
     let program_text = program.to_string_lossy();
@@ -215,7 +204,7 @@ pub(super) fn serve_run(
                 Some(program_text.as_ref()),
                 None,
             ));
-            let _ = write_client_frame(&mut stream, &RunFrame::Error(ResponseError::Denied), &stop);
+            let _ = client.write(&RunFrame::Error(ResponseError::Denied));
             return;
         }
         Err(RecordError::NotFound) => {
@@ -225,11 +214,7 @@ pub(super) fn serve_run(
                 Some(program_text.as_ref()),
                 None,
             ));
-            let _ = write_client_frame(
-                &mut stream,
-                &RunFrame::Error(ResponseError::NotFound),
-                &stop,
-            );
+            let _ = client.write(&RunFrame::Error(ResponseError::NotFound));
             return;
         }
         Err(RecordError::Internal) => {
@@ -239,11 +224,7 @@ pub(super) fn serve_run(
                 Some(program_text.as_ref()),
                 None,
             ));
-            let _ = write_client_frame(
-                &mut stream,
-                &RunFrame::Error(ResponseError::Internal),
-                &stop,
-            );
+            let _ = client.write(&RunFrame::Error(ResponseError::Internal));
             return;
         }
     };
@@ -291,8 +272,14 @@ pub(super) fn serve_run(
         &inherited,
         limits,
         &stop,
-        |frame| write_client_frame(&mut stream, &frame, &stop),
+        |frame| client.write(&frame),
     );
+    // The terminal frame is the client's only account of how the run ended,
+    // so it is written after a deadline that has already passed. It is still
+    // bounded, by the run's budget plus one socket timeout: a client that was
+    // reading when its child was killed collects it, and one that never reads
+    // cannot hold the worker, its run slot and the suspended idle timer.
+    stop.set_deadline(stop.deadline().map(|deadline| deadline + READ_TIMEOUT));
     match result {
         Ok(finished) => {
             let termination = match finished.exit {
@@ -310,14 +297,10 @@ pub(super) fn serve_run(
                 Some(termination),
             ) {
                 eprintln!("pmd: the run finished but its record could not be written: {error}");
-                let _ = write_client_frame(
-                    &mut stream,
-                    &RunFrame::Error(ResponseError::Internal),
-                    &stop,
-                );
+                let _ = client.write(&RunFrame::Error(ResponseError::Internal));
                 return;
             }
-            let _ = write_client_frame(&mut stream, &RunFrame::Exit(finished), &stop);
+            let _ = client.write(&RunFrame::Exit(finished));
         }
         Err(runner::RunError::Spawn(_)) => {
             warn(record(
@@ -326,11 +309,7 @@ pub(super) fn serve_run(
                 Some(program_text.as_ref()),
                 None,
             ));
-            let _ = write_client_frame(
-                &mut stream,
-                &RunFrame::Error(ResponseError::SpawnFailed),
-                &stop,
-            );
+            let _ = client.write(&RunFrame::Error(ResponseError::SpawnFailed));
         }
         Err(runner::RunError::Output(_)) => {
             warn(record(
@@ -353,76 +332,88 @@ pub(super) fn serve_run(
     }
 }
 
-/// Write one frame to a run's client while observing the run's stop conditions.
-///
-/// The socket is non-blocking here, so a reader that stops reading never
-/// trips a write timeout: the bytes wait until it reads again, the bounded
-/// frame channel backs up, and the child blocks on its full output pipe (TODO
-/// R.49). This is backpressure, not an unbounded buffer. The wait is in
-/// [`runner::CANCEL_POLL`] slices, so `lock`, a signal or a closed connection
-/// still cancels promptly.
-fn write_client_frame(
-    stream: &mut UnixStream,
-    frame: &RunFrame,
-    stop: &runner::Stop<'_>,
-) -> io::Result<()> {
-    let encoded = protocol::encode_run_frame(frame)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame is too large"))?;
-    let mut bytes = encoded.as_slice();
-    while !bytes.is_empty() {
-        if stop.requested() {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "the run was cancelled",
-            ));
-        }
-        match stream.write(bytes) {
-            Ok(0) => {
+/// A run's client connection, written one frame at a time while the run's
+/// stop conditions are observed.
+struct ClientStream<'a> {
+    stream: UnixStream,
+    stop: &'a runner::Stop<'a>,
+    /// Bytes a stopped write has not delivered. They go first on the next
+    /// write, so the stream stays frame-aligned when the deadline cuts a
+    /// frame in half and the terminal frame follows it.
+    pending: Vec<u8>,
+}
+
+impl ClientStream<'_> {
+    /// Write one frame, or give up with an error once the run must stop.
+    ///
+    /// The socket is non-blocking here, so a reader that stops reading never
+    /// trips a write timeout: the bytes wait until it reads again, the bounded
+    /// frame channel backs up, and the child blocks on its full output pipe
+    /// (TODO R.49). This is backpressure, not an unbounded buffer. The wait is
+    /// in [`runner::CANCEL_POLL`] slices, so `lock`, a signal, a closed
+    /// connection or the run's deadline still ends it promptly.
+    fn write(&mut self, frame: &RunFrame) -> io::Result<()> {
+        let encoded = protocol::encode_run_frame(frame)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame is too large"))?;
+        self.pending.extend_from_slice(&encoded);
+        while !self.pending.is_empty() {
+            if self.stop.requested() {
                 return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "the client accepted no bytes",
+                    io::ErrorKind::Interrupted,
+                    "the run was stopped",
                 ));
             }
-            Ok(written) => bytes = &bytes[written..],
-            Err(err)
-                if err.kind() == io::ErrorKind::WouldBlock
-                    || err.kind() == io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
-        if bytes.is_empty() {
-            break;
-        }
-        // Wait for room in the socket buffer, or for a stop. A peer that is
-        // gone reports an error on the next write; `poll` only bounds the wait.
-        let mut poll_fd = libc::pollfd {
-            fd: stream.as_raw_fd(),
-            events: libc::POLLOUT,
-            revents: 0,
-        };
-        // SAFETY: one initialized `pollfd`; the timeout is the runner's cancel
-        // slice, so the stop check above runs at least that often.
-        let ready = unsafe {
-            libc::poll(
-                &mut poll_fd,
-                1,
-                runner::CANCEL_POLL.as_millis() as libc::c_int,
-            )
-        };
-        if ready < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() != io::ErrorKind::Interrupted {
-                return Err(err);
+            match self.stream.write(&self.pending) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "the client accepted no bytes",
+                    ));
+                }
+                Ok(written) => {
+                    self.pending.drain(..written);
+                }
+                Err(err)
+                    if err.kind() == io::ErrorKind::WouldBlock
+                        || err.kind() == io::ErrorKind::Interrupted => {}
+                Err(err) => return Err(err),
             }
-        } else if ready > 0
-            && poll_fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "the run client is gone",
-            ));
+            if self.pending.is_empty() {
+                break;
+            }
+            // Wait for room in the socket buffer, or for a stop. A peer that
+            // is gone reports an error on the next write; `poll` only bounds
+            // the wait.
+            let mut poll_fd = libc::pollfd {
+                fd: self.stream.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // SAFETY: one initialized `pollfd`; the timeout is the runner's
+            // cancel slice, so the stop check above runs at least that often.
+            let ready = unsafe {
+                libc::poll(
+                    &mut poll_fd,
+                    1,
+                    runner::CANCEL_POLL.as_millis() as libc::c_int,
+                )
+            };
+            if ready < 0 {
+                let err = io::Error::last_os_error();
+                if err.kind() != io::ErrorKind::Interrupted {
+                    return Err(err);
+                }
+            } else if ready > 0
+                && poll_fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "the run client is gone",
+                ));
+            }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Whether the run's client has closed its end of the socket.

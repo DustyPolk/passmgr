@@ -52,11 +52,15 @@
 //! key alive by leaving the child behind.
 //! Each `run` is served on its own worker thread so the accept loop stays
 //! responsive: `lock`, `ping` and a signal are observed even while a child is
-//! still running. A `run` client that stops reading is not timed out: the
-//! worker's stream is non-blocking, it waits for room in `poll` (checking the
-//! stop conditions every 100 ms), and the full frame channel and child pipe
-//! provide backpressure instead. That keeps a paused `less` or a slow MCP host
-//! from truncating the run, while `lock` still answers within one slice. At most [`MAX_CONCURRENT_RUNS`] workers exist at once; a
+//! still running. A `run` client that stops reading is not timed out by the
+//! socket: the worker's stream is non-blocking, it waits for room in `poll`
+//! (checking the stop conditions every 100 ms), and the full frame channel
+//! and child pipe provide backpressure instead. That keeps a paused `less` or
+//! a slow MCP host from truncating the run, while `lock` still answers within
+//! one slice. The run's own `timeout_secs` is one of those stop conditions, so
+//! a client that never reads cannot keep the child past its deadline either;
+//! the terminal frame is then delivered within one more socket timeout, or
+//! not at all. At most [`MAX_CONCURRENT_RUNS`] workers exist at once; a
 //! further request is answered `busy` before anything is decrypted or spawned,
 //! so a client cannot multiply workers, threads and injected environments
 //! without bound. Every in-flight child is killed and reaped -- together with
