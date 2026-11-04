@@ -6,6 +6,7 @@
 //! refuse (TODO R.17).
 
 use std::collections::HashSet;
+use std::hash::Hash;
 
 use zeroize::Zeroizing;
 
@@ -170,7 +171,7 @@ pub fn encode(credentials: &[Credential], grants: &[Grant]) -> Result<Zeroizing<
     }
 
     for credential in credentials {
-        validate_timestamps(credential.timestamps)?;
+        validate_timestamps(credential.timestamps, Error::InvalidInput)?;
     }
     // The payload writer must never emit a grant its own reader would refuse
     // (TODO R.17): derive the stored form once, run the decoder's validation
@@ -292,27 +293,15 @@ fn encode_grant(out: &mut Vec<u8>, grant: &StoredGrant) {
     }
 }
 
-fn validate_timestamps(timestamps: Timestamps) -> Result<()> {
+/// `error` picks the variant: a value being written is invalid input, one
+/// read back from the vault is a malformed vault.
+fn validate_timestamps(timestamps: Timestamps, error: fn(String) -> Error) -> Result<()> {
     for (name, value) in [
         ("created", timestamps.created),
         ("last_rotated", timestamps.last_rotated),
     ] {
         if value > MAX_TIMESTAMP_UNIX {
-            return Err(Error::InvalidInput(format!(
-                "{name} timestamp {value} exceeds the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_decoded_timestamps(timestamps: Timestamps) -> Result<()> {
-    for (name, value) in [
-        ("created", timestamps.created),
-        ("last_rotated", timestamps.last_rotated),
-    ] {
-        if value > MAX_TIMESTAMP_UNIX {
-            return Err(Error::MalformedVault(format!(
+            return Err(error(format!(
                 "{name} timestamp {value} exceeds the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds"
             )));
         }
@@ -472,7 +461,7 @@ pub fn decode(data: &[u8]) -> Result<Payload> {
                 created: cursor.read_u64()?,
                 last_rotated: cursor.read_u64()?,
             };
-            validate_decoded_timestamps(timestamps)?;
+            validate_timestamps(timestamps, Error::MalformedVault)?;
             timestamps
         } else {
             Timestamps::unknown()
@@ -580,11 +569,33 @@ fn decode_grant(cursor: &mut Cursor<'_>) -> Result<Grant> {
     let uses = cursor.read_u32()?;
     let label = cursor.read_string_capped("grant label", MAX_LABEL_BYTES)?;
 
-    let refs = read_grant_refs(cursor)?;
-    let tags = read_grant_tags(cursor)?;
+    let refs = read_distinct(cursor, "ref", MAX_SCOPE_REFS, Cursor::read_id, |id| {
+        id.to_ref()
+    })?;
+    let tags = read_distinct(
+        cursor,
+        "tag",
+        MAX_TAGS_PER_CREDENTIAL,
+        |cursor| cursor.read_string_capped("tag", MAX_TAG_BYTES),
+        quoted,
+    )?;
     let fields = match cursor.read_u8()? {
         FIELD_SCOPE_ALL => None,
-        FIELD_SCOPE_LISTED => Some(read_grant_fields(cursor)?),
+        FIELD_SCOPE_LISTED => {
+            let fields = read_distinct(
+                cursor,
+                "field",
+                MAX_SCOPE_FIELDS,
+                |cursor| cursor.read_string_capped("field name", MAX_FIELD_NAME_BYTES),
+                quoted,
+            )?;
+            if fields.is_empty() {
+                return Err(Error::MalformedVault(
+                    "grant lists an empty field scope".into(),
+                ));
+            }
+            Some(fields)
+        }
         other => {
             return Err(Error::MalformedVault(format!(
                 "unknown grant field scope mode {other}"
@@ -593,7 +604,16 @@ fn decode_grant(cursor: &mut Cursor<'_>) -> Result<Grant> {
     };
     let scope =
         Scope::new(refs, tags, fields).map_err(|err| Error::MalformedVault(err.to_string()))?;
-    let commands = read_grant_commands(cursor)?;
+    let commands = read_distinct(
+        cursor,
+        "command",
+        MAX_COMMANDS,
+        |cursor| cursor.read_string_capped("command", MAX_PATH_BYTES),
+        quoted,
+    )?
+    .into_iter()
+    .map(std::path::PathBuf::from)
+    .collect();
 
     Grant::from_stored(StoredGrant {
         id,
@@ -612,92 +632,35 @@ fn decode_grant(cursor: &mut Cursor<'_>) -> Result<Grant> {
     .map_err(|err| Error::MalformedVault(err.to_string()))
 }
 
-fn read_grant_refs(cursor: &mut Cursor<'_>) -> Result<Vec<EntryId>> {
+/// Read a count-prefixed list of at most `max` items, refusing a duplicate.
+fn read_distinct<'a, T: Clone + Eq + Hash>(
+    cursor: &mut Cursor<'a>,
+    what: &str,
+    max: usize,
+    mut read: impl FnMut(&mut Cursor<'a>) -> Result<T>,
+    show: impl Fn(&T) -> String,
+) -> Result<Vec<T>> {
     let count = cursor.read_u32()? as usize;
-    if count > MAX_SCOPE_REFS {
+    if count > max {
         return Err(Error::MalformedVault(format!(
-            "grant ref count {count} exceeds the maximum of {MAX_SCOPE_REFS}"
+            "grant {what} count {count} exceeds the maximum of {max}"
         )));
     }
-    let mut refs = Vec::with_capacity(count);
+    let mut items = Vec::with_capacity(count);
     let mut seen = HashSet::with_capacity(count);
     for _ in 0..count {
-        let id = cursor.read_id()?;
-        if !seen.insert(id) {
+        let item = read(cursor)?;
+        if !seen.insert(item.clone()) {
             return Err(Error::MalformedVault(format!(
-                "duplicate ref {} in one grant",
-                id.to_ref()
+                "duplicate {what} {} in one grant",
+                show(&item)
             )));
         }
-        refs.push(id);
+        items.push(item);
     }
-    Ok(refs)
+    Ok(items)
 }
 
-fn read_grant_tags(cursor: &mut Cursor<'_>) -> Result<Vec<String>> {
-    let count = cursor.read_u32()? as usize;
-    if count > MAX_TAGS_PER_CREDENTIAL {
-        return Err(Error::MalformedVault(format!(
-            "grant tag count {count} exceeds the maximum of {MAX_TAGS_PER_CREDENTIAL}"
-        )));
-    }
-    let mut tags = Vec::with_capacity(count);
-    let mut seen = HashSet::with_capacity(count);
-    for _ in 0..count {
-        let tag = cursor.read_string_capped("tag", MAX_TAG_BYTES)?;
-        if !seen.insert(tag.clone()) {
-            return Err(Error::MalformedVault(format!(
-                "duplicate tag '{tag}' in one grant"
-            )));
-        }
-        tags.push(tag);
-    }
-    Ok(tags)
-}
-
-fn read_grant_fields(cursor: &mut Cursor<'_>) -> Result<Vec<String>> {
-    let count = cursor.read_u32()? as usize;
-    if count > MAX_SCOPE_FIELDS {
-        return Err(Error::MalformedVault(format!(
-            "grant field count {count} exceeds the maximum of {MAX_SCOPE_FIELDS}"
-        )));
-    }
-    if count == 0 {
-        return Err(Error::MalformedVault(
-            "grant lists an empty field scope".into(),
-        ));
-    }
-    let mut fields = Vec::with_capacity(count);
-    let mut seen = HashSet::with_capacity(count);
-    for _ in 0..count {
-        let name = cursor.read_string_capped("field name", MAX_FIELD_NAME_BYTES)?;
-        if !seen.insert(name.clone()) {
-            return Err(Error::MalformedVault(format!(
-                "duplicate field '{name}' in one grant"
-            )));
-        }
-        fields.push(name);
-    }
-    Ok(fields)
-}
-
-fn read_grant_commands(cursor: &mut Cursor<'_>) -> Result<Vec<std::path::PathBuf>> {
-    let count = cursor.read_u32()? as usize;
-    if count > MAX_COMMANDS {
-        return Err(Error::MalformedVault(format!(
-            "grant command count {count} exceeds the maximum of {MAX_COMMANDS}"
-        )));
-    }
-    let mut commands = Vec::with_capacity(count);
-    let mut seen = HashSet::with_capacity(count);
-    for _ in 0..count {
-        let text = cursor.read_string_capped("command", MAX_PATH_BYTES)?;
-        if !seen.insert(text.clone()) {
-            return Err(Error::MalformedVault(format!(
-                "duplicate command '{text}' in one grant"
-            )));
-        }
-        commands.push(std::path::PathBuf::from(text));
-    }
-    Ok(commands)
+fn quoted(text: &String) -> String {
+    format!("'{text}'")
 }

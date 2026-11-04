@@ -237,31 +237,13 @@ impl Credential {
     /// Create a credential with a freshly generated id, no tags, and the
     /// current time as both `created` and `last_rotated`.
     pub fn new(service: String, username: String, password: Zeroizing<String>) -> Result<Self> {
-        Self::with_id(
+        Self::build(
             EntryId::generate()?,
             Timestamps::now()?,
             service,
             username,
             password,
             Vec::new(),
-        )
-    }
-
-    fn with_id(
-        id: EntryId,
-        timestamps: Timestamps,
-        service: String,
-        username: String,
-        password: Zeroizing<String>,
-        tags: Vec<String>,
-    ) -> Result<Self> {
-        Self::build(
-            id,
-            timestamps,
-            service,
-            username,
-            password,
-            tags,
             validate_identity,
         )
     }
