@@ -10,6 +10,11 @@
 //! line cannot blind the session. Diagnostics (when there are any) belong on
 //! stderr; no tool can make this module print a secret because no tool is
 //! implemented here yet and the daemon has no plaintext request.
+//!
+//! The session optionally carries the raw grant token the agent host was
+//! given (TODO 4.4a). Holding it here, behind a redacting `Debug`, keeps it
+//! out of logs; the token itself is only ever reduced to its hash when a
+//! daemon request is built, and never crosses a write.
 
 use std::io::{self, Read, Write};
 
@@ -20,6 +25,7 @@ use super::jsonrpc::{
     ErrorCode, ErrorObject, LineEvent, LineReader, MAX_LINE_BYTES, Message, encode_line, parse_line,
 };
 use super::tools;
+use crate::grant::GrantToken;
 
 /// `tools/list`: the catalogue. Implemented here because it needs no daemon.
 pub const TOOLS_LIST_METHOD: &str = "tools/list";
@@ -28,17 +34,37 @@ pub const TOOLS_CALL_METHOD: &str = "tools/call";
 
 /// One connection's protocol state.
 ///
-/// The session currently holds only the legacy handshake state; the grant
-/// binding, pending access requests and client name arrive with the tools that
-/// need them (4.4 onwards).
+/// The session holds the legacy handshake state and, when the host named one,
+/// the grant token it may present to `pmd`. Pending access requests and the
+/// client name arrive with the tools that need them (4.5 onwards).
 #[derive(Debug, Default)]
 pub struct Server {
     session: Session,
+    grant: Option<GrantToken>,
 }
 
 impl Server {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bind a grant token to this session. `None` is a valid session: the
+    /// handshake and catalogue still answer, and every credential tool must
+    /// refuse for want of a grant.
+    pub fn with_grant(grant: Option<GrantToken>) -> Self {
+        Self {
+            session: Session::default(),
+            grant,
+        }
+    }
+
+    /// The grant this session presents to `pmd`, if any.
+    ///
+    /// Deliberately not public API for printing: the token's `Debug` is
+    /// redacted and it has no `Display`, so an accidental format of the
+    /// session cannot leak it.
+    pub fn grant(&self) -> Option<&GrantToken> {
+        self.grant.as_ref()
     }
 
     /// Handle one decoded message. Returns the answer to write, or `None`
@@ -110,8 +136,12 @@ impl Server {
 /// The only errors returned are I/O errors. A closed output pipe ends the
 /// command (the CLI maps `BrokenPipe` to exit 0); a failed read is reported to
 /// the caller.
-pub fn serve<R: Read, W: Write>(mut input: R, mut output: W) -> io::Result<()> {
-    let mut server = Server::new();
+pub fn serve<R: Read, W: Write>(
+    mut input: R,
+    mut output: W,
+    grant: Option<GrantToken>,
+) -> io::Result<()> {
+    let mut server = Server::with_grant(grant);
     let mut reader = LineReader::new();
     let mut buffer = [0u8; 8192];
     loop {

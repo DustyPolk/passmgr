@@ -201,7 +201,7 @@ fn refuse_daemon_vault_selection(
     env_db: Option<&Path>,
     grant_from_env: bool,
 ) -> Result<(), String> {
-    if matches!(command, Command::Mcp(McpCommand::Serve)) {
+    if matches!(command, Command::Mcp(McpCommand::Serve { .. })) {
         let Some(source) = flag_db.map(|_| "--db").or(env_db.map(|_| "PASSMGR_DB")) else {
             return Ok(());
         };

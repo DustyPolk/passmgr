@@ -176,7 +176,8 @@ Commands:
                              deleted or reordered record). A change to or
                              deletion of the final record, or of the whole
                              file, cannot be detected; see SECURITY.md.
-  mcp serve                  Speak the Model Context Protocol (JSON-RPC 2.0)
+  mcp serve [--grant-file FILE]
+                             Speak the Model Context Protocol (JSON-RPC 2.0)
                              over stdin and stdout for an agent host. Always
                              agent context: never prompts, never opens the
                              vault, and has no path that returns a secret.
@@ -185,6 +186,11 @@ Commands:
                              '_meta' era, and answers 'tools/list' with five
                              tools; credential calls go to the daemon (not
                              wired yet, so 'tools/call' answers -32601).
+                             The grant token comes from --grant-file or, when
+                             the flag is absent, PASSMGR_GRANT_FILE (a 0600
+                             file written by 'grant create --out'); without
+                             one the handshake and catalogue still work, but
+                             every credential tool refuses.
                              stdout carries only JSON-RPC lines; diagnostics
                              go to stderr. Refuses --db and PASSMGR_DB
                              (exit 2): the daemon owns every decision.

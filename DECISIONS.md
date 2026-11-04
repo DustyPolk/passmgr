@@ -821,10 +821,20 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   method dispatch, then the decorator. Tool definitions are a pure catalogue
   (`src/mcp/tools.rs`) so schema shape and catalogue size are unit-testable
   without a pipe; `tools/list` needs no daemon, which is why it landed
-  before any tool that does. `tools/call` is `-32601` until TODO 4.4 wires
+  before any tool that does. `tools/call` is `-32601` until TODO 4.4e wires
   the daemon, and its test pins that so a missing implementation cannot turn
   into a fake success. `mcp serve` refuses `--db`/`PASSMGR_DB` even though it
   opens no vault: accepting a path would suggest it had chosen one.
+- `mcp serve` binds its grant at startup (TODO 4.4a): `--grant-file FILE`
+  overrides `PASSMGR_GRANT_FILE`, and the file is read through the same
+  `grant::read_grant_token` used by `run` (regular file, owner, no group or
+  world bits, one lowercase hex token). A bad file refuses the whole server
+  with exit 5 before the first MCP line; starting with no file is allowed and
+  leaves the session grantless, where only the handshake and catalogue work.
+  The raw token lives in `Server` behind `GrantToken`'s redacted `Debug` and
+  is reduced to its hash only when a daemon request is built; an agent that
+  can read its own 0600 token file gains nothing new, and no client-side check
+  is trusted by `pmd`.
 - An out-of-scope ref answers exactly like a nonexistent one (no existence
   oracle). Agent-supplied text shown to a human is sanitized (control and
   bidi characters stripped) and labelled untrusted.

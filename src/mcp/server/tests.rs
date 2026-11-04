@@ -44,7 +44,7 @@ fn initialize(server: &mut Server) -> Value {
 /// Feed `input` to a fresh server and parse every stdout line.
 fn serve_lines(input: &[u8]) -> Vec<Message> {
     let mut output = Vec::new();
-    serve(Cursor::new(input.to_vec()), &mut output).expect("serve returns at end of input");
+    serve(Cursor::new(input.to_vec()), &mut output, None).expect("serve returns at end of input");
     assert!(
         output.is_empty() || output.ends_with(b"\n"),
         "every message must end with a newline"
@@ -325,7 +325,7 @@ fn stdout_is_only_json_rpc_lines() {
     input.extend(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\"}\n");
 
     let mut output = Vec::new();
-    serve(Cursor::new(input), &mut output).expect("serve");
+    serve(Cursor::new(input), &mut output, None).expect("serve");
     for line in output
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -359,4 +359,28 @@ fn a_peer_request_cannot_reach_a_tool_yet() {
     };
     let answer = server.handle(Message::Request(request)).expect("a request");
     assert_eq!(error(&answer).code, ErrorCode::MethodNotFound.code());
+}
+
+#[test]
+fn a_bound_grant_is_held_and_its_debug_never_shows_the_token() {
+    let token = GrantToken::generate().expect("token");
+    let hash = token.hash();
+    let hex = token.to_hex();
+    assert!(hex.len() == 64);
+
+    let server = Server::with_grant(Some(token));
+    let bound = server.grant().expect("the grant is held for tool calls");
+    assert!(
+        bound.hash().matches(&hash),
+        "the same token, not a copy of its hex"
+    );
+
+    let shown = format!("{server:?}");
+    assert!(
+        !shown.contains(hex.as_str()),
+        "Debug leaked the token: {shown}"
+    );
+    assert!(shown.contains("GrantToken(<redacted>)"), "{shown}");
+
+    assert!(Server::new().grant().is_none(), "no file means no grant");
 }

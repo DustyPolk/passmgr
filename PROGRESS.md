@@ -1,3 +1,30 @@
+## 2026-11-04 — `pm mcp serve` binds the agent's grant file (TODO 4.4a)
+
+- Split TODO 4.4 into 4.4a–4.4e (binding, daemon list, daemon describe, MCP
+  `list_credentials`, MCP `describe_credential`) so each stays one iteration;
+  only 4.4a is implemented here.
+- `src/cli/args/mcp.rs`: `mcp serve` accepts exactly one `--grant-file FILE`
+  or `--grant-file=FILE`; duplicate/empty/unknown arguments are usage errors
+  (exit 2). `McpCommand::Serve` now carries `grant_file: Option<PathBuf>`.
+- `src/cli/mcp.rs`: resolves the flag, else `PASSMGR_GRANT_FILE` (same
+  precedence as `run`) and reads it through `grant::read_grant_token` before
+  serving; a refusal is `Error::Refused` (exit 5) and names only path/reason.
+  No file is not an error: the handshake and catalogue still work.
+- `src/mcp/server.rs`: `Server` holds `Option<GrantToken>` (zeroized, redacted
+  `Debug`); `with_grant`/`grant` accessors; `serve(input, output, grant)`.
+  The token is only reduced to a hash when a later daemon request is built.
+- Tests: 2 argument-parsing tests; a server test proving the bound token's
+  hash matches, no grant is `None`, and `Debug` prints only
+  `GrantToken(<redacted>)`; 3 e2e tests in `tests/mcp_serve.rs` (0600 via flag
+  and env with empty stderr, 0644/malformed/missing refused with exit 5, and a
+  hex/content canary absent from both streams).
+- Help text and `tests/fixtures/help.txt` now show `mcp serve [--grant-file
+  FILE]`; `MCP.md` documents the flag alongside the env variable.
+- **Next iteration must know:** `tools/call` is still `-32601`; 4.4e replaces
+  that branch. `Server::grant()` returns the raw token reference — do not
+  format it, hash it. The e2e helper `grant_file` writes real random tokens;
+  reuse it instead of hand-writing hex.
+
 ## 2026-11-04 — MCP stdio loop and tool catalogue (TODO 4.3)
 
 - `src/mcp/server.rs`: sequential stdio loop over `LineReader`/`parse_line`,

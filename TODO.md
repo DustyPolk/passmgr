@@ -40,10 +40,39 @@ keeps the dependency tree small and stdout hygiene under our control.
       both eras, and every stdout line parses.
       Note: `tools/call` answers `-32601` until 4.4 wires the daemon; the
       loop writes no diagnostics yet, so stderr is empty.
-- [ ] **4.4 Daemon `list`/`describe` requests** with grant-scoped results
-      (out of scope = not found). Then the MCP tools `list_credentials` and
-      `describe_credential`. Tests: scope filtering, tag/query filter, no
-      grant → isError, and no value appears anywhere in the response.
+- [x] **4.4a Bind a grant file to `pm mcp serve`** (split from 4.4).
+      `--grant-file FILE` or `PASSMGR_GRANT_FILE` is read at startup through
+      `grant::read_grant_token` and held zeroized in `Server`; no file keeps
+      the session usable for `initialize`/`tools/list` but grants nothing.
+      Tests: 0600 accepted from both spellings, 0644, malformed and missing
+      files refused with exit 5, and the token hex or file content never
+      reaches stdout or stderr. Note: `mcp serve` now accepts exactly one
+      `--grant-file`; the old "takes no arguments" refusal is per-flag.
+- [ ] **4.4b Daemon `list` request**: add `Request::List { tags, query, grant }`
+      and a response of metadata-only entries. The daemon checks the grant and
+      filters **per candidate** with `Grant::authorizes(AccessRequest::List)`,
+      so an out-of-scope ref is reported exactly like a nonexistent one. No
+      tag/query filter broadens access. Tests: scope filtering, tag and query
+      filters, no grant or a revoked/expired one is `Denied`, and a canary
+      password never appears in the encoded response.
+- [ ] **4.4c Daemon `describe` request**: one `Request::Describe { reference,
+      grant }`, same per-candidate authorization and not-found collapsing as
+      4.4b; output has service, username, tags, created/last-rotated only
+      (`fields` is `[]` and `url` is `null` until 6.1). Tests: in-scope entry,
+      out-of-scope == missing with identical error bytes, no value anywhere.
+- [ ] **4.4d MCP `list_credentials`**: validate `tags`/`query` against the
+      hand-written schema (bounded, advisory filters only), call 4.4b, map the
+      daemon's answer to `{"entries": [...]}`. No grant → `isError` with the
+      "no active grant" message, never an empty success. Tests: shape, filter
+      pass-through, daemon denial and unreachable daemon map to `isError`, no
+      secret in the response.
+- [ ] **4.4e MCP `describe_credential`**: validate `ref` (exact `pm://` form),
+      call 4.4c, return `Entry`; missing/out-of-scope are the same `isError`
+      text. Replace the `tools/call` `-32601` branch and its
+      `tools_call_reports_that_it_is_not_available_yet` test with a dispatcher
+      that validates `name`/`arguments` and refuses unknown tools. Tests: both
+      tools through the real stdio loop, and an MCP-session canary secret
+      never appears in any answer.
 - [ ] **4.5 `run_with_credentials`: env injection via the daemon** (reuse
       2.6). Command resolution plus the allowlist check, the env-name
       denylist, a from-scratch child env, timeout with process-group kill,

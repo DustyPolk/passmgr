@@ -1,15 +1,22 @@
-//! End-to-end tests for `passmgr mcp serve` (TODO 4.3).
+//! End-to-end tests for `passmgr mcp serve` (TODO 4.3, 4.4a).
 //!
 //! The binary is driven over real pipes: the whole scripted session is written,
 //! stdin is closed, and the process is waited for. Every stdout line must be a
 //! JSON-RPC message, stderr must stay empty, and each era must answer the
-//! handshake its own way.
+//! handshake its own way. Grant-token tests add a canary: the token hex must
+//! never appear on either stream, whatever the outcome.
 
 mod cli_support;
 
+use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::PathBuf;
+
 use cli_support::*;
 use serde_json::{Value, json};
+use tempfile::TempDir;
 
+use passmgr::grant::GrantToken;
 use passmgr::mcp::jsonrpc::{Message, parse_line};
 
 /// Parse a line with the crate's own codec, then return its JSON for asserts.
@@ -173,10 +180,11 @@ fn mcp_serve_refuses_a_vault_selection() {
     }
 
     // After the subcommand `--db` is not a global option any more, so the
-    // generic "takes no arguments" error wins. Either way it is refused.
+    // per-subcommand "unexpected argument" error wins. Either way it is
+    // refused before anything is read from stdin.
     let output = run(&["mcp", "serve", "--db", "elsewhere.dat"], "");
     assert_eq!(output.status.code(), Some(2));
-    assert!(stderr(&output).contains("takes no arguments"));
+    assert!(stderr(&output).contains("unexpected argument '--db'"));
 }
 
 #[test]
@@ -225,4 +233,127 @@ fn a_peer_response_is_never_answered() {
         parse_line(br#"{"jsonrpc":"2.0","id":1,"result":{}}"#).expect("valid"),
         Message::Response(_)
     ));
+}
+
+/// Write a 0600/0400 grant token file and return its path and hex canary.
+fn grant_file(dir: &TempDir, mode: u32) -> (PathBuf, String) {
+    let token = GrantToken::generate().expect("token");
+    let hex = token.to_hex();
+    let path = dir.path().join("grant.token");
+    fs::write(&path, format!("{}\n", hex.as_str())).expect("write token file");
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("chmod token file");
+    (path, hex.as_str().to_owned())
+}
+
+fn assert_no_token(output: &std::process::Output, hex: &str) {
+    assert!(
+        !stdout(output).contains(hex),
+        "stdout leaked the grant token"
+    );
+    assert!(
+        !stderr(output).contains(hex),
+        "stderr leaked the grant token"
+    );
+}
+
+#[test]
+fn a_grant_file_is_accepted_from_the_flag_or_the_environment() {
+    let _guard = serial();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (path, hex) = grant_file(&dir, 0o600);
+    let text = path.to_str().expect("utf-8 path");
+
+    for (args, env) in [
+        (vec!["mcp", "serve", "--grant-file", text], Vec::new()),
+        (vec!["mcp", "serve"], vec![("PASSMGR_GRANT_FILE", text)]),
+    ] {
+        let output = run_with_env(&args, legacy_session(), &env);
+        assert_success(&output);
+        assert_eq!(stderr(&output), "", "no diagnostics on a good token");
+        let answers = lines(&output);
+        assert_eq!(answers.len(), 3, "handshake, catalogue and ping");
+        assert_eq!(
+            answers[1]["result"]["tools"]
+                .as_array()
+                .expect("tools")
+                .len(),
+            5
+        );
+        assert_no_token(&output, &hex);
+    }
+}
+
+#[test]
+fn an_insecure_or_malformed_grant_file_is_refused_without_echoing_it() {
+    let _guard = serial();
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // A file another user can read is not a secret store.
+    let (loose, hex) = grant_file(&dir, 0o644);
+    let output = run(
+        &[
+            "mcp",
+            "serve",
+            "--grant-file",
+            loose.to_str().expect("path"),
+        ],
+        legacy_session(),
+    );
+    assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
+    assert!(
+        stdout(&output).is_empty(),
+        "no half a session before refusing"
+    );
+    assert!(
+        stderr(&output).contains("refusing grant token file") && stderr(&output).contains("0600"),
+        "{}",
+        stderr(&output)
+    );
+    assert_no_token(&output, &hex);
+
+    // Content that is not one token must not be quoted back either.
+    let malformed = dir.path().join("malformed.token");
+    let canary = "not-a-grant-token-canary";
+    fs::write(&malformed, format!("{canary}\n")).expect("write malformed token");
+    fs::set_permissions(&malformed, fs::Permissions::from_mode(0o600)).expect("chmod");
+    let output = run(
+        &[
+            "mcp",
+            "serve",
+            "--grant-file",
+            malformed.to_str().expect("path"),
+        ],
+        legacy_session(),
+    );
+    assert_eq!(output.status.code(), Some(5));
+    assert!(stdout(&output).is_empty());
+    assert!(
+        stderr(&output).contains("does not contain one 64-character lowercase hex token"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!stderr(&output).contains(canary), "the file content leaked");
+}
+
+#[test]
+fn a_missing_grant_file_is_refused_rather_than_starting_grantless() {
+    let _guard = serial();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("absent.token");
+    let output = run(
+        &[
+            "mcp",
+            "serve",
+            "--grant-file",
+            missing.to_str().expect("path"),
+        ],
+        legacy_session(),
+    );
+    assert_eq!(output.status.code(), Some(5), "{}", stderr(&output));
+    assert!(stdout(&output).is_empty());
+    assert!(
+        stderr(&output).contains("cannot read grant token file"),
+        "{}",
+        stderr(&output)
+    );
 }

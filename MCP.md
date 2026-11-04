@@ -336,9 +336,15 @@ Output: `{ request_id, status: "pending", approve_with: "pm grant approve <id>" 
   (plus metadata) by comparing hashes. `request_claim` never returns a token,
   and the token never appears in tool output.
 - The MCP server can also start with a pre-made grant. Pass
-  `PASSMGR_GRANT_FILE` pointing at a regular file owned by you with no group
-  or world permission bits (0600 or 0400 in practice); a group- or
-  world-readable file is refused.
+  `--grant-file FILE` (or `PASSMGR_GRANT_FILE`, which the flag overrides) at
+  startup, pointing at a regular file owned by you with no group or world
+  permission bits (0600 or 0400 in practice); a group- or world-readable file,
+  a symlink, a non-regular file or content that is not one 64-character
+  lowercase hex token is refused with exit 5 before any MCP line is read. The
+  token is held zeroized for the session and reduced to a hash only when a
+  daemon request is built. Starting with no file is allowed: the handshake and
+  `tools/list` still answer, and every credential tool refuses for want of a
+  grant.
 
 ## Server `instructions` (shown to the model)
 
