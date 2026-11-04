@@ -364,7 +364,8 @@ fn security_current_status_matches_the_implemented_grant_flow() {
 
 /// TODO 3.9: an attacker who can rewrite the log can also truncate its tail,
 /// and no in-file chain can notice. The limit must stay visible next to the
-/// verifier it qualifies.
+/// verifier it qualifies. The chain is unkeyed, so the limit must also not
+/// promise tamper-evidence against a same-user process.
 #[test]
 fn security_documents_the_audit_tail_limit() {
     let limit = security_limit(8);
@@ -377,8 +378,9 @@ fn security_documents_the_audit_tail_limit() {
         "SECURITY.md limit 8 must name both undetectable deletions"
     );
     assert!(
-        limit.contains("tamper-evidence for the records that remain"),
-        "SECURITY.md limit 8 must say what verification does prove"
+        limit.contains("The chain is also unkeyed")
+            && limit.contains("accidental damage and naive edits"),
+        "SECURITY.md limit 8 must say the chain stops naive edits, not a same-user rewriter"
     );
 }
 
