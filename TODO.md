@@ -604,8 +604,10 @@ are done. Work them in order like any other item.
       (test with `format!("{:?}")` on every secret-bearing type).
 - [ ] **9.4 Socket and request fuzz-style tests.** Random bytes, a slow
       client (slowloris) and many concurrent connections must not crash the
-      daemon or starve `lock`. Add a per-connection read deadline and a
-      connection cap.
+      daemon or starve `lock`. Add a connection cap. (The per-connection
+      read deadline landed in the 2026-11-04 review, with tests in
+      `daemon::run::tests` and `tests/daemon_shutdown.rs`; this item is now
+      the fuzz-style tests and the cap.)
 - [ ] **9.5 Landlock (Linux, best-effort) for `pmd`.** Restrict filesystem
       access to the vault, runtime dir, state dir, and exec of allowlisted
       binaries, if it can be done without breaking `run`. If not feasible,

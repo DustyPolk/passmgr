@@ -24,7 +24,10 @@
 - Gate: fmt, clippy `-D warnings`, full `cargo test` (cargo audit not
   installed).
 - **Next iteration must know:** deferred findings are R.75-R.79 in Phase L;
-  4.6b carries a note on base64 at an offset.
+  4.6b carries a note on base64 at an offset; 9.4's per-connection deadline
+  is done. The loop's review marker (`logs/state/last-review`) was moved to
+  this commit, because the whole codebase was reviewed today; the next review
+  iteration covers only work after it.
 
 ## 2026-11-04 — Encoders for redaction variants (TODO 4.6a)
 
