@@ -94,6 +94,9 @@ fn loader_and_shell_hook_names_are_denied() {
         "HOME",
         "SHELLOPTS",
         "PS4",
+        "GCONV_PATH",
+        "GLIBC_TUNABLES",
+        "LOCPATH",
     ] {
         assert!(denied_env_name(name), "{name} must be denied");
     }

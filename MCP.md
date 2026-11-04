@@ -227,8 +227,9 @@ the run could not start (authorization, validation, spawn failure).
 
 Rules, enforced by the **daemon** (the MCP server is untrusted plumbing):
 - Env var names match `^[A-Z_][A-Z0-9_]{0,127}$`. Deny loader and shell hooks
-  (`LD_*`, `DYLD_*`, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, `IFS`, `PATH`,
-  `HOME`, `SHELLOPTS`, `PS4`) in both `env` and `plain_env`.
+  (`LD_*`, `DYLD_*`, `GCONV_PATH`, `GLIBC_TUNABLES`, `LOCPATH`, `BASH_ENV`,
+  `ENV`, `PROMPT_COMMAND`, `IFS`, `PATH`, `HOME`, `SHELLOPTS`, `PS4`) in both
+  `env` and `plain_env`.
 - The child env is built from scratch: a fixed allowlist from the daemon env
   (`PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TZ`, `TMPDIR`, `TERM`),
   then `plain_env`, then the secrets. Never inherit the agent's full env.

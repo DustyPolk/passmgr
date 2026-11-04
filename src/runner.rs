@@ -122,12 +122,24 @@ impl Limits {
 
 /// True when the daemon must never set this variable to a secret.
 ///
-/// These names make a loader or shell execute something, so a value placed in
-/// them is not just data. The list follows `MCP.md` for `run_with_credentials`.
+/// These names make a loader or shell execute or load something, so a value
+/// placed in them is not just data: `GCONV_PATH` and `LOCPATH` point glibc at
+/// loadable modules, and `GLIBC_TUNABLES` changes how it loads. The list
+/// follows `MCP.md` for `run_with_credentials`.
 pub fn denied_env_name(name: &str) -> bool {
     matches!(
         name,
-        "BASH_ENV" | "ENV" | "PROMPT_COMMAND" | "IFS" | "PATH" | "HOME" | "SHELLOPTS" | "PS4"
+        "BASH_ENV"
+            | "ENV"
+            | "PROMPT_COMMAND"
+            | "IFS"
+            | "PATH"
+            | "HOME"
+            | "SHELLOPTS"
+            | "PS4"
+            | "GCONV_PATH"
+            | "GLIBC_TUNABLES"
+            | "LOCPATH"
     ) || name.starts_with("LD_")
         || name.starts_with("DYLD_")
 }
