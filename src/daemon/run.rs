@@ -39,6 +39,9 @@ enum RecordError {
     NotFound,
     /// The vault could not be read, locked or saved.
     Internal,
+    /// The run must stop (the daemon is stopping, or the client left while
+    /// the request waited for the vault lock); no use was spent.
+    Cancelled,
 }
 
 /// Handle one `run`: authorize, record the use, inject, stream redacted output.
@@ -194,45 +197,67 @@ pub(super) fn serve_run(
         return;
     };
     let program_text = program.to_string_lossy();
-    let (grant_id, secrets) = match record_use(vault_path, key, watermarks, request, &ids, &program)
-    {
-        Ok(value) => value,
-        Err(RecordError::Denied) => {
-            warn(record(
-                audit::Outcome::Denied,
-                None,
-                Some(program_text.as_ref()),
-                None,
-            ));
-            let _ = client.write(&RunFrame::Error(ResponseError::Denied));
-            return;
-        }
-        Err(RecordError::NotFound) => {
-            warn(record(
-                audit::Outcome::NotFound,
-                None,
-                Some(program_text.as_ref()),
-                None,
-            ));
-            let _ = client.write(&RunFrame::Error(ResponseError::NotFound));
-            return;
-        }
-        Err(RecordError::Internal) => {
-            warn(record(
-                audit::Outcome::Internal,
-                None,
-                Some(program_text.as_ref()),
-                None,
-            ));
-            let _ = client.write(&RunFrame::Error(ResponseError::Internal));
-            return;
-        }
-    };
+    // Nothing is decrypted, and no use is spent, for a client that has
+    // already left or a daemon that is already stopping.
+    if stop.requested() {
+        warn(record(
+            audit::Outcome::Cancelled,
+            None,
+            Some(program_text.as_ref()),
+            None,
+        ));
+        return;
+    }
+    let (grant_id, secrets) =
+        match record_use(vault_path, key, watermarks, request, &ids, &program, &stop) {
+            Ok(value) => value,
+            // Nobody is listening, or the key is being wiped: nothing to answer.
+            Err(RecordError::Cancelled) => {
+                warn(record(
+                    audit::Outcome::Cancelled,
+                    None,
+                    Some(program_text.as_ref()),
+                    None,
+                ));
+                return;
+            }
+            Err(RecordError::Denied) => {
+                warn(record(
+                    audit::Outcome::Denied,
+                    None,
+                    Some(program_text.as_ref()),
+                    None,
+                ));
+                let _ = client.write(&RunFrame::Error(ResponseError::Denied));
+                return;
+            }
+            Err(RecordError::NotFound) => {
+                warn(record(
+                    audit::Outcome::NotFound,
+                    None,
+                    Some(program_text.as_ref()),
+                    None,
+                ));
+                let _ = client.write(&RunFrame::Error(ResponseError::NotFound));
+                return;
+            }
+            Err(RecordError::Internal) => {
+                warn(record(
+                    audit::Outcome::Internal,
+                    None,
+                    Some(program_text.as_ref()),
+                    None,
+                ));
+                let _ = client.write(&RunFrame::Error(ResponseError::Internal));
+                return;
+            }
+        };
 
     let inherited = runner::inherited_env(std::env::vars_os());
-    // Re-check after decrypting: a shutdown may have started while the vault
-    // was open, and no child may be spawned once the key is being wiped.
-    if cancel.load(Ordering::SeqCst) {
+    // Re-check after decrypting: a shutdown may have started, or the client
+    // left, while the vault was open; no child may be spawned once the key is
+    // being wiped or when nobody is listening.
+    if stop.requested() {
         warn(record(
             audit::Outcome::Cancelled,
             Some(grant_id),
@@ -474,6 +499,7 @@ fn record_use(
     request: &protocol::RunRequest,
     ids: &[EntryId],
     program: &Path,
+    stop: &runner::Stop<'_>,
 ) -> Result<(GrantId, Vec<Zeroizing<String>>), RecordError> {
     record_use_with_save(
         vault_path,
@@ -482,12 +508,14 @@ fn record_use(
         request,
         ids,
         program,
+        stop,
         |vault| vault.save_with_key(key.as_slice()),
     )
 }
 
 /// [`record_use`] with the vault write supplied by the caller, so a test can
 /// count attempts and prove that a failed save is never retried (TODO R.58).
+#[allow(clippy::too_many_arguments)]
 fn record_use_with_save<F>(
     vault_path: &Path,
     key: &LockedKey,
@@ -495,6 +523,7 @@ fn record_use_with_save<F>(
     request: &protocol::RunRequest,
     ids: &[EntryId],
     program: &Path,
+    stop: &runner::Stop<'_>,
     mut save: F,
 ) -> Result<(GrantId, Vec<Zeroizing<String>>), RecordError>
 where
@@ -548,6 +577,12 @@ where
     }
     let grant_id: GrantId = grant.id();
 
+    // The lock wait above can last up to the lock timeout. A client that gave
+    // up in the meantime gets no use charged: the secret stays in the vault
+    // and the grant keeps its budget.
+    if stop.requested() {
+        return Err(RecordError::Cancelled);
+    }
     let marked = vault
         .grant_mut(grant_id)
         .ok_or(RecordError::Internal)?
@@ -664,7 +699,7 @@ mod tests {
 
     use super::{
         GrantWatermarks, LockedKey, READ_CHUNK, RecordError, Vault, client_closed, push_chunk,
-        read_request_with_chunk, record_use_with_save, unix_now,
+        read_request_with_chunk, record_use_with_save, runner, unix_now,
     };
     use crate::protocol::{self, FrameDecoder, ProtocolError};
 
@@ -792,14 +827,18 @@ mod tests {
         assert_eq!(&buf, b"left");
     }
 
-    #[test]
-    fn a_failed_use_save_is_attempted_exactly_once() {
-        // A save that fails *after* its rename landed leaves the increment on
-        // disk. Retrying re-reads that vault and marks a second use, so a
-        // `max_uses` grant would deny earlier than the human approved and the
-        // audit chain would show two uses from one run (TODO R.58).
-        use std::cell::Cell;
+    /// A vault with one credential and a two-use grant for `/usr/bin/true`,
+    /// plus a `run` request that grant authorizes.
+    struct UseFixture {
+        _directory: tempfile::TempDir,
+        path: std::path::PathBuf,
+        key: LockedKey,
+        request: protocol::RunRequest,
+        id: crate::store::EntryId,
+        grant_id: crate::grant::GrantId,
+    }
 
+    fn use_fixture() -> UseFixture {
         use crate::crypto::{KdfParams, encrypt, unlock_key};
         use crate::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope, TokenHash};
         use crate::store::Credential;
@@ -835,8 +874,8 @@ mod tests {
             std::slice::from_ref(&grant),
         )
         .expect("encode payload");
-        // Cheap KDF parameters: this test is about the write attempt, not the
-        // KDF.
+        // Cheap KDF parameters: these tests are about the use record, not
+        // the KDF.
         let container =
             encrypt(&plaintext, master, KdfParams::new(8 * 1024, 1, 1)).expect("encrypt vault");
         std::fs::write(&path, &container).expect("write vault");
@@ -854,16 +893,83 @@ mod tests {
             cwd: "/".to_owned(),
             grant: token,
         };
+        UseFixture {
+            _directory: directory,
+            path,
+            key,
+            request,
+            id,
+            grant_id,
+        }
+    }
 
+    #[test]
+    fn a_client_that_left_during_the_lock_wait_spends_no_use() {
+        // The run was authorized and then waited for the vault write lock.
+        // When the lock is taken the client is gone: there is nobody to run
+        // for, so the use must not be charged and nothing must be saved.
+        use std::cell::Cell;
+        use std::sync::atomic::AtomicBool;
+
+        let fixture = use_fixture();
+        let cancel = AtomicBool::new(false);
+        let gone = || true;
+        let stop = runner::Stop::new(&cancel, &gone);
         let attempts = Cell::new(0u32);
         let watermarks = GrantWatermarks::new();
         let outcome = record_use_with_save(
-            &path,
-            &key,
+            &fixture.path,
+            &fixture.key,
             &watermarks,
-            &request,
-            &[id],
+            &fixture.request,
+            &[fixture.id],
             Path::new("/usr/bin/true"),
+            &stop,
+            |_vault| {
+                attempts.set(attempts.get() + 1);
+                Ok(())
+            },
+        );
+
+        assert!(
+            matches!(outcome, Err(RecordError::Cancelled)),
+            "a run whose client is gone must be cancelled, not recorded"
+        );
+        assert_eq!(
+            attempts.get(),
+            0,
+            "nothing may be saved for a vanished client"
+        );
+        let vault = Vault::open_with_key(&fixture.path, fixture.key.as_slice()).expect("reopen");
+        assert_eq!(
+            vault.grant(fixture.grant_id).expect("grant").uses(),
+            0,
+            "a vanished client must not spend a use"
+        );
+    }
+
+    #[test]
+    fn a_failed_use_save_is_attempted_exactly_once() {
+        // A save that fails *after* its rename landed leaves the increment on
+        // disk. Retrying re-reads that vault and marks a second use, so a
+        // `max_uses` grant would deny earlier than the human approved and the
+        // audit chain would show two uses from one run (TODO R.58).
+        use std::cell::Cell;
+        use std::sync::atomic::AtomicBool;
+
+        let fixture = use_fixture();
+        let cancel = AtomicBool::new(false);
+        let stop = runner::Stop::on_cancel(&cancel);
+        let attempts = Cell::new(0u32);
+        let watermarks = GrantWatermarks::new();
+        let outcome = record_use_with_save(
+            &fixture.path,
+            &fixture.key,
+            &watermarks,
+            &fixture.request,
+            &[fixture.id],
+            Path::new("/usr/bin/true"),
+            &stop,
             |_vault| {
                 attempts.set(attempts.get() + 1);
                 Err(crate::Error::Io(std::io::Error::other(
@@ -881,9 +987,9 @@ mod tests {
             1,
             "a failed use save must be attempted exactly once, not retried"
         );
-        let vault = Vault::open_with_key(&path, key.as_slice()).expect("reopen");
+        let vault = Vault::open_with_key(&fixture.path, fixture.key.as_slice()).expect("reopen");
         assert_eq!(
-            vault.grant(grant_id).expect("grant").uses(),
+            vault.grant(fixture.grant_id).expect("grant").uses(),
             0,
             "a failed save must not claim a use the vault never recorded"
         );

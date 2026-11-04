@@ -304,8 +304,8 @@ where
     F: FnMut(RunFrame) -> io::Result<()>,
 {
     // A client that left between sending the request and the spawn gets no
-    // child at all. The caller checks the same condition before decrypting,
-    // but a request can be authorized and then wait behind the vault lock.
+    // child at all. The daemon checks the same condition before decrypting
+    // and again under the vault lock; this is the last look before the fork.
     if stop.cancelled() {
         return Err(RunError::Cancelled);
     }
