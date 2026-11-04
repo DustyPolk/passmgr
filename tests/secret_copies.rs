@@ -25,7 +25,12 @@
 //!
 //! Each measurement has its own canary and counter, and the watched windows
 //! are serialized behind a mutex, so parallel test threads cannot attribute a
-//! free to the wrong measurement.
+//! free to the wrong measurement. The scan sees *every* thread's frees while a
+//! window is open (the run test needs that: its redaction happens on reader
+//! threads), so the four wire-codec tests, which all handle a session-token
+//! hex, additionally exclude each other for their whole bodies. Without that, a
+//! frame or temporary one wire test frees after its own window can be dropped
+//! inside another wire test's window and counted against it (TODO R.66).
 
 #![cfg(unix)]
 
@@ -73,6 +78,11 @@ static WIRE_HITS: AtomicUsize = AtomicUsize::new(0);
 /// before any watched window opens; reading a `OnceLock` in the allocator
 /// allocates nothing.
 static WIRE_NEEDLES: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
+
+/// Serializes the four wire-codec tests for their whole bodies, not just their
+/// windows: a token-bearing buffer one of them frees outside its window must
+/// never be scanned inside another one's (see the module doc).
+static WIRE_SERIAL: Mutex<()> = Mutex::new(());
 
 /// Serializes the watched windows: the counters are process-wide.
 static WATCH_LOCK: Mutex<()> = Mutex::new(());
@@ -145,6 +155,11 @@ unsafe impl GlobalAlloc for CanaryWatcher {
 
 #[global_allocator]
 static ALLOCATOR: CanaryWatcher = CanaryWatcher;
+
+/// Hold `WIRE_SERIAL` for the rest of a wire-codec test.
+fn wire_serial() -> MutexGuard<'static, ()> {
+    WIRE_SERIAL.lock().unwrap_or_else(|err| err.into_inner())
+}
 
 /// Count the freed blocks that still hold the counter's canary while `body`
 /// runs.
@@ -298,6 +313,7 @@ fn a_run_leaves_no_more_copies_than_the_spawn_itself() {
 /// the frame body it returns and the decoder's tree are all wiped.
 #[test]
 fn the_wire_codec_leaves_no_copy_of_the_token_in_freed_memory() {
+    let _serial = wire_serial();
     let token = SessionToken::from_bytes(&WIRE_TOKEN_BYTES).expect("fixed token");
     let grant = GrantToken::from_hex(WIRE_GRANT_HEX).expect("fixed grant");
     // The needles are allocated before the window opens and live until the
@@ -363,6 +379,7 @@ fn large_run_request(grant: &GrantToken, arguments: usize, extra: usize) -> Requ
 /// the exact JSON overhead.
 #[test]
 fn a_frame_at_the_size_cap_leaves_no_copy_of_the_token_in_freed_memory() {
+    let _serial = wire_serial();
     let token = SessionToken::from_bytes(&WIRE_TOKEN_BYTES).expect("fixed token");
     let grant = GrantToken::from_hex(WIRE_GRANT_HEX).expect("fixed grant");
     let needles = wire_needles(&token, &grant);
@@ -418,6 +435,7 @@ fn a_frame_at_the_size_cap_leaves_no_copy_of_the_token_in_freed_memory() {
 /// serializes through `BodyWriter`, which grows with `grow_wiped`.
 #[test]
 fn encoding_a_large_run_request_leaves_no_copy_of_the_token_in_freed_memory() {
+    let _serial = wire_serial();
     let token = SessionToken::from_bytes(&WIRE_TOKEN_BYTES).expect("fixed token");
     let grant = GrantToken::from_hex(WIRE_GRANT_HEX).expect("fixed grant");
     let needles = wire_needles(&token, &grant);
@@ -452,6 +470,7 @@ fn encoding_a_large_run_request_leaves_no_copy_of_the_token_in_freed_memory() {
 /// hits the same path, so this is not only a hostile-peer case.
 #[test]
 fn a_rejected_request_leaves_no_copy_of_the_token_in_freed_memory() {
+    let _serial = wire_serial();
     let token = SessionToken::from_bytes(&WIRE_TOKEN_BYTES).expect("fixed token");
     let grant = GrantToken::from_hex(WIRE_GRANT_HEX).expect("fixed grant");
     wire_needles(&token, &grant);

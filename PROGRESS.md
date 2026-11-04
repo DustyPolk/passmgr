@@ -1,8 +1,38 @@
-## 2026-11-03 — loop note: timeout (iteration 112)
+## 2026-11-03 — Wipe the read chunk before a rejected push returns (TODO R.66)
 
-- The work iteration on TODO R.66 hit the 45m limit before committing.
-- Uncommitted work (if any) is in `git stash list` as "loop iter 112 leftovers".
-- Next attempt: split R.66 into smaller sub-items first and do only the first one.
+- `src/daemon/run.rs`: `read_request` is now a wrapper over
+  `read_request_with_chunk(stream, &mut chunk)`; every successful `read` goes
+  through `push_chunk`, which wipes the chunk *before* propagating `push`'s
+  error. The old `decoder.push(&chunk[..read])?` returned first, leaving the
+  raw frame — session-token hex, and the grant hex for `run` — in the chunk.
+- Passing the chunk in is the test seam: a unit test can observe the wipe after
+  the call without an allocator scan (a stack array is invisible to
+  `tests/secret_copies.rs`), which is the pattern R.67 needs.
+- `BufferFull` is unreachable through the loop: `next_request` runs at the top
+  of every iteration, so the buffer never passes 4 + 64 KiB + one 4 KiB chunk,
+  far under `MAX_BUFFERED_BYTES` (131080). The item's ">128 KiB of
+  unterminated bytes" case cannot happen; a second test covers `BufferFull`
+  through `push_chunk` directly. Both tests (`src/daemon/run.rs`) assert the
+  error and an all-zero chunk and fail when the wipe is moved back after `?`.
+- Gate exposed a pre-existing flake in `tests/secret_copies.rs`: the four
+  wire-codec tests shared one token needle and one counter, and the scan sees
+  *every* thread's frees while a window is open, so a token-bearing buffer one
+  test freed outside its window was counted against whichever test's window
+  was open (5/12 `cargo test --test secret_copies` failures at HEAD, 8 hits).
+  Each wire test now holds a new `WIRE_SERIAL` mutex for its whole body; the
+  module doc says why. 20/20 green after.
+- `DECISIONS.md` and `SECURITY.md` now say the read chunk is wiped on the
+  rejected path too.
+- Gate: fmt, clippy, full `cargo test` green three times; `cargo audit` skipped.
+- Iteration 112 hit the 45 min timeout while running the gate a third time;
+  the work was recovered from the loop's stash, re-gated green and committed
+  by hand. Running the full gate once is enough.
+- **Next iteration must know:** R.67 is the harder half: the reader's
+  raw-output buffer (`src/runner.rs:528`) is still a stack array, invisible to
+  the scan, and its run canary asserts `<= baseline` (3 vs 3). Copy the
+  `push_chunk` pattern (buffer as a parameter, or heap-own it) and assert the
+  wipe on every path. Any new `tests/secret_copies.rs` test whose buffers carry
+  another test's needle needs the same serialization.
 
 ## 2026-11-03 — Wipe the parsed envelope on a rejected request (TODO R.65)
 

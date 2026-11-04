@@ -202,7 +202,9 @@ and reap handling (TODO R.50b considered and rejected that for the risk).
 Everything passmgr owns *is* wiped: the redaction window including when it
 grows, the reader's raw-output buffer, the redactors themselves, and every
 buffer the wire codec copies a request into (the frame it returns, the encoder's
-JSON tree, the decoder's buffer and the body it hands back — TODO R.50c). The
+JSON tree, the decoder's buffer and the body it hands back — TODO R.50c), plus
+the daemon's 4 KiB read chunk, which is wiped before a rejected `push` returns
+its error (TODO R.66). The
 decoder wipes its parsed tree on every path, including a rejected request, so
 a malformed frame cannot leave the session-token hex in freed memory. A
 `run` never creates such a copy for itself — `tests/secret_copies.rs` runs under

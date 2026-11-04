@@ -375,13 +375,23 @@ fn record_use(
 pub(super) fn read_request(
     stream: &mut UnixStream,
 ) -> Result<protocol::AuthenticatedRequest, ProtocolError> {
-    let mut decoder = FrameDecoder::new();
     let mut chunk = [0u8; READ_CHUNK];
+    read_request_with_chunk(stream, &mut chunk)
+}
+
+/// [`read_request`]'s loop, with the read chunk supplied by the caller so a
+/// test can observe that it is wiped on every exit, the rejected ones
+/// included (TODO R.66). Nothing in production passes a different chunk.
+fn read_request_with_chunk(
+    stream: &mut UnixStream,
+    chunk: &mut [u8],
+) -> Result<protocol::AuthenticatedRequest, ProtocolError> {
+    let mut decoder = FrameDecoder::new();
     loop {
         if let Some(request) = decoder.next_request()? {
             return Ok(request);
         }
-        match stream.read(&mut chunk) {
+        match stream.read(chunk) {
             Ok(0) => {
                 let buffered = decoder.buffered();
                 return Err(if buffered == 0 {
@@ -393,12 +403,7 @@ pub(super) fn read_request(
                     }
                 });
             }
-            Ok(read) => {
-                decoder.push(&chunk[..read])?;
-                // The stack buffer holds the raw request, grant-token hex
-                // included; the next `read` overwrites only its front.
-                chunk[..read].zeroize();
-            }
+            Ok(read) => push_chunk(&mut decoder, &mut chunk[..read])?,
             Err(err)
                 if matches!(
                     err.kind(),
@@ -418,6 +423,19 @@ pub(super) fn read_request(
     }
 }
 
+/// Append one read chunk to `decoder` and wipe it.
+///
+/// The chunk holds the raw request — the session-token hex and, for `run`, the
+/// grant-token hex — so it is wiped on *both* paths. `push` rejects an
+/// oversized declared length or a full buffer, and the old
+/// `decoder.push(&chunk[..read])?` returned before the wipe, leaving that chunk
+/// in the caller's stack for the rest of the connection's life (TODO R.66).
+fn push_chunk(decoder: &mut FrameDecoder, chunk: &mut [u8]) -> Result<(), ProtocolError> {
+    let pushed = decoder.push(chunk);
+    chunk.zeroize();
+    pushed
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
@@ -425,7 +443,56 @@ mod tests {
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixStream;
 
-    use super::client_closed;
+    use super::{READ_CHUNK, client_closed, push_chunk, read_request_with_chunk};
+    use crate::protocol::{self, FrameDecoder, ProtocolError};
+
+    #[test]
+    fn a_rejected_read_chunk_is_wiped_before_the_error_returns() {
+        // Drive the real read loop with a frame whose 4-byte prefix declares a
+        // body over the cap. `push` rejects it as soon as the prefix arrives,
+        // and the chunk holds the raw frame at that moment (TODO R.66).
+        let (mut client, mut daemon) = UnixStream::pair().expect("socketpair");
+        let mut frame = (protocol::MAX_MESSAGE_BYTES as u32 + 1)
+            .to_be_bytes()
+            .to_vec();
+        frame.extend_from_slice(b"session-token-hex-that-must-not-be-left-behind");
+        client.write_all(&frame).expect("write");
+
+        // Zeroed by the test, so any nonzero byte after the call was written
+        // by the `read` under test and not wiped.
+        let mut chunk = [0u8; READ_CHUNK];
+        let err = read_request_with_chunk(&mut daemon, &mut chunk).expect_err("prefix rejected");
+
+        assert!(
+            matches!(err, ProtocolError::MessageTooLarge { .. }),
+            "expected MessageTooLarge, got {err:?}"
+        );
+        assert!(
+            chunk.iter().all(|byte| *byte == 0),
+            "the rejected read chunk was not wiped before the error returned"
+        );
+    }
+
+    #[test]
+    fn a_buffer_full_chunk_is_wiped_before_the_error_returns() {
+        // `BufferFull` cannot be reached through `read_request_with_chunk`: it
+        // drains a complete frame at the top of every iteration, so the buffer
+        // never grows past one 64 KiB body plus one read chunk. The wipe must
+        // still cover that error because it is the same `push` return path.
+        let mut decoder = FrameDecoder::new();
+        let mut chunk = vec![0xAAu8; protocol::MAX_BUFFERED_BYTES + 1];
+
+        let err = push_chunk(&mut decoder, &mut chunk).expect_err("over the buffer cap");
+
+        assert!(
+            matches!(err, ProtocolError::BufferFull { .. }),
+            "expected BufferFull, got {err:?}"
+        );
+        assert!(
+            chunk.iter().all(|byte| *byte == 0),
+            "the buffer-full chunk was not wiped before the error returned"
+        );
+    }
 
     #[test]
     fn an_open_client_is_not_closed() {

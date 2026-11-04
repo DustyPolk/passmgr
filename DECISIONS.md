@@ -292,8 +292,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   every decode path (the tree is held in a wipe-on-drop guard, so a rejected
   request is covered too — TODO R.65),
   `FrameDecoder` zeroizes the bytes of a taken frame and its whole buffer on
-  drop, and the daemon's fixed read chunk is wiped after each `push` (TODO
-  R.50c). Growth never lets `Vec` reallocate in place: `push` and the
+  drop, and the daemon's fixed read chunk is wiped after each `push`, on the
+  rejected path too: the wipe runs before the error is propagated
+  (`daemon::run::push_chunk`, TODO R.50c/R.66). Growth never lets `Vec`
+  reallocate in place: `push` and the
   encoder's `BodyWriter` grow through `grow_wiped` (allocate, copy, zeroize
   the old allocation, swap), and `encode_body` moves the request into the
   envelope instead of letting `json!` deep-copy it, so no second tree holding

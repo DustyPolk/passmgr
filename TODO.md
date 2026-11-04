@@ -65,7 +65,7 @@ Rules that apply to every item:
       trailing call after the match is gone because the guard covers it. The
       test also decodes a `version` 3 envelope (the old-client path) and
       measured 3 freed copies of the token hex before the fix, 0 after.
-- [ ] **R.66 `read_request` propagates `FrameDecoder::push` errors before
+- [x] **R.66 `read_request` propagates `FrameDecoder::push` errors before
       zeroizing the 4 KiB stack chunk, leaving the raw request in stack
       memory.** `src/daemon/run.rs:397-401` calls
       `decoder.push(&chunk[..read])?` and only then
@@ -81,6 +81,23 @@ Rules that apply to every item:
       assert both errors and that no chunk copy is observable (restructure so
       the buffer is heap-owned and reachable by the allocator, or assert the
       wipe order directly).
+      Done: `read_request` is now a thin wrapper over
+      `read_request_with_chunk(stream, &mut chunk)`, which takes the buffer as
+      a parameter so a test can observe it after the call; every successful
+      `read` goes through `push_chunk`, which wipes the chunk before
+      propagating `push`'s error. Two unit tests in `src/daemon/run.rs` drive
+      the real loop with a socketpair (oversized declared length →
+      `MessageTooLarge`) and `push_chunk` directly (`BufferFull`); both assert
+      the error and an all-zero chunk, and both fail with the old
+      push-then-wipe order. `BufferFull` is not reachable through
+      `read_request_with_chunk` itself: the loop drains a complete frame before
+      the buffer can pass 64 KiB + one 4 KiB chunk, far under
+      `MAX_BUFFERED_BYTES`, so the second test covers the same return path
+      directly. The gate also exposed a pre-existing flake in
+      `tests/secret_copies.rs` (the four wire-codec tests shared one token
+      needle and one counter, and a free one of them made outside its own
+      window could be scanned inside another's); they now hold `WIRE_SERIAL`
+      for their whole bodies. See the PROGRESS entry.
 - [ ] **R.67 The reader-thread stack wipe is not covered by any test, so it
       can be deleted silently.** `src/runner.rs:528` holds the raw child output
       (which contains the injected value) in a stack array and
