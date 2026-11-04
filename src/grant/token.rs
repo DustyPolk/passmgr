@@ -9,6 +9,7 @@ use getrandom::fill;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
+use crate::hex;
 
 use super::TokenHash;
 
@@ -51,11 +52,7 @@ impl GrantToken {
             return Err(invalid_hex());
         }
         let mut bytes = Zeroizing::new([0u8; GRANT_TOKEN_BYTES]);
-        for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
-            let high = hex_digit(pair[0]).ok_or_else(invalid_hex)?;
-            let low = hex_digit(pair[1]).ok_or_else(invalid_hex)?;
-            bytes[index] = (high << 4) | low;
-        }
+        hex::decode_lower_into(text, bytes.as_mut_slice()).ok_or_else(invalid_hex)?;
         Ok(Self { bytes })
     }
 
@@ -66,21 +63,7 @@ impl GrantToken {
 
     /// Lowercase hex, the form written to `--out` for an agent to present.
     pub fn to_hex(&self) -> Zeroizing<String> {
-        use std::fmt::Write as _;
-
-        let mut hex = Zeroizing::new(String::with_capacity(GRANT_TOKEN_BYTES * 2));
-        for byte in self.bytes.iter() {
-            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
-        }
-        hex
-    }
-}
-
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
+        hex::encode_lower_zeroizing(self.bytes.as_slice())
     }
 }
 

@@ -348,11 +348,11 @@ pub fn encode_run_frame(frame: &RunFrame) -> Result<Vec<u8>, ProtocolError> {
     let response = match frame {
         RunFrame::Stdout(data) => {
             check_chunk(data.len())?;
-            json!({ "type": "stdout", "data": hex_encode(data) })
+            json!({ "type": "stdout", "data": crate::hex::encode_lower(data) })
         }
         RunFrame::Stderr(data) => {
             check_chunk(data.len())?;
-            json!({ "type": "stderr", "data": hex_encode(data) })
+            json!({ "type": "stderr", "data": crate::hex::encode_lower(data) })
         }
         RunFrame::Exit(finished) => {
             let mut exit = Map::new();
@@ -490,7 +490,7 @@ fn decode_chunk(response: &Map<String, Value>) -> Result<Vec<u8>, ProtocolError>
         ));
     }
     check_chunk(text.len() / 2)?;
-    hex_decode(text).ok_or_else(|| {
+    crate::hex::decode_lower_vec(text).ok_or_else(|| {
         ProtocolError::InvalidResponse("'response.data' must be lowercase hex".into())
     })
 }
@@ -588,35 +588,6 @@ fn check_chunk(length: usize) -> Result<(), ProtocolError> {
 
 fn truncate_type(kind: &str) -> String {
     kind.chars().take(MAX_TYPE_CHARS).collect()
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-        text.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-    }
-    text
-}
-
-/// Strict lowercase hex, like the session token. `None` on any other byte.
-fn hex_decode(text: &str) -> Option<Vec<u8>> {
-    let mut bytes = Vec::with_capacity(text.len() / 2);
-    for pair in text.as_bytes().chunks_exact(2) {
-        let high = lowercase_hex_digit(pair[0])?;
-        let low = lowercase_hex_digit(pair[1])?;
-        bytes.push((high << 4) | low);
-    }
-    Some(bytes)
-}
-
-fn lowercase_hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

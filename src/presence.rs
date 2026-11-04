@@ -40,6 +40,8 @@ use std::time::{Duration, Instant};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+
+use crate::hex;
 use zeroize::Zeroizing;
 
 /// Domain separation string, part of the MAC message.
@@ -67,8 +69,6 @@ pub const CHALLENGE_LIFETIME: Duration = Duration::from_secs(60);
 /// The residual risk is documented in [`Challenges::issue`].
 pub const MAX_PENDING_CHALLENGES: usize = 16;
 
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-
 /// A fresh random value the daemon issues for one approval.
 ///
 /// The nonce is not secret: it is sent to the requester in the clear and is
@@ -87,15 +87,12 @@ impl ChallengeNonce {
 
     /// Parse the lowercase hex form used on the wire.
     pub fn from_hex(text: &str) -> Option<Self> {
-        let bytes = decode_hex(text, NONCE_BYTES)?;
-        let mut nonce = [0u8; NONCE_BYTES];
-        nonce.copy_from_slice(&bytes);
-        Some(Self(nonce))
+        hex::decode_lower(text).map(Self)
     }
 
     /// The lowercase hex form sent to the requester and echoed back.
     pub fn to_hex(self) -> String {
-        encode_hex(&self.0)
+        hex::encode_lower(&self.0)
     }
 
     /// The raw bytes, for the MAC message.
@@ -131,15 +128,12 @@ impl RequestDigest {
 
     /// Parse the lowercase hex form used on the wire.
     pub fn from_hex(text: &str) -> Option<Self> {
-        let bytes = decode_hex(text, DIGEST_BYTES)?;
-        let mut digest = [0u8; DIGEST_BYTES];
-        digest.copy_from_slice(&bytes);
-        Some(Self(digest))
+        hex::decode_lower(text).map(Self)
     }
 
     /// The lowercase hex form.
     pub fn to_hex(self) -> String {
-        encode_hex(&self.0)
+        hex::encode_lower(&self.0)
     }
 
     /// The raw bytes, for the MAC message.
@@ -198,15 +192,14 @@ impl Proof {
 
     /// Parse the lowercase hex form used on the wire.
     pub fn from_hex(text: &str) -> Option<Self> {
-        let bytes = decode_hex(text, PROOF_BYTES)?;
         let mut proof = Zeroizing::new([0u8; PROOF_BYTES]);
-        proof.copy_from_slice(&bytes);
+        hex::decode_lower_into(text, proof.as_mut_slice())?;
         Some(Self(proof))
     }
 
     /// The lowercase hex form, in zeroizing storage like the bytes.
     pub fn to_hex(&self) -> Zeroizing<String> {
-        Zeroizing::new(encode_hex(self.0.as_slice()))
+        hex::encode_lower_zeroizing(self.0.as_slice())
     }
 
     /// Compare two proofs without an early exit.
@@ -453,37 +446,6 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         return false;
     }
     left.ct_eq(right).into()
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    let mut text = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        text.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-        text.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-    }
-    text
-}
-
-/// Strict lowercase hex of exactly `expected` bytes; `None` otherwise.
-fn decode_hex(text: &str, expected: usize) -> Option<Vec<u8>> {
-    if text.len() != expected * 2 {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(expected);
-    for pair in text.as_bytes().chunks_exact(2) {
-        let high = lowercase_hex_digit(pair[0])?;
-        let low = lowercase_hex_digit(pair[1])?;
-        bytes.push((high << 4) | low);
-    }
-    Some(bytes)
-}
-
-fn lowercase_hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

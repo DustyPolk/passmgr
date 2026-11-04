@@ -18,6 +18,8 @@
 use std::fmt;
 
 use subtle::ConstantTimeEq;
+
+use crate::hex;
 use zeroize::Zeroizing;
 
 /// Number of random bytes in a session token.
@@ -69,22 +71,13 @@ impl SessionToken {
             return Err(invalid_hex());
         }
         let mut bytes = Zeroizing::new([0u8; TOKEN_BYTES]);
-        for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
-            let high = lowercase_hex_digit(pair[0]).ok_or_else(invalid_hex)?;
-            let low = lowercase_hex_digit(pair[1]).ok_or_else(invalid_hex)?;
-            bytes[index] = (high << 4) | low;
-        }
+        hex::decode_lower_into(text, bytes.as_mut_slice()).ok_or_else(invalid_hex)?;
         Ok(Self { bytes })
     }
 
     /// The lowercase hex form, in zeroizing storage like the bytes.
     pub fn to_hex(&self) -> Zeroizing<String> {
-        let mut text = Zeroizing::new(String::with_capacity(TOKEN_HEX_CHARS));
-        for byte in self.bytes.iter() {
-            text.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-            text.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-        }
-        text
+        hex::encode_lower_zeroizing(self.bytes.as_slice())
     }
 
     /// The raw bytes, for handing the token to `pmd` over its private pipe.
@@ -99,16 +92,6 @@ impl SessionToken {
     /// the file anyway); this only avoids making it an obvious oracle.
     pub fn matches(&self, other: &SessionToken) -> bool {
         self.bytes[..].ct_eq(&other.bytes[..]).into()
-    }
-}
-
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-
-fn lowercase_hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
     }
 }
 

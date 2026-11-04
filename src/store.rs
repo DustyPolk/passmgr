@@ -39,6 +39,7 @@ use getrandom::fill;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
+use crate::hex;
 use crate::text::{HIDDEN_FORBIDDEN_CLASSES, escape_quoted, is_hidden_or_reordering};
 
 mod payload;
@@ -107,13 +108,7 @@ impl EntryId {
     }
 
     pub fn to_hex(self) -> String {
-        use std::fmt::Write as _;
-
-        let mut hex = String::with_capacity(ENTRY_ID_HEX_CHARS);
-        for byte in self.0 {
-            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
-        }
-        hex
+        hex::encode_lower(&self.0)
     }
 
     /// Render the canonical agent-facing reference, `pm://<32 hex chars>`.
@@ -123,17 +118,15 @@ impl EntryId {
 
     /// Parse a bare 32-character hex id (upper or lower case).
     pub fn from_hex(hex: &str) -> Result<Self> {
-        let bytes = hex.as_bytes();
-        if bytes.len() != ENTRY_ID_HEX_CHARS {
+        if hex.len() != ENTRY_ID_HEX_CHARS {
             return Err(Error::InvalidInput(format!(
                 "entry id must be {ENTRY_ID_HEX_CHARS} hex characters"
             )));
         }
-        let mut id = [0u8; ENTRY_ID_BYTES];
-        for (index, pair) in bytes.chunks_exact(2).enumerate() {
-            id[index] = (hex_digit(pair[0])? << 4) | hex_digit(pair[1])?;
-        }
-        Ok(Self(id))
+        // Upper case is accepted on purpose: ids are typed on a command line.
+        hex::decode_lower(&hex.to_ascii_lowercase())
+            .map(Self)
+            .ok_or_else(|| Error::InvalidInput("entry id contains a non-hex character".into()))
     }
 
     /// Parse the `pm://<32 hex chars>` reference form. The full id is
@@ -161,17 +154,6 @@ impl fmt::Display for EntryId {
 impl fmt::Debug for EntryId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "EntryId({})", self.to_ref())
-    }
-}
-
-fn hex_digit(byte: u8) -> Result<u8> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(Error::InvalidInput(
-            "entry id contains a non-hex character".into(),
-        )),
     }
 }
 

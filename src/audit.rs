@@ -34,7 +34,6 @@
 use std::env;
 use std::ffi::OsStr;
 use std::fmt;
-use std::fmt::Write as FmtWrite;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
@@ -230,11 +229,7 @@ pub fn check_writable(path: &Path) -> Result<(), AuditError> {
 /// used.
 pub fn chain_hash(line: &[u8]) -> String {
     let digest = Sha256::digest(line);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    hex
+    crate::hex::encode_lower(&digest)
 }
 
 /// Encode one record line without the trailing newline.

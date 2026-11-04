@@ -31,13 +31,13 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::error::{Error, Result};
+use crate::hex;
 use crate::store::{EntryId, MAX_TIMESTAMP_UNIX, normalize_tags};
 
 use validate::validate_shape;
 
 /// Bytes in a grant id (rendered as 32 lowercase hex characters).
 pub const GRANT_ID_BYTES: usize = 16;
-const GRANT_ID_HEX_CHARS: usize = GRANT_ID_BYTES * 2;
 /// Bytes in a SHA-256 token hash.
 pub const TOKEN_HASH_BYTES: usize = 32;
 /// Longest human-readable grant label.
@@ -78,27 +78,15 @@ impl GrantId {
 
     /// Lowercase hex, the canonical form for `pm grant` arguments and JSON.
     pub fn to_hex(self) -> String {
-        use std::fmt::Write as _;
-
-        let mut hex = String::with_capacity(GRANT_ID_HEX_CHARS);
-        for byte in self.0 {
-            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
-        }
-        hex
+        hex::encode_lower(&self.0)
     }
 
-    /// Parse a 32-character hex id (upper or lower case).
+    /// Parse a 32-character hex id (upper or lower case: argv may be typed
+    /// either way).
     pub fn from_hex(text: &str) -> Result<Self> {
-        let invalid = || Error::InvalidInput("a grant id is 32 hex characters".into());
-        if text.len() != GRANT_ID_HEX_CHARS {
-            return Err(invalid());
-        }
-        let mut id = [0u8; GRANT_ID_BYTES];
-        for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
-            id[index] = (hex_digit(pair[0]).ok_or_else(invalid)? << 4)
-                | hex_digit(pair[1]).ok_or_else(invalid)?;
-        }
-        Ok(Self(id))
+        hex::decode_lower(&text.to_ascii_lowercase())
+            .map(Self)
+            .ok_or_else(|| Error::InvalidInput("a grant id is 32 hex characters".into()))
     }
 }
 
@@ -111,23 +99,6 @@ impl fmt::Display for GrantId {
 impl fmt::Debug for GrantId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "GrantId({})", self.to_hex())
-    }
-}
-
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn lowercase_hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        _ => None,
     }
 }
 
@@ -192,26 +163,13 @@ impl TokenHash {
     /// display it. This exists so the wire format can be parsed at the
     /// boundary, not so callers can print it.
     pub fn to_hex(&self) -> String {
-        use std::fmt::Write as _;
-
-        let mut hex = String::with_capacity(TOKEN_HASH_BYTES * 2);
-        for byte in self.0 {
-            write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
-        }
-        hex
+        hex::encode_lower(&self.0)
     }
 
     /// Parse exactly [`TokenHash::to_hex`]'s lowercase form. Uppercase is
     /// refused so one hash has exactly one encoding on the wire.
     pub fn from_hex(text: &str) -> Option<Self> {
-        if text.len() != TOKEN_HASH_BYTES * 2 {
-            return None;
-        }
-        let mut bytes = [0u8; TOKEN_HASH_BYTES];
-        for (index, pair) in text.as_bytes().chunks_exact(2).enumerate() {
-            bytes[index] = (lowercase_hex_digit(pair[0])? << 4) | lowercase_hex_digit(pair[1])?;
-        }
-        Some(Self(bytes))
+        hex::decode_lower(text).map(Self)
     }
 }
 
