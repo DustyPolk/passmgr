@@ -11,6 +11,78 @@ Rules that apply to every item:
 
 ## Phase R — review findings (fix first)
 
+- [ ] **R.64 `FrameDecoder::push` reallocates the receive buffer without
+      wiping the old one, so the session-token hex survives in freed memory.**
+      `src/protocol/codec.rs:118` appends with `self.buffer.extend_from_slice(bytes)`.
+      When a request is larger than the first `read` (`READ_CHUNK = 4096`,
+      `src/daemon/run.rs:27`), `Vec` grows and frees an allocation whose front
+      holds the token hex (and, for `run`, the grant-token hex). Confirmed with
+      the scanning allocator: a 20 KiB frame pushed in 4 KiB chunks leaves 3
+      freed copies of the token hex, while a single-push `Ping` leaves 0. This
+      contradicts `DECISIONS.md:292` ("`FrameDecoder` zeroizes ... its whole
+      buffer on drop") and the doc comment of
+      `tests/secret_copies.rs::the_wire_codec_leaves_no_copy_of_the_token_in_freed_memory`
+      (`tests/secret_copies.rs:288-309`), whose single `push` of a small `Ping`
+      cannot grow the buffer and so cannot fail on the old code.
+      Fix: grow into a fresh buffer, copy, zeroize the old, then swap (or
+      reserve `MAX_BUFFERED_BYTES` once in `FrameDecoder::new`); never let
+      `Vec` reallocate a buffer that has held a token.
+      Test: with a token whose hex is the canary, push a >4 KiB `run` request
+      (valid token + `grant`) in 4 KiB chunks and take the frame under the
+      scanning allocator; require 0 hits. It must fail with the current `push`.
+- [ ] **R.65 `decode_body` skips `zeroize_json` on every error path after the
+      JSON parse, so a rejected request's token hex is freed unwiped.**
+      `src/protocol/codec.rs:306` parses the whole envelope, but
+      `zeroize_json(&mut value)` runs only at `src/protocol/codec.rs:376`.
+      The `?` returns before it include the version check
+      (`src/protocol/codec.rs:321`), a missing/invalid `token` (`:326-334`),
+      a missing `request`/`type` (`:336-348`), every malformed `run`,
+      `challenge`, `prove` field (`required_string(...)?`,
+      `decode_grant_create(...)?`, `decode_grant_revoke(...)?`), and the
+      `other => return Err(ProtocolError::UnknownRequest(...))` arm at
+      `src/protocol/codec.rs:369`. Confirmed: `{"type":"nope"}` sent with a
+      valid session token leaves 1 freed copy of the token hex. An old client
+      (`version` 3) hits the same path, so this is not only a hostile-peer
+      case.
+      Fix: run the whole parse-and-match in a closure or wrap the tree in a
+      guard, and wipe before returning any error; keep the wipe after the
+      match as well for the success path.
+      Test: under the scanning allocator, decode an unknown request type and a
+      `grant_create` missing its `label`; require 0 hits for both. Both fail
+      today.
+- [ ] **R.66 `read_request` propagates `FrameDecoder::push` errors before
+      zeroizing the 4 KiB stack chunk, leaving the raw request in stack
+      memory.** `src/daemon/run.rs:397-401` calls
+      `decoder.push(&chunk[..read])?` and only then
+      `chunk[..read].zeroize()`. On `BufferFull` (more than
+      `MAX_BUFFERED_BYTES = 131080` bytes queued), on a bad declared length
+      (`check_length`), or on any other `push` error, the `?` returns first
+      and the chunk — which holds the token hex and, for `run`, the grant hex
+      — is left on the worker thread's stack.
+      Fix: `let pushed = decoder.push(&chunk[..read]); chunk[..read].zeroize(); pushed?;`
+      (the same shape as `spawn_reader`).
+      Test: unit test in `src/daemon` driving `read_request` with a frame that
+      declares an oversized length and with >128 KiB of unterminated bytes;
+      assert both errors and that no chunk copy is observable (restructure so
+      the buffer is heap-owned and reachable by the allocator, or assert the
+      wipe order directly).
+- [ ] **R.67 The reader-thread stack wipe is not covered by any test, so it
+      can be deleted silently.** `src/runner.rs:528` holds the raw child output
+      (which contains the injected value) in a stack array and
+      `src/runner.rs:542` wipes it; the allocator scan in
+      `tests/secret_copies.rs::a_run_leaves_no_more_copies_than_the_spawn_itself`
+      (`tests/secret_copies.rs:254`) only sees heap blocks, so removing the
+      wipe keeps the whole suite green. The test also compares against a
+      baseline with `hits <= baseline` (measured: both 3), so it has no margin
+      to catch a newly lost wipe of its own canary.
+      Fix: own the read buffer on the heap (`Box<[u8; READ_CHUNK]>` or
+      `Zeroizing<Vec<u8>>`) so `push`/`drain` and the wipe are observable, and
+      replace `<= baseline` with a differential assertion on the raw-output
+      canary: the measured release count must be lower when the wipe is
+      present than when it is removed (pin the count if it is deterministic).
+      Test: delete the wipe locally and confirm the new assertion fails; keep
+      the current baseline comparison only as a sanity check.
+
 - [x] **R.15a `prove` answered "approved" without recording what was
       approved.**
       Split from R.15. `src/daemon.rs` now stores the verified digest as a

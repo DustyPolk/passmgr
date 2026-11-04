@@ -1,3 +1,47 @@
+## 2026-11-03 — Review of c83c9b3..47c64ac
+
+- 4 findings: secret exposure / residue 3 (R.64, R.65, R.66), tests 1
+  (R.67). Authorization, unsafe input handling, crypto misuse, drift and
+  maintainability: 0 new items.
+- R.64: `src/protocol/codec.rs:118` `FrameDecoder::push` grows with
+  `extend_from_slice`, so every request over `READ_CHUNK` (4 KiB) frees a
+  buffer fronted by the token hex. Reproduced with a scanning allocator: 3
+  hits for a 20 KiB frame pushed in 4 KiB chunks, 0 for the single-push
+  `Ping` the existing test uses.
+- R.65: `decode_body` (`src/protocol/codec.rs:306`) wipes the parsed tree only
+  at `:376`; every `?` in between (version mismatch, missing token, unknown
+  `type` at `:369`, malformed `run`/`prove`/`grant_create`) frees the tree
+  with the token hex intact. Reproduced: 1 hit for an unknown request type.
+- R.66: `src/daemon/run.rs:397` propagates `push` errors with `?` before
+  `chunk[..read].zeroize()` at `:401`.
+- R.67: the `spawn_reader` stack wipe (`src/runner.rs:528-542`) is invisible
+  to the heap-scanning allocator, so `tests/secret_copies.rs` would stay
+  green if it were deleted; the run canary also only asserts `<= baseline`
+  (measured 3 vs 3).
+- Looked at and judged fine (no need to redo): R.48's hidden-character
+  refusal (`src/store.rs:437-473`, `src/text.rs:46-48`), including the
+  legacy-read rule and the `--rename`/`--username` validation at
+  `src/cli/commands.rs:137-142`; terminal escaping after the re-export
+  (`src/grant.rs:963`, `escape_hidden` in `src/cli/grant.rs:276,291` and
+  `src/cli/grant_summary.rs:52-62,103`); the R.48 tests in
+  `src/store/tests.rs` and `src/grant/tests.rs`; R.49's non-blocking `write_client_frame` (`src/daemon/run.rs:188-250`),
+  `client_closed` (`:264-278`) and `tests/run_backpressure.rs`; R.50a's
+  `Zeroizing`-before-size-check in `src/crypto.rs:407-448` and its
+  allocator test; R.50c's `Zeroizing` encoder, `next_frame` tail wipe and
+  `Drop`; R.51's doc pins (`tests/docs.rs` exit table, README/FORMAT/MCP
+  wording). MCP.md carries no claim about the old 5 s write timeout.
+- R.55 (open) is the only stale doc left in this area: after R.48 landed,
+  `SECURITY.md:52-57` is accurate except "validators escape the value they
+  reject" — `reject_hidden_identity` deliberately names only the character
+  class and never echoes the value. Close or reword R.55 rather than opening
+  a duplicate.
+- Environment note: the first `cargo test --bin passmgr cli::grant::tests`
+  after checkout failed the two tests recorded by the iteration-108 rollback
+  note below; after `touch src/text.rs` forced a rebuild both pass. Stale
+  `target/` artifacts from the rolled-back branch, not a source bug. Full
+  `cargo test`, `cargo fmt --check` and `cargo clippy --all-targets -- -D
+  warnings` are green at 47c64ac.
+
 ## 2026-11-03 — loop note: gate failed (iteration 108)
 
 - Commits from this review iteration failed the gate and were rolled back.
