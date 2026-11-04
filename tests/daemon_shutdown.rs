@@ -74,6 +74,68 @@ fn wait_for_process_exit_within(pid: libc::pid_t, timeout: Duration) {
     }
 }
 
+/// A signal must not wait for a client that never finishes its request. The
+/// accept loop serves one request at a time and only looks at the shutdown
+/// flag between connections, so a client trickling one byte at a time into a
+/// frame it never completes used to hold the key until it chose to hang up.
+#[test]
+fn sigterm_is_honoured_while_a_client_trickles_an_unfinished_request() {
+    let fixture = Fixture::new();
+    let mut child = fixture.start();
+    let mut stream = UnixStream::connect(fixture.socket()).expect("connect");
+    stream
+        .write_all(&1000u32.to_be_bytes())
+        .expect("write frame prefix");
+    let (hang_up, hung_up) = std::sync::mpsc::channel::<()>();
+    let trickler = std::thread::spawn(move || {
+        // A byte every 250 ms stays well inside any per-read timeout. The cap
+        // is a safety net for a failing test; the daemon must not need it.
+        let give_up = Instant::now() + Duration::from_secs(20);
+        while hung_up.recv_timeout(Duration::from_millis(250)).is_err() {
+            if Instant::now() >= give_up || stream.write_all(b"x").is_err() {
+                break;
+            }
+        }
+    });
+
+    // The signal must arrive while the daemon is in the trickled read, not
+    // while the accept loop is still between connections. A ping that goes
+    // unanswered is the proof that the loop has taken the trickler.
+    let probe_deadline = Instant::now() + WAIT;
+    loop {
+        let mut probe = UnixStream::connect(fixture.socket()).expect("connect");
+        probe
+            .write_all(&passmgr::protocol::encode(&fixture.token, &Request::Ping).expect("encode"))
+            .expect("write ping");
+        probe
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("read timeout");
+        if try_read_response(&mut probe).is_err() {
+            break;
+        }
+        assert!(
+            Instant::now() < probe_deadline,
+            "the daemon never got stuck behind the trickling client"
+        );
+    }
+
+    // SAFETY: `pmd` is this test's own child and the pid is still owned by
+    // the unreaped `Child` handle.
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    // Within the per-connection request deadline (5 s) plus a margin.
+    let status = wait_for_exit(&mut child, Duration::from_secs(8));
+    let _ = hang_up.send(());
+    trickler.join().expect("trickler");
+    assert!(
+        status.success(),
+        "pmd exit status after SIGTERM: {status:?}"
+    );
+    assert!(!fixture.socket().exists(), "a signal removes the socket");
+}
+
 /// A run whose client disconnects must be cancelled: the child cannot keep
 /// the secret in its environment because nobody is listening any more, and the
 /// idle deadline cannot stay suspended for as long as that child happens to

@@ -126,7 +126,8 @@ pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// opened: nothing is decrypted and no child starts.
 pub const MAX_CONCURRENT_RUNS: usize = 16;
 
-/// How long a single client gets to send a complete request.
+/// How long a single client gets to send a complete request, measured from
+/// its accept, and how long it gets to take a response.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Set from the `SIGTERM`/`SIGINT` handler, which may only touch atomics.
@@ -488,7 +489,8 @@ pub fn run(
             }
             match socket.accept_peer() {
                 Ok((stream, _peer)) => {
-                    let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
+                    // The read side is bounded per connection by
+                    // `read_request`; a response write is small and one-shot.
                     let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
                     match handle_connection(
                         stream,

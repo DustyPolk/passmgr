@@ -11,7 +11,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
 
@@ -23,7 +23,7 @@ use crate::store::EntryId;
 use crate::vault::Vault;
 
 use super::watermark::GrantWatermarks;
-use super::{LockedKey, unix_now};
+use super::{LockedKey, READ_TIMEOUT, unix_now};
 
 /// Read buffer for one connection. A request is bounded by
 /// [`protocol::MAX_MESSAGE_BYTES`].
@@ -580,24 +580,42 @@ where
 }
 
 /// Read one framed request from a stream, without unbounded allocation.
+///
+/// The whole request must arrive within [`READ_TIMEOUT`] of this call. The
+/// accept loop serves one connection at a time and only checks the idle
+/// deadline and a shutdown signal between connections, so the bound is per
+/// connection, not per `read`: a client that trickles one byte at a time
+/// cannot hold the loop, and with it the key, for as long as it likes.
 pub(super) fn read_request(
     stream: &mut UnixStream,
 ) -> Result<protocol::AuthenticatedRequest, ProtocolError> {
     let mut chunk = [0u8; READ_CHUNK];
-    read_request_with_chunk(stream, &mut chunk)
+    read_request_with_chunk(stream, &mut chunk, Instant::now() + READ_TIMEOUT)
 }
 
-/// [`read_request`]'s loop, with the read chunk supplied by the caller so a
-/// test can observe that it is wiped on every exit, the rejected ones
-/// included (TODO R.66). Nothing in production passes a different chunk.
+/// [`read_request`]'s loop, with the read chunk and the deadline supplied by
+/// the caller so a test can observe that the chunk is wiped on every exit, the
+/// rejected ones included (TODO R.66), and that the deadline cuts a slow
+/// client off. Nothing in production passes a different chunk or deadline.
 fn read_request_with_chunk(
     stream: &mut UnixStream,
     chunk: &mut [u8],
+    deadline: Instant,
 ) -> Result<protocol::AuthenticatedRequest, ProtocolError> {
     let mut decoder = FrameDecoder::new();
+    let truncated = |decoder: &FrameDecoder| ProtocolError::TruncatedFrame {
+        expected: decoder.buffered(),
+        actual: decoder.buffered(),
+    };
     loop {
         if let Some(request) = decoder.next_request()? {
             return Ok(request);
+        }
+        // `SO_RCVTIMEO` bounds one `read`; set it to what is left of the
+        // connection's budget before each one so the bound is the deadline.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            return Err(truncated(&decoder));
         }
         match stream.read(chunk) {
             Ok(0) => {
@@ -618,10 +636,7 @@ fn read_request_with_chunk(
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                return Err(ProtocolError::TruncatedFrame {
-                    expected: decoder.buffered(),
-                    actual: decoder.buffered(),
-                });
+                return Err(truncated(&decoder));
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => {
@@ -651,6 +666,7 @@ mod tests {
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixStream;
     use std::path::Path;
+    use std::time::{Duration, Instant};
 
     use super::{
         GrantWatermarks, LockedKey, READ_CHUNK, RecordError, Vault, client_closed, push_chunk,
@@ -673,7 +689,12 @@ mod tests {
         // Zeroed by the test, so any nonzero byte after the call was written
         // by the `read` under test and not wiped.
         let mut chunk = [0u8; READ_CHUNK];
-        let err = read_request_with_chunk(&mut daemon, &mut chunk).expect_err("prefix rejected");
+        let err = read_request_with_chunk(
+            &mut daemon,
+            &mut chunk,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect_err("prefix rejected");
 
         assert!(
             matches!(err, ProtocolError::MessageTooLarge { .. }),
@@ -682,6 +703,42 @@ mod tests {
         assert!(
             chunk.iter().all(|byte| *byte == 0),
             "the rejected read chunk was not wiped before the error returned"
+        );
+    }
+
+    #[test]
+    fn a_client_that_trickles_its_request_is_cut_off_at_the_connection_deadline() {
+        // One byte at a time, each well inside a per-read timeout, into a frame
+        // that will never complete. Only a deadline for the whole connection
+        // ends this before the client chooses to hang up.
+        let (mut daemon, mut client) = UnixStream::pair().expect("socketpair");
+        let (hang_up, hung_up) = std::sync::mpsc::channel::<()>();
+        let trickler = std::thread::spawn(move || {
+            let _ = client.write_all(&1000u32.to_be_bytes());
+            while hung_up.recv_timeout(Duration::from_millis(20)).is_err() {
+                if client.write_all(b"x").is_err() {
+                    break;
+                }
+            }
+        });
+
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(300);
+        let mut chunk = [0u8; READ_CHUNK];
+        let err = read_request_with_chunk(&mut daemon, &mut chunk, deadline)
+            .expect_err("a trickled request never completes");
+        let elapsed = started.elapsed();
+        let _ = hang_up.send(());
+        trickler.join().expect("trickler");
+
+        assert!(
+            matches!(err, ProtocolError::TruncatedFrame { .. }),
+            "expected TruncatedFrame, got {err:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the read outlived the connection deadline by {:?}",
+            elapsed - Duration::from_millis(300)
         );
     }
 
