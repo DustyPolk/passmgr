@@ -73,6 +73,19 @@ code does not implement yet.
 - Vault encryption: AES-256-GCM, 12-byte random nonce per save, 16-byte tag,
   and the 56-byte header supplied as associated data (`src/crypto.rs`,
   `FORMAT.md`).
+- Key material is wiped inside the crypto crates too: `argon2`, `aes-gcm`
+  and a direct `aes` dependency (present only to enable it) build with
+  `zeroize`, and `derive_key` passes Argon2 a `Zeroizing<Vec<Block>>`. A
+  compile-time check requires `aes::Aes256: ZeroizeOnDrop`, and a test
+  allocator proves the KDF memory is zero when freed. The GHASH subkey is not
+  wiped (polyval's autodetect backend has no `Drop`); that needs upstream.
+- Token and MAC comparisons use `subtle::ConstantTimeEq` (already in the tree
+  through `aes-gcm`), not a hand-written loop.
+- `src/hex.rs` is the one hex codec for ids, nonces, hashes and tokens
+  (`redact::encoding` is a separate concept). Decoding is strict lowercase; a
+  caller that accepts upper case (an id typed in argv) lowercases explicitly.
+  A secret decodes with `decode_lower_into` straight into its `Zeroizing`
+  buffer.
 - KDF: Argon2id, version 0x13, 32-byte output key; a **new** vault takes a
   16-byte random salt, and every later save reuses the salt and parameters in
   the file it was read from. Parameters are stored in the header and
@@ -174,6 +187,12 @@ code does not implement yet.
   than silently making a full vault unrevocable (TODO R.61).
 - Saves are atomic: temp file in the vault's directory, fsync, rename, and a
   best-effort directory fsync. The vault is mode 0600.
+- The vault path must name a regular file. It is read through one descriptor
+  opened `O_NOFOLLOW | O_NONBLOCK` and checked with `fstat`, so a symbolic link
+  (exit 5) or a FIFO is refused rather than followed: the lock and the rename
+  work on the name given, so a link would let two writers hold different
+  locks and the first save would replace the link with a copy. The grant-token
+  and session files are opened the same way.
 - Writers serialize on an exclusive `flock` over the sidecar `<vault>.lock`
   (0600, `O_NOFOLLOW`, never unlinked), held from before the read until the
   `Vault` is dropped. `Vault::open`/`open_with_key` are read-only and take no
@@ -210,7 +229,9 @@ code does not implement yet.
 - No password ever appears in argv. Prompts read without echo; a non-TTY
   stdin reads ordinary lines so the tool stays scriptable.
 - `get` is metadata-only; `get --reveal` is the only plaintext path. `add
-  --generate` and `edit --generate` store but never print the value.
+  --generate` and `edit --generate` store but never print the value. A
+  generation flag (`--length`, a preset) without `--generate` is a usage
+  error, not silently ignored.
 - Reveal gate: stdin **and** stdout must be TTYs, no agent marker
   (`PASSMGR_AGENT`, `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_SANDBOX`; presence
   counts even when empty) and no `--agent`. Checked before unlocking, so a
@@ -312,13 +333,18 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   macOS; any other Unix target fails closed. A mismatched uid is closed with
   no reply. The pid is informational and never used for authorization.
 - Framing: 4-byte big-endian length prefix + JSON body, 64 KiB body cap
-  checked before slicing, one request per connection, 5 s read/write timeout,
-  200 ms accept poll. A `run` stream is the exception: its worker makes the
-  socket non-blocking and waits for room in `poll` in 100 ms slices, so a
-  client that stops reading backpressures the child (bounded frame channel,
-  then the child's full output pipe) instead of having the run truncated by a
-  write timeout; `lock`, a signal and a closed peer are still observed within
-  one slice (TODO R.49).
+  checked before slicing, one request per connection, a 5 s deadline for the
+  whole request counted from accept (not per `read`, so a client trickling
+  bytes cannot hold the accept loop, the key or a `SIGTERM`), 5 s write
+  timeout, 200 ms accept poll. A `run` stream is the exception: its worker
+  makes the socket non-blocking and waits for room in `poll` in 100 ms slices,
+  so a client that stops reading backpressures the child (bounded frame
+  channel, then the child's full output pipe) instead of having the run
+  truncated by a write timeout; `lock`, a signal, a closed peer and the run's
+  `timeout_secs` deadline are still observed within one slice (TODO R.49).
+  The deadline lives on `runner::Stop`, so a stalled reader cannot keep the
+  child alive past it; the terminal frame then gets the run's budget plus 5 s
+  to be collected.
 - Every buffer the codec copies a request into is wiped, because a request
   carries the session-token hex and (for `run`) the grant-token hex, and `pmd`
   is long-lived: `encode` returns `Zeroizing<Vec<u8>>`, the JSON envelope and
@@ -372,7 +398,9 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   both; "killed by signal N" stays distinct from exit code 128+N. Since TODO
   4.5c it also carries `timed_out`, `stdout_truncated` and `stderr_truncated`
   (missing on an older peer's frame means false); a timed-out run reports the
-  signal that ended it and is still an allowed, audited use.
+  signal that ended it and is still an allowed, audited use. `passmgr run`
+  prints one `passmgr:` line on stderr per flag that is set and keeps the
+  child's exit code, so cut-short output never looks complete.
 - A `run` is bounded by `timeout_secs` (1..=600, default 600) and
   `max_output_bytes` per stream (1 B..1 MiB, default 256 KiB). The cap counts
   bytes **after** redaction, so a cut can never split a secret, and the reader
@@ -457,9 +485,11 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   is an ordinary file and a same-user process can put an older copy back;
   that copy still opens with the daemon's key. `pmd` keeps an in-memory,
   per-grant-id high-water mark of `uses` and revocation, checked under the
-  vault write lock before a `run` is authorized and raised only after a
-  successful save. A vault with fewer uses, or one that cleared a seen
-  revocation, is refused `denied`; a failed write does not raise the mark.
+  vault write lock before a `run` is authorized. The mark is raised on every
+  vault read the daemon makes (startup, `list`, `describe`, `revoke`, `run`)
+  as well as after a save, so a revocation the daemon has only read survives
+  a rollback too; raising is safe because a mark only ever grows. A vault with
+  fewer uses, or one that cleared a seen revocation, is refused `denied`.
   Revocation is exempt from the check (it can only remove access, and the
   kill switch must survive a rollback) but still raises the mark. The mark is
   not persisted: a marker file is rollbackable like the vault, and a restart
@@ -490,7 +520,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   an older client treats an unknown code as a closed decode failure.
 - `lock`, `SIGTERM` and `SIGINT` wipe the key, remove
   the socket, and remove the session file only if it still holds this
-  daemon's token. A `run` is served on a worker thread so the accept loop
+  daemon's token. `unlock` writes the session file only after its `pmd` holds
+  the instance lock, and a client `lock` removes it only if it still holds the
+  token sent, so a concurrent unlock that loses the race cannot replace or
+  delete the winner's file. A `run` is served on a worker thread so the accept loop
   stays responsive; those events set a shared cancel flag, and every in-flight
   child is killed and reaped before the daemon drops the key and exits. An
   interrupted run writes no terminal frame: the client sees EOF and reports a
@@ -931,9 +964,21 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   `prev` link starting from the all-zero genesis, and reports the first
   impossible link (`line N: prev does not match line N-1`) with exit 6. A
   missing log verifies as zero records. Editing, deleting a middle record,
-  inserting one or reordering records is detected; changing or deleting the
-  final record is not, and is documented as SECURITY limit 8 rather than
-  papered over.
+  inserting one or reordering records is detected unless the writer also
+  recomputes every later `prev`: the chain is unkeyed, so any same-user
+  process can. Changing or deleting the final record is not detected either.
+  Both are SECURITY limit 8 rather than papered over.
+- The pre-run audit check (`audit::check_writable`) validates the log's tail
+  under the lock, exactly as `append` will, so a torn or oversized last line
+  refuses the run before decryption; a record and its newline go out in one
+  write.
+- `pm audit` quotes the reference, command and each argument
+  (`escape_quoted`): a refused request records what the agent sent, so a
+  value like `/x  exit=0` must not read as a field.
+- The grant approval summary shows one block of entries carrying every
+  scoped tag, filtered by `Scope::matches_tags`, the predicate enforcement
+  uses. `grant::validate::validate_shape` is the one source of the grant-shape
+  rules for both writers and the reader.
 
 - Run statistics belong to the daemon: the `exit` frame's `redactions`
   (matches replaced across both streams) and `duration_ms` (child wall clock)
@@ -947,8 +992,9 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 
 ## Dependencies
 
-- Allowed: `aes-gcm`, `argon2`, `getrandom`, `libc`, `serde_json`, `sha2`,
-  `tempfile`, `zeroize`; `hmac` joins them in TODO 3.3; `proptest` as a
+- Allowed: `aes`, `aes-gcm`, `argon2`, `getrandom`, `libc`, `serde_json`,
+  `sha2`, `subtle`, `tempfile`, `zeroize`; `hmac` joins them in TODO 3.3
+  (`aes` and `subtle` were already in the tree through `aes-gcm`); `proptest` as a
   dev-dependency only (TODO 9.2).
 - Rejected: an MCP SDK, an async runtime, a CLI framework (hand-written
   argument parsing is deliberate), any HTTP/network crate, and `serde` derive

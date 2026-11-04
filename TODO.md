@@ -157,6 +157,13 @@ keeps the dependency tree small and stdout hygiene under our control.
       DECISIONS (covered forms vs uncovered ones: base32, case changes,
       compression), MCP.md, SECURITY.md, README and the `tests/docs.rs` pins
       that currently say encoded copies are not redacted.
+      Review note (2026-11-04): `variants` encodes the secret at offset 0, so
+      base64 of `prefix + secret` contains it only when `len(prefix) % 3 == 0`
+      (`Basic base64("bob:" + secret)` is missed, `"alice:"` is caught). Add
+      the stable core of each base64 alphabet at offsets 1 and 2 (encode
+      `[0; k] + secret`, drop the leading characters and the last one or two
+      that depend on neighbours), or list the gap in the docs. `variants`
+      already returns `Zeroizing` buffers.
 - [ ] **4.6c Refuse short secrets for agent runs.** The daemon's `run`
       handler refuses an injected value shorter than
       `MIN_AGENT_SECRET_LEN = 8` bytes (`bad_request` naming the env var, never
@@ -546,6 +553,40 @@ are done. Work them in order like any other item.
       `escape_hidden`).
       Test: a state directory containing a newline and an ESC byte yields one
       line of `pmd` stderr with no raw control bytes.
+      Note (2026-11-04 review): the same class in `Error::Io` and
+      `SessionError` is fixed; `AuditError` is what remains.
+- [ ] **R.75 (Low) Denied runs are audited without the grant id.**
+      `record_use` returns `RecordError::Denied` without the grant it matched,
+      so a refusal of a revoked, expired or out-of-scope use is written with
+      `grant: None` and `pm audit --grant ID` hides that grant's refusals.
+      `Filter::grant` documents "authorized by", so decide first: either keep
+      it and say so in MCP.md (which says a record holds the grant id), or
+      carry `Option<GrantId>` once the token matched a grant (the id is
+      already public metadata). Test: a run with a revoked grant appears under
+      `pm audit --grant <id>`, or the docs say why it does not.
+- [ ] **R.76 (Low) Runs refused before `serve_run`'s audit setup leave no
+      record.** A `run` answered `busy` at the 16-run cap
+      (`src/daemon.rs:~521`), or dropped by the shutdown and
+      `set_nonblocking` early returns in `src/daemon/run.rs`, writes nothing,
+      though every other denial is audited. Nothing was authorized, so this
+      may be a deliberate choice; if not, add a `Busy` outcome (format note in
+      FORMAT/MCP). Test: the 17th concurrent run leaves a `busy` record.
+- [ ] **R.77 (Low) The AES-GCM GHASH subkey is freed unwiped.** polyval 0.6's
+      x86_64 autodetect backend sits in a `ManuallyDrop` union with no `Drop`,
+      so even polyval's `zeroize` feature would not wipe it. The AES round
+      keys and Argon2 memory are wiped (2026-11-04 review). Needs an upstream
+      change or a newer polyval; do not hand-roll GHASH. Track, and add the
+      residue to SECURITY.md's memory-residue limit if it stays.
+- [ ] **R.78 (Low) Repeated CLI flags are handled inconsistently.** `--db`,
+      `--grant-file` and `--env` refuse a second use; `--username`,
+      `--rename`, `--length`, `--idle-timeout` and the presets keep the last
+      value silently. Pick one rule (refuse, via one `set_once` helper) and
+      apply it everywhere. Test: each flag given twice is a usage error.
+- [ ] **R.79 (Low) The `passmgr run` timeout notice has no end-to-end
+      test**, because the CLI cannot set `timeout_secs` (default 600 s).
+      Cover it with a unit test of the notice mapping, or once a CLI timeout
+      flag exists. `wait_for_pid` is also duplicated in
+      `tests/run_backpressure.rs` instead of `tests/support` (R.54 class).
 
 ## Phase 9 — hardening
 

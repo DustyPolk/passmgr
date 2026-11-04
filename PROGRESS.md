@@ -1,3 +1,31 @@
+## 2026-11-04 — Whole-codebase review and fixes (human-requested, not a TODO item)
+
+- Five read-only reviewers (one per subsystem), then one fix branch per file
+  seam; every Medium finding was confirmed against the code before fixing.
+  Each fix is its own commit with a test that failed before it.
+- Medium fixes: Argon2 memory and AES key schedules wiped (crate `zeroize`
+  features, `Zeroizing` KDF blocks); per-connection request deadline (a
+  trickling client held the key past idle and SIGTERM); the run deadline is
+  enforced while the client is not reading; watermarks raised on every vault
+  read; the pre-run audit check validates the tail and a record is one write;
+  symlinked vault refused (single `O_NOFOLLOW|O_NONBLOCK` open); pre-1970
+  timestamps refused instead of overflowing; `passmgr run` reports caps and
+  timeouts on stderr; `pm audit` quotes ref, command and args.
+- Low fixes and cleanup: FIFO grant/session files refused, `run --env` no
+  longer echoes a literal, run-specific MCP refusal texts, glibc loader vars
+  denied, NUL argv refused, a gone client spends no use, unlock race fixed,
+  stale help/MCP/model text corrected, one `src/hex.rs`, `subtle` for
+  constant-time compares, one `validate_shape`, dead code removed.
+- New direct dependencies `aes` (only to enable `zeroize`) and `subtle` (vetted
+  RustCrypto, constant-time compare); both were already in the tree.
+- Test changes explained: the help golden file and the SECURITY limit 8 pin
+  now match corrected text that had overclaimed; `a_tag_is_shown_with_every_
+  credential_it_matches` asserted a misleading union and was replaced.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` (cargo audit not
+  installed).
+- **Next iteration must know:** deferred findings are R.75-R.79 in Phase L;
+  4.6b carries a note on base64 at an offset.
+
 ## 2026-11-04 — Encoders for redaction variants (TODO 4.6a)
 
 - 4.6 was split in `TODO.md`: encoded redaction is three concepts (generate
