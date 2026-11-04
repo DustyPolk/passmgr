@@ -30,7 +30,7 @@ use getrandom::fill;
 use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
-use crate::store::{EntryId, MAX_TAGS_PER_CREDENTIAL, MAX_TIMESTAMP_UNIX, normalize_tags};
+use crate::store::{EntryId, MAX_TIMESTAMP_UNIX, normalize_tags};
 
 use validate::{validate_commands, validate_label};
 
@@ -268,11 +268,6 @@ impl Scope {
             )));
         }
         let tags = normalize_tags(tags)?;
-        if tags.len() > MAX_TAGS_PER_CREDENTIAL {
-            return Err(Error::InvalidInput(format!(
-                "a grant scope holds at most {MAX_TAGS_PER_CREDENTIAL} tags"
-            )));
-        }
         let fields = match fields {
             None => None,
             Some(fields) => {
@@ -934,8 +929,8 @@ impl Grant {
     }
 
     fn check_active(&self, now: u64) -> std::result::Result<(), Denied> {
-        // Callers reach here only through `mark_used`, which bounds `now`
-        // first; the comparison is still safe for any `u64`.
+        // `now` is not checked for storability here (only `mark_used` stores
+        // it); `status` only compares it, which is safe for any `u64`.
         match self.status(now) {
             GrantStatus::Active => Ok(()),
             GrantStatus::Revoked => Err(Denied::Revoked),

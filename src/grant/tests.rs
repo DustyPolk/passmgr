@@ -99,3 +99,12 @@ fn the_credential_independent_run_checks_cover_state_capability_and_command() {
         Err(Denied::NotCapable(Capability::Run))
     );
 }
+
+#[test]
+fn a_scope_refuses_more_tags_than_a_credential_can_carry() {
+    let tags = |count: usize| (0..count).map(|index| format!("tag-{index}")).collect();
+    let max = crate::store::MAX_TAGS_PER_CREDENTIAL;
+    Scope::new(Vec::new(), tags(max), None).expect("a full tag set");
+    let error = Scope::new(Vec::new(), tags(max + 1), None).expect_err("one tag too many");
+    assert!(error.to_string().contains("too many tags"), "{error}");
+}
