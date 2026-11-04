@@ -201,8 +201,10 @@ pub fn append(path: &Path, event: &Event<'_>) -> Result<(), AuditError> {
             "the audit record is larger than {MAX_RECORD_BYTES} bytes"
         )));
     }
-    file.write_all(line.as_bytes())
-        .and_then(|()| file.write_all(b"\n"))
+    let mut record = line.into_bytes();
+    record.push(b'\n');
+    // One write, so a crash cannot leave a whole record without its newline.
+    file.write_all(&record)
         .and_then(|()| file.sync_data())
         .map_err(|source| AuditError::Io {
             path: path.to_path_buf(),
@@ -210,13 +212,15 @@ pub fn append(path: &Path, event: &Event<'_>) -> Result<(), AuditError> {
         })
 }
 
-/// Open, validate and lock the audit file without writing a record.
+/// Open, validate and lock the audit file, and check that its tail can be
+/// extended, without writing a record.
 ///
-/// Callers use this before decrypting or spawning, so a broken audit log
-/// refuses the use instead of letting it happen unrecorded. It does create the
-/// state directory and the empty audit file (0600).
+/// Callers use this before decrypting or spawning, so a log that [`append`]
+/// would refuse refuses the use instead of letting it happen unrecorded. It
+/// does create the state directory and the empty audit file (0600).
 pub fn check_writable(path: &Path) -> Result<(), AuditError> {
-    let _file = open_locked(path)?;
+    let mut file = open_locked(path)?;
+    last_line(&mut file, path)?;
     Ok(())
 }
 
@@ -697,6 +701,26 @@ mod tests {
         let error = append(&path, &event(&[])).expect_err("torn log");
         assert!(matches!(error, AuditError::Malformed(_)), "{error:?}");
         assert!(error.to_string().contains("newline"), "{error}");
+    }
+
+    #[test]
+    fn the_preflight_refuses_a_torn_or_oversized_tail_that_append_would_refuse() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = audit_file(directory.path());
+        append(&path, &event(&[])).expect("append");
+        check_writable(&path).expect("a whole log passes the preflight");
+
+        let mut torn = fs::read(&path).expect("read");
+        torn.extend_from_slice(br#"{"v":1"#);
+        fs::write(&path, &torn).expect("write torn log");
+        let error = check_writable(&path).expect_err("torn tail");
+        assert!(error.to_string().contains("newline"), "{error}");
+
+        let mut oversized = vec![b'x'; MAX_RECORD_BYTES + 16];
+        oversized.push(b'\n');
+        fs::write(&path, oversized).expect("write oversized log");
+        let error = check_writable(&path).expect_err("oversized tail");
+        assert!(matches!(error, AuditError::Malformed(_)), "{error:?}");
     }
 
     #[test]

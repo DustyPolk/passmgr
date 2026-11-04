@@ -195,6 +195,38 @@ fn a_run_is_refused_when_the_audit_log_cannot_be_written() {
 }
 
 #[test]
+fn a_run_against_a_torn_audit_log_is_refused_before_the_child_starts() {
+    // A crash mid-append leaves a last line without its newline. The append
+    // after the child would refuse it, so the preflight must refuse it first:
+    // otherwise the secret is used and never recorded.
+    let fixture = Fixture::new();
+    let audit = audit_file(&fixture);
+    let state = audit.parent().expect("state directory");
+    fs::create_dir_all(state).expect("create the state directory");
+    fs::set_permissions(state, fs::Permissions::from_mode(0o700)).expect("chmod state");
+    fs::write(&audit, br#"{"v":1"#).expect("write a torn log");
+    fs::set_permissions(&audit, fs::Permissions::from_mode(0o600)).expect("chmod log");
+    let marker = fixture._directory.path().join("child-ran");
+    let marker_arg = marker.to_str().expect("UTF-8 marker path");
+    let mut daemon = fixture.start();
+    let request = fixture.run_request(
+        "TOKEN",
+        &["/bin/sh", "-c", "touch \"$1\"", "sh", marker_arg],
+    );
+
+    let (frames, _) = read_run(&fixture.socket(), &fixture.token, &request);
+    assert_eq!(
+        frames,
+        vec![RunFrame::Error(ResponseError::Internal)],
+        "an unrecordable run must fail closed"
+    );
+    assert!(!marker.exists(), "the child must never have started");
+
+    daemon.kill().expect("kill pmd");
+    wait_for_exit(&mut daemon, WAIT);
+}
+
+#[test]
 fn a_run_whose_audit_append_fails_is_not_reported_as_success() {
     // The preflight creates and checks the file; the child then makes it
     // unwritable, so the append *after* the child ran is the one that fails
