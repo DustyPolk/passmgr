@@ -621,13 +621,49 @@ fn run_sink_caps_each_stream_and_ignores_terminal_frames() {
 }
 
 #[test]
-fn a_refused_run_is_an_error_result_with_the_daemon_message() {
+fn a_refused_run_is_an_error_result_with_a_run_specific_message() {
     let sink = RunSink::new(16);
-    let refused = run_response(RunOutcome::Refused(ResponseError::Denied), &sink);
-    assert_eq!(refused["isError"], true);
-    assert!(refused.get("structuredContent").is_none());
-    let text = refused["content"][0]["text"].as_str().expect("text");
-    assert_eq!(text, daemon_error(ResponseError::Denied));
+    let text = |error| {
+        let refused = run_response(RunOutcome::Refused(error), &sink);
+        assert_eq!(refused["isError"], true);
+        assert!(refused.get("structuredContent").is_none());
+        refused["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .to_owned()
+    };
+    // pmd also answers `denied` for a program outside the grant's allowlist.
+    let denied = text(ResponseError::Denied);
+    assert!(denied.contains("does not allow this program"), "{denied}");
+    assert!(denied.contains("not active"), "{denied}");
+    let spawn = text(ResponseError::SpawnFailed);
+    assert!(spawn.contains("could not be started"), "{spawn}");
+    for error in [
+        ResponseError::Denied,
+        ResponseError::SpawnFailed,
+        ResponseError::Unsupported,
+    ] {
+        let message = text(error);
+        assert!(!message.contains("metadata"), "{message}");
+    }
+    assert_eq!(
+        text(ResponseError::NotFound),
+        daemon_error(ResponseError::NotFound)
+    );
+}
+
+#[test]
+fn run_args_refuses_loader_and_shell_hook_names_and_names_them() {
+    for name in ["LD_PRELOAD", "PATH", "BASH_ENV", "DYLD_INSERT_LIBRARIES"] {
+        let secret = args(json!({"env": {name: reference()}})).expect_err("env");
+        let plain = args(json!({"plain_env": {name: "x"}})).expect_err("plain_env");
+        for (field, message) in [("env", secret), ("plain_env", plain)] {
+            assert!(
+                message.contains(&format!("'{field}' name '{name}' is not allowed")),
+                "{message}"
+            );
+        }
+    }
 }
 
 #[test]

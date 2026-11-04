@@ -23,9 +23,10 @@ use crate::grant::GrantToken;
 use crate::protocol::{
     DEFAULT_RUN_OUTPUT_BYTES, DEFAULT_RUN_TIMEOUT_SECS, EnvBinding, MAX_ARG_BYTES, MAX_ARGS,
     MAX_ENV_BINDINGS, MAX_ENV_VALUE_BYTES, MAX_PATH_BYTES, MAX_REFERENCE_BYTES,
-    MAX_RUN_OUTPUT_BYTES, MAX_RUN_TIMEOUT_SECS, RunExit, RunFinished, RunFrame, RunLimits,
-    RunRequest, valid_env_name,
+    MAX_RUN_OUTPUT_BYTES, MAX_RUN_TIMEOUT_SECS, ResponseError, RunExit, RunFinished, RunFrame,
+    RunLimits, RunRequest, valid_env_name,
 };
+use crate::runner::denied_env_name;
 use crate::store::EntryId;
 
 use super::{clipped, daemon_error, error_result, session_token};
@@ -184,12 +185,24 @@ fn schema_env_name(name: &str) -> bool {
     valid_env_name(name) && !name.chars().any(|character| character.is_ascii_lowercase())
 }
 
-fn invalid_env_name(field: &str, name: &str) -> String {
-    format!(
-        "'{field}' name '{}' is not a valid environment variable name \
-         (the schema allows ^[A-Z_][A-Z0-9_]{{0,127}}$)",
-        clipped(name)
-    )
+/// The schema check, then `pmd`'s loader/shell-hook denylist, so a name the
+/// daemon would refuse as malformed gets a message naming the variable.
+fn check_env_name(field: &str, name: &str) -> Result<(), String> {
+    if !schema_env_name(name) {
+        return Err(format!(
+            "'{field}' name '{}' is not a valid environment variable name \
+             (the schema allows ^[A-Z_][A-Z0-9_]{{0,127}}$)",
+            clipped(name)
+        ));
+    }
+    if denied_env_name(name) {
+        return Err(format!(
+            "'{field}' name '{}' is not allowed: a loader or shell would execute its value; \
+             use another variable name",
+            clipped(name)
+        ));
+    }
+    Ok(())
 }
 
 fn command_argv(value: Option<&Value>) -> Result<Vec<String>, String> {
@@ -253,9 +266,7 @@ fn env_bindings(value: Option<&Value>) -> Result<Vec<EnvBinding>, String> {
     object
         .iter()
         .map(|(name, value)| {
-            if !schema_env_name(name) {
-                return Err(invalid_env_name("env", name));
-            }
+            check_env_name("env", name)?;
             let reference = value
                 .as_str()
                 .ok_or_else(|| format!("'env.{name}' must be a pm:// reference string"))?;
@@ -290,9 +301,7 @@ fn plain_bindings(value: Option<&Value>) -> Result<Vec<(String, String)>, String
     object
         .iter()
         .map(|(name, value)| {
-            if !schema_env_name(name) {
-                return Err(invalid_env_name("plain_env", name));
-            }
+            check_env_name("plain_env", name)?;
             let text = value
                 .as_str()
                 .ok_or_else(|| format!("'plain_env.{name}' must be a string"))?;
@@ -468,7 +477,22 @@ fn extend(buffer: &mut Vec<u8>, data: &[u8], cap: usize) {
 pub fn run_response(outcome: RunOutcome, sink: &RunSink) -> Value {
     match outcome {
         RunOutcome::Exited(finished) => run_output(&finished, sink),
-        RunOutcome::Refused(error) => error_result(&daemon_error(error)),
+        RunOutcome::Refused(error) => error_result(&run_error(error)),
+    }
+}
+
+/// The run refusals whose metadata-tool wording would mislead.
+fn run_error(error: ResponseError) -> String {
+    match error {
+        ResponseError::Denied => "the daemon denied this run: the grant is not active (it may be \
+             expired, revoked or used up) or does not allow this program; ask the human for a \
+             grant that covers it"
+            .to_owned(),
+        ResponseError::SpawnFailed => "the program could not be started".to_owned(),
+        ResponseError::Unsupported => {
+            "the daemon does not support credential runs in this build".to_owned()
+        }
+        other => daemon_error(other),
     }
 }
 
