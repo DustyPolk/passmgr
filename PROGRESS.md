@@ -1,3 +1,12 @@
+## 2026-11-04 — loop note: gate failed (iteration 116)
+
+- Commits from this work iteration (TODO R.60) failed the gate and were rolled back.
+- The work is kept on branch failed/iter-116-20261103-234729; you may cherry-pick from it and fix it.
+- gate: `agent_flag_blocks_reveal_over_pipes --- FAILED`
+- gate: `thread 'agent_flag_blocks_reveal_over_pipes' (1476829) panicked at tests/cli_support/mod.rs:58:14:`
+- gate: `test result: FAILED. 8 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.06s`
+- gate: `error: test failed, to rerun pass `--test cli_reveal``
+
 ## 2026-11-04 — Attempt a run's use save exactly once (TODO R.58)
 
 - `src/daemon/run.rs`: deleted `USE_RECORD_ATTEMPTS` and the retry loop.
