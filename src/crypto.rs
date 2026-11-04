@@ -424,22 +424,27 @@ pub fn decrypt_with_key(container: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8
 
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| Error::Crypto("failed to initialize AES-256-GCM".into()))?;
-    let plaintext = cipher
-        .decrypt(
-            Nonce::from_slice(&header.nonce),
-            Payload {
-                msg: ciphertext,
-                aad: header_bytes,
-            },
-        )
-        .map_err(|_| Error::AuthenticationFailed)?;
+    // Wrap the decrypted bytes in `Zeroizing` *before* the size check: an
+    // oversized payload is still plaintext, so the refusal path must wipe it
+    // on drop instead of leaving it in a freed allocation (TODO R.50a).
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                Nonce::from_slice(&header.nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad: header_bytes,
+                },
+            )
+            .map_err(|_| Error::AuthenticationFailed)?,
+    );
 
     if plaintext.len() > MAX_PAYLOAD_BYTES {
         return Err(Error::MalformedVault(
             "decrypted vault contents are too large".into(),
         ));
     }
-    Ok(Zeroizing::new(plaintext))
+    Ok(plaintext)
 }
 
 /// Derive the vault key from the master password and prove that it
@@ -461,6 +466,49 @@ pub fn unlock_key(container: &[u8], master_password: &str) -> Result<Zeroizing<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use zeroize::Zeroize;
+
+    /// First bytes of the plaintext built by the oversized-decrypt test.
+    const OVERSIZED_CANARY: [u8; 16] = *b"r50a-canary-0001";
+
+    static CANARY_RELEASES: AtomicUsize = AtomicUsize::new(0);
+
+    /// A pass-through allocator that records when a freed block still starts
+    /// with [`OVERSIZED_CANARY`]. A buffer dropped without being wiped is the
+    /// only way those bytes reach `dealloc`, so this observes the property
+    /// that no test can see through the public API.
+    struct CanaryWatcher;
+
+    // SAFETY: every method forwards to `System` with the caller's layout; the
+    // extra read stays inside the block being freed and allocates nothing.
+    unsafe impl GlobalAlloc for CanaryWatcher {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: forwarded unchanged to the system allocator.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            let len = layout.size().min(OVERSIZED_CANARY.len());
+            // SAFETY: `ptr` is valid for `layout.size()` bytes until `System`
+            // frees it below.
+            let start = unsafe { std::slice::from_raw_parts(ptr, len) };
+            if start.iter().eq(OVERSIZED_CANARY.iter()) {
+                CANARY_RELEASES.fetch_add(1, Ordering::SeqCst);
+            }
+            // SAFETY: `ptr` and `layout` are the caller's deallocation.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: forwarded unchanged to the system allocator.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CanaryWatcher = CanaryWatcher;
 
     fn fast_params() -> KdfParams {
         KdfParams::new(8 * 1024, 1, 1)
@@ -506,6 +554,39 @@ mod tests {
             decrypt_with_key(&container, &wrong).unwrap_err(),
             Error::AuthenticationFailed
         ));
+    }
+
+    #[test]
+    fn an_oversized_decrypted_plaintext_is_refused_and_zeroized() {
+        let key = [0x42u8; KEY_LEN];
+        let mut plaintext = vec![0u8; MAX_PAYLOAD_BYTES + 1];
+        plaintext[..OVERSIZED_CANARY.len()].copy_from_slice(&OVERSIZED_CANARY);
+        let header = Header {
+            params: fast_params(),
+            salt: [7u8; SALT_LEN],
+            nonce: [9u8; NONCE_LEN],
+            ciphertext_len: (plaintext.len() + TAG_LEN) as u64,
+        };
+        // `seal` is the writer half of this module; going around
+        // `check_plaintext_len` is the only way to produce a container whose
+        // decrypted contents exceed `MAX_PAYLOAD_BYTES`.
+        let container = seal(&plaintext, &key, &header).expect("seal oversized plaintext");
+        // Wipe this caller-owned copy so only the buffer made by
+        // `decrypt_with_key` can be observed by the allocator.
+        plaintext.zeroize();
+        drop(plaintext);
+
+        let released_before = CANARY_RELEASES.load(Ordering::SeqCst);
+        let error = decrypt_with_key(&container, &key).unwrap_err();
+        assert!(
+            matches!(error, Error::MalformedVault(_)),
+            "expected MalformedVault, got {error:?}"
+        );
+        assert_eq!(
+            CANARY_RELEASES.load(Ordering::SeqCst),
+            released_before,
+            "the oversized decrypted plaintext was freed without being wiped"
+        );
     }
 
     #[test]

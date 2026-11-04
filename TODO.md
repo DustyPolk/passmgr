@@ -1094,30 +1094,48 @@ Rules that apply to every item:
       Test: pausing the reader for 7 s still yields all bytes plus
       `Exit(Code(0))`; with a stalled run client, `lock` answers within 2 s.
 
-- [ ] **R.50 The secret and grant tokens are left in freed memory without
-      being zeroized.**
-      (a) `src/runner.rs:184-187` says the process keeps the value only in
+- [x] **R.50a An oversized decrypted payload is refused but not zeroized.**
+      (Done: `decrypt_with_key` now wraps the decrypted `Vec` in `Zeroizing`
+      before the `MAX_PAYLOAD_BYTES` check, so the refusal path wipes it on
+      drop. The test uses a test-only `#[global_allocator]` that watches for a
+      16-byte canary at the start of every freed block; it sees one release on
+      the old code and none on the new. Split from R.50(c).)
+      Split from R.50(c). `src/crypto.rs:377-392` (now
+      `decrypt_with_key`) returns early on an oversized plaintext without
+      wrapping the decrypted `Vec` in `Zeroizing`, so a malformed or
+      adversarial container leaves the whole decrypted payload in a freed
+      allocation.
+      Fix: wrap in `Zeroizing` before the length check.
+      Test: an oversized-plaintext container returns `MalformedVault`, and a
+      global-allocator scan observes no freed block still starting with the
+      plaintext canary.
+
+- [ ] **R.50b The injected secret is copied into child-environment buffers
+      that are never zeroized.** (Split from R.50(a).)
+      `src/runner.rs:184-187` says the process keeps the value only in
       `secret` and the redactors, but `Command::env` stores an `OsString`
       copy, `spawn` clones it into its env map and builds a `NAME=value`
       CString; a global-allocator scan found 3 freed blocks containing the
       secret after one run of `/usr/bin/true`. The reader's stack buffer
       (`:400`) and `Redactor.pending` reallocations (`src/redact.rs:74`) hold
-      more copies. (b) Grant-token hex is copied into plain `String`/`Vec`
-      buffers on both sides: `src/protocol/codec.rs:192,228,41-44`,
-      `src/client.rs:147-148`, the `FrameDecoder` buffer (`codec.rs:93,125`,
-      `drain` does not wipe), the `serde_json::Value` (`:232`) and the owned
-      `grant` string (`:276`). `pmd` is long-lived and these are not locked.
-      (c) `src/crypto.rs:377-392` returns early on an oversized plaintext
-      without wrapping the decrypted `Vec` in `Zeroizing`.
-      Fix: (c) wrap in `Zeroizing` before the length check. (a)/(b) build the
-      child envp in zeroizing buffers (e.g. `posix_spawn`), make `encode`
-      return `Zeroizing<Vec<u8>>` and wipe the decoder buffer on drain/drop;
-      or, where that is impractical, correct the comment and list the
-      residual copies in `SECURITY.md` limit 6. Split if too big.
+      more copies.
+      Fix: build the child envp in zeroizing buffers (e.g. `posix_spawn`), or,
+      where that is impractical, correct the comment and list the residual
+      copies in `SECURITY.md` limit 6.
       Test: the allocator-scan test as its own integration binary reports 0
-      (or documents the accepted residue); a `FrameDecoder` unit test sees a
-      zeroed buffer after `next_frame`; an oversized-plaintext test returns
-      `MalformedVault`.
+      (or documents the accepted residue).
+
+- [ ] **R.50c Grant tokens are copied into plain buffers on both sides of the
+      socket and never zeroized.** (Split from R.50(b).)
+      Grant-token hex is copied into plain `String`/`Vec` buffers on both
+      sides: `src/protocol/codec.rs:192,228,41-44`, `src/client.rs:147-148`,
+      the `FrameDecoder` buffer (`codec.rs:93,125`, `drain` does not wipe),
+      the `serde_json::Value` (`:232`) and the owned `grant` string (`:276`).
+      `pmd` is long-lived and these are not locked.
+      Fix: make `encode` return `Zeroizing<Vec<u8>>` and wipe the decoder
+      buffer on drain/drop; or, where that is impractical, list the residual
+      copies in `SECURITY.md` limit 6.
+      Test: a `FrameDecoder` unit test sees a zeroed buffer after `next_frame`.
 
 - [ ] **R.51 More docs drift beyond R.32.**
       `DECISIONS.md:420-421` says the daemon's only vault write is

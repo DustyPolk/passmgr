@@ -1,3 +1,31 @@
+## 2026-11-03 — Zeroize an oversized decrypted payload before refusing it (TODO R.50a)
+
+- Split R.50 into three ordered items because it mixed three independent
+  buffer-ownership fixes: **R.50a** oversized `decrypt_with_key` plaintext
+  (done here), **R.50b** child-environment copies in `src/runner.rs`, **R.50c**
+  grant-token buffers in `src/protocol/codec.rs`/`src/client.rs`. R.50b is now
+  the first open item.
+- `src/crypto.rs` `decrypt_with_key`: the decrypted `Vec` is wrapped in
+  `Zeroizing` immediately after authentication, *before* the
+  `MAX_PAYLOAD_BYTES` check. An oversized container is still refused with
+  `MalformedVault`, but the plaintext is now wiped as it drops instead of
+  being left in a freed allocation.
+- Test (`crypto::tests::an_oversized_decrypted_plaintext_is_refused_and_zeroized`):
+  a test-only `#[global_allocator]` forwards to `System` and compares the
+  first 16 bytes of every freed block with a canary. The plaintext is built
+  with the canary at offset 0 and `seal` is used directly (the only way past
+  the writer's size cap); the caller's own copy is zeroized first. Verified
+  the test fails on the old code with `left: 1, right: 0` and passes on HEAD.
+  No production allocator or global state was added outside `#[cfg(test)]`.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  full `cargo test` all pass; `cargo audit` unavailable (skipped).
+- **Next iteration must know:** the allocator watch lives in `mod tests` in
+  `src/crypto.rs` and only counts the 16-byte canary `r50a-canary-0001`; any
+  future test that reuses that prefix will get a false positive. R.50b is the
+  harder one (env copies, reader stack buffer, `Redactor.pending`
+  reallocations) and may itself need splitting; read its TODO text before
+  starting.
+
 ## 2026-11-03 — Backpressure a paused run reader instead of a write timeout (TODO R.49)
 
 - `src/daemon/run.rs`: `serve_run` makes the run socket non-blocking right
