@@ -443,6 +443,13 @@ fn run_args_refuses_the_unimplemented_injections() {
     for extra in [json!({}), json!({"files": null}), json!({"files": {}})] {
         assert!(args(extra).is_ok());
     }
+
+    // Any other type is a malformed argument, not "no files": running
+    // without the file the caller asked for would spend a grant use.
+    for files in [json!("X=pm://x"), json!(["x"]), json!(true), json!(5)] {
+        let message = args(json!({ "files": files })).expect_err("wrong type");
+        assert_eq!(message, "'files' must be an object", "for {files}");
+    }
 }
 
 #[test]

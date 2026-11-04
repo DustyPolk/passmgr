@@ -16,7 +16,7 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::client::RunOutcome;
 use crate::grant::GrantToken;
@@ -118,8 +118,14 @@ pub fn run_args(arguments: Option<&Value>, default_cwd: Option<&Path>) -> Result
             return Err(STDIN_UNAVAILABLE.to_owned());
         }
     }
-    if has_entries(object, "files") {
-        return Err(FILES_UNAVAILABLE.to_owned());
+    // Absent, `null` and `{}` mean "no files". Anything else is refused
+    // rather than ignored, which would run the command without the file the
+    // caller expected.
+    match object.get("files") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(map)) if map.is_empty() => {}
+        Some(Value::Object(_)) => return Err(FILES_UNAVAILABLE.to_owned()),
+        Some(_) => return Err("'files' must be an object".to_owned()),
     }
 
     let command = command_argv(object.get("command"))?;
@@ -167,18 +173,6 @@ pub fn run_args(arguments: Option<&Value>, default_cwd: Option<&Path>) -> Result
             )?,
         },
     })
-}
-
-/// Whether an optional `files` object actually names bindings.
-///
-/// An absent member, `null` and `{}` all mean "no files"; anything else is the
-/// unimplemented injection and is refused rather than silently ignored, which
-/// would run the command without the file the caller expected.
-fn has_entries(object: &Map<String, Value>, field: &str) -> bool {
-    match object.get(field) {
-        Some(Value::Object(map)) => !map.is_empty(),
-        _ => false,
-    }
 }
 
 /// The tool schema is stricter than the daemon: `^[A-Z_][A-Z0-9_]{0,127}$`.
