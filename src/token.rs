@@ -87,10 +87,7 @@ impl SessionToken {
     }
 
     /// The raw bytes, for handing the token to `pmd` over its private pipe.
-    ///
-    /// Crate-visible only: the wire and file forms are hex, so nothing outside
-    /// the handover path needs raw bytes.
-    /// Raw bytes, for the key handover pipe only.
+    /// The wire and file forms are hex, so nothing else needs raw bytes.
     pub fn as_bytes(&self) -> &[u8; TOKEN_BYTES] {
         &self.bytes
     }
