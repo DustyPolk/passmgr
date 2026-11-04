@@ -1390,7 +1390,7 @@ Rules that apply to every item:
       reopened vault; it fails with 3 attempts when the loop is put back.
       R.39's "(retry loop gone)" and DECISIONS are now accurate.
 
-- [ ] **R.60 A `BrokenPipe` from the socket exits 0, so `run` and `grant
+- [x] **R.60 A `BrokenPipe` from the socket exits 0, so `run` and `grant
       revoke` can report success for a request that was never sent.**
       `src/cli/mod.rs:47-48` maps *any* `CliError::Runtime(Error::Io(e))` whose
       kind is `BrokenPipe` to `EXIT_OK`. The caller-pipe case it was written
@@ -1418,6 +1418,20 @@ Rules that apply to every item:
       `passmgr run ... -- /usr/bin/true` must exit non-zero and name the dead
       daemon; the same stub for `pm grant revoke --all` must also be non-zero.
       Both exit 0 today.
+      Done: `client::send_request` is now the only request-frame write (used by
+      `request` and `run`) and maps every write/flush failure to
+      `Error::Daemon`; `client::read_response` maps an empty answer and every
+      read failure the same way, so `main`'s `BrokenPipe` -> 0 arm can only see
+      this process's own diagnostics. (Both halves are needed: after the stub
+      accepts and closes, the *write* or the *read* loses the race depending on
+      load, and the read used to surface as `I/O error: Connection reset by
+      peer`.) Tests: `src/client.rs` unit tests drop a `UnixStream` peer and
+      require `Error::Daemon` with a nonzero exit code for the write and for
+      the read; `tests/daemon_gone.rs` (new, because `tests/run.rs` was at the
+      layout limit) and
+      `tests/grant_manage_cli.rs::grant_revoke_all_fails_when_the_daemon_goes_away_before_the_request`
+      use an accept-then-close stub and require exit 1 naming the daemon. All
+      fail with the old `?` (exit 0 vs 1).
 
 - [ ] **R.61 R.46's headroom test asserts a property of two constants, not of
       the encoder, so the change it exists to catch cannot fail it.**

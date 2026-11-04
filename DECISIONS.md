@@ -246,6 +246,14 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Daemon-internal error enums (`SocketError`, `ProtocolError`,
   `SessionError`) stay module-local; the CLI boundary maps them to
   `Error::Daemon` (exit 1) with a message that never contains secrets.
+- The CLI's `main` maps a bare `Error::Io` of kind `BrokenPipe` to exit 0:
+  that is the caller's own stdout/stderr going away (`passmgr list | head -1`),
+  not a failure. Nothing else may reuse the mapping. In particular every
+  transport error on a request's socket in `client` becomes `Error::Daemon`
+  (exit 1) and names the daemon: the frame write (`send_request`), the answer
+  read (`read_response`: empty, reset, timeout), and `run`'s stream read. A
+  daemon that exits after accepting the connection can therefore never make a
+  lost `run` or `grant revoke` report success (TODO R.60).
 
 ## Daemon and protocol
 

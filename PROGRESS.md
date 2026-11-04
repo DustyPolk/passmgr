@@ -1,3 +1,44 @@
+## 2026-11-04 — Never let a failed request write look like success (TODO R.60)
+
+- `src/client.rs`: the new private `send_request` is the only request-frame
+  write, used by `request()` and `run()`; every `write_all`/`flush` failure
+  becomes `Error::Daemon` ("the unlock daemon went away before it received the
+  request"). Before, the `io::Error` became `Error::Io`, and `main` maps a bare
+  `BrokenPipe` to exit 0 — so a `pmd` that exited after accepting (lock, idle
+  timeout, crash) made `run` and `grant revoke --all` report success for a
+  request it never received. `read_response` does the same for the answer
+  (empty read, reset, any other error), because the stub socket race can lose
+  on either side: the first full-suite run after the cherry-pick failed with
+  `I/O error: Connection reset by peer` from the read, which still exited 1 but
+  did not name the daemon; after a connect, a lost daemon is a daemon error on
+  every transport path.
+- `main`'s arm is unchanged; its comment now says it covers only this
+  process's own stdout/stderr writes. `src/cli/run.rs`'s `relay` comment no
+  longer claims a socket `BrokenPipe` takes the generic mapping.
+- Tests: `client::tests::a_failed_request_write_is_a_daemon_error_not_a_broken_pipe`
+  and `a_closed_connection_without_an_answer_is_a_daemon_error` (dropped
+  `UnixStream` peer, deterministic EPIPE/EOF, assert the variant, the nonzero
+  exit code and that the message names the daemon);
+  `tests/daemon_gone.rs` (new file) and
+  `tests/grant_manage_cli.rs::grant_revoke_all_fails_when_the_daemon_goes_away_before_the_request`
+  use an accept-then-close stub and require exit 1 with stderr naming the
+  daemon. Mutation-checked: they fail with the old `?` (exit 0 vs 1).
+- `DECISIONS.md` "Exit codes" records the rule: the `BrokenPipe` -> 0 arm is
+  only for this process's own output.
+- Earlier attempt (iteration 116, branch `failed/iter-116-20261103-234729`)
+  failed the gate on a test-harness flake, not on this change:
+  `tests/cli_support/mod.rs` wrote the scripted stdin and `.expect`ed it,
+  so a child that refuses before prompting (`--agent`, non-TTY reveal) could
+  exit first and turn the setup write into an EPIPE panic. The piped-stdin
+  writes in `tests/cli_support/mod.rs` (both helpers) and `tests/unlock.rs`'s
+  piped `run` now tolerate exactly `BrokenPipe` (any other error still fails)
+  and the outcome is still asserted from the child's output.
+- Gate: fmt, clippy, full `cargo test` green; `cargo audit` skipped.
+- **Next iteration must know:** next unchecked item is R.61 (`GRANT_GROWTH_BYTES`
+  is restated rather than measured). `tests/run.rs` is back to 972 lines, so a
+  new e2e there needs a split first; R.60's socket tests live in
+  `tests/daemon_gone.rs`.
+
 ## 2026-11-04 — loop note: gate failed (iteration 116)
 
 - Commits from this work iteration (TODO R.60) failed the gate and were rolled back.

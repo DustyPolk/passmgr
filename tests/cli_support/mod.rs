@@ -7,7 +7,7 @@
 #![allow(dead_code)] // each integration-test binary uses a different subset
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
@@ -51,15 +51,30 @@ pub fn run_with_env(args: &[&str], input: &str, envs: &[(&str, &str)]) -> Output
         command.env(name, value);
     }
     let mut child = command.spawn().expect("failed to start passmgr");
-    {
-        let mut stdin = child.stdin.take().expect("stdin was piped");
-        stdin
-            .write_all(input.as_bytes())
-            .expect("failed to write stdin");
-    }
+    script_stdin(&mut child, input);
     child
         .wait_with_output()
         .expect("failed to wait for passmgr")
+}
+
+/// Write the scripted input to a piped child and close it.
+///
+/// A child may legitimately exit before reading any input: several tests drive
+/// a refusal that happens before the first prompt (`--agent`, a non-TTY
+/// reveal, an agent-context `grant create`). The kernel then answers `EPIPE` on
+/// our write. That is a property of the test's setup, not a failure — the
+/// outcome is asserted from the child's output — and panicking made the test
+/// depend on whether the write or the exit won the race. Any other write error
+/// is still a harness bug.
+fn script_stdin(child: &mut Child, input: &str) {
+    let mut stdin = child.stdin.take().expect("stdin was piped");
+    if let Err(error) = stdin.write_all(input.as_bytes()) {
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::BrokenPipe,
+            "failed to write stdin: {error}"
+        );
+    }
 }
 
 /// Read a stored password straight from the vault, bypassing the CLI. Used to
@@ -227,12 +242,7 @@ pub fn run_on_pty(
             .write_all(input.as_bytes())
             .expect("failed to write to the pty");
     } else {
-        child
-            .stdin
-            .take()
-            .expect("stdin was piped")
-            .write_all(input.as_bytes())
-            .expect("failed to write stdin");
+        script_stdin(&mut child, input);
     }
 
     let output = child

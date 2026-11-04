@@ -252,8 +252,8 @@ fn status_code(exit: RunExit) -> u8 {
 ///
 /// A closed pipe is only remembered in `closed`: it is the caller's own output
 /// stream going away, not a daemon failure. Only the relayed-output path may
-/// turn it into exit 141; a `BrokenPipe` from the socket still takes the
-/// generic mapping (TODO R.47).
+/// turn it into exit 141; every socket write failure is `Error::Daemon` from
+/// `client` and never reaches this function (TODO R.47, R.60).
 fn relay(sink: &mut impl Write, bytes: &[u8], closed: &Cell<bool>) -> Result<(), Error> {
     if let Err(error) = sink.write_all(bytes).and_then(|()| sink.flush()) {
         if error.kind() == io::ErrorKind::BrokenPipe {

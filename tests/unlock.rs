@@ -82,12 +82,18 @@ impl Fixture {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command.spawn().expect("failed to start passmgr");
-        child
-            .stdin
-            .take()
-            .expect("stdin was piped")
-            .write_all(input.as_bytes())
-            .expect("failed to write stdin");
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        // A refusal that happens before the prompt (`unlock` without a
+        // terminal) exits before it reads, so this write can lose the race and
+        // see `EPIPE`; the test asserts the child's output, not the write.
+        if let Err(error) = stdin.write_all(input.as_bytes()) {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "failed to write stdin: {error}"
+            );
+        }
+        drop(stdin);
         child
             .wait_with_output()
             .expect("failed to wait for passmgr")

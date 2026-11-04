@@ -44,6 +44,10 @@ pub(crate) fn main() -> std::process::ExitCode {
             eprintln!("{USAGE}");
             std::process::ExitCode::from(EXIT_USAGE)
         }
+        // A closed stdout/stderr pipe is not a failure (`passmgr list | head
+        // -1` must not report one). Every other write error is a real error:
+        // socket writes map to `Error::Daemon` in `client` (TODO R.60), and a
+        // run's relayed-output pipe is turned into exit 141 in `cli::run`.
         Err(CliError::Runtime(Error::Io(error))) if error.kind() == io::ErrorKind::BrokenPipe => {
             std::process::ExitCode::from(EXIT_OK)
         }

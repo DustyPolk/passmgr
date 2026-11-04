@@ -399,3 +399,42 @@ fn grant_revoke_all_reports_a_not_found_answer_without_panicking() {
     let vault = Vault::open(&fixture.vault, MASTER).expect("open vault");
     assert!(!vault.grants()[0].is_revoked());
 }
+
+/// A `BrokenPipe` from the socket is a dead daemon, never the CLI's own output
+/// pipe closing: `grant revoke --all` must report failure when the daemon goes
+/// away before reading the request. Exit 0 would tell the human the kill
+/// switch succeeded when nothing was revoked (TODO R.60).
+#[test]
+fn grant_revoke_all_fails_when_the_daemon_goes_away_before_the_request() {
+    use std::os::unix::net::UnixListener;
+
+    let _guard = serial();
+    let fixture = Fixture::with_grants(1);
+    let paths = fixture.daemon_paths();
+    let token = passmgr::token::SessionToken::generate().expect("session token");
+    passmgr::session::store(&paths, &token).expect("session file");
+    let listener = UnixListener::bind(paths.socket()).expect("stub socket");
+
+    let server = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        // Close without reading: the framed request has no reader.
+        drop(stream);
+    });
+
+    let output = run_with_env(
+        &["grant", "revoke", "--all"],
+        "",
+        &[("XDG_RUNTIME_DIR", fixture.runtime_text())],
+    );
+    server.join().expect("stub server finished");
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("unlock daemon"),
+        "the failure must name the daemon: {}",
+        stderr(&output)
+    );
+    // The stub wrote nothing, and the CLI never opened the vault to revoke.
+    let vault = Vault::open(&fixture.vault, MASTER).expect("open vault");
+    assert!(!vault.grants()[0].is_revoked());
+}

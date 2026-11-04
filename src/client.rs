@@ -39,6 +39,7 @@
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -70,37 +71,67 @@ pub fn request(paths: &RuntimePaths, token: &SessionToken, request: &Request) ->
     stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
 
-    let frame = protocol::encode(token, request).map_err(protocol_error)?;
-    stream.write_all(&frame)?;
-    stream.flush()?;
+    send_request(&mut stream, token, request)?;
+    let bytes = read_response(&mut stream)?;
+    protocol::decode_response(&bytes).map_err(protocol_error)
+}
 
-    // The daemon answers with exactly one frame and then closes. Bound the
-    // read: a peer that never stops sending must not grow this buffer.
+/// Read the daemon's whole answer, bounded by one maximum-size frame.
+///
+/// A peer that never stops sending must not grow this buffer, and a timeout is
+/// reported as a timeout rather than as a `WouldBlock` I/O error. An empty
+/// answer and every other read failure are transport failures on the *socket*
+/// and become [`Error::Daemon`]: after a successful connect, losing the daemon
+/// is a daemon problem, never this process's own output pipe closing (see
+/// [`socket_failure`]).
+fn read_response(stream: &mut UnixStream) -> Result<Vec<u8>> {
     let limit = (protocol::MAX_MESSAGE_BYTES + protocol::LENGTH_PREFIX_BYTES + 1) as u64;
     let mut bytes = Vec::new();
-    let mut limited = Read::by_ref(&mut stream).take(limit);
+    let mut limited = Read::by_ref(stream).take(limit);
     match limited.read_to_end(&mut bytes) {
-        Ok(_) => {}
+        Ok(0) => Err(Error::Daemon(
+            "the unlock daemon closed the connection without answering".into(),
+        )),
+        Ok(_) => Ok(bytes),
         Err(err)
             if matches!(
                 err.kind(),
                 io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
             ) =>
         {
-            return Err(Error::Daemon(format!(
+            Err(Error::Daemon(format!(
                 "timed out after {} seconds waiting for the unlock daemon",
                 REQUEST_TIMEOUT.as_secs()
-            )));
+            )))
         }
-        Err(err) => return Err(err.into()),
+        Err(err) => Err(socket_failure("while answering the request", err)),
     }
+}
 
-    if bytes.is_empty() {
-        return Err(Error::Daemon(
-            "the unlock daemon closed the connection without answering".into(),
-        ));
-    }
-    protocol::decode_response(&bytes).map_err(protocol_error)
+/// Turn a transport failure on a request's socket into a daemon error.
+///
+/// The CLI's `main` maps a bare [`Error::Io`] of kind `BrokenPipe` to exit 0,
+/// because a pipe to the caller's own terminal going away (for example
+/// `passmgr list | head -1`) is not a failure. A *socket* write fails the same
+/// way when `pmd` exits after accepting the connection — `pm lock`, the idle
+/// timeout, a crash — and letting that reach the same mapping would tell an
+/// agent "done" for a request the daemon never received. A reset or another
+/// I/O error while reading the answer is the same story from the other
+/// direction: the daemon went away, so the request's fate is unknown. Keeping
+/// both mappings here is what makes that impossible: every remaining
+/// `BrokenPipe` `main` can see is one of this process's own writes, and every
+/// connected-but-lost request names the daemon and exits nonzero (TODO R.60).
+fn socket_failure(when: &str, error: io::Error) -> Error {
+    Error::Daemon(format!("the unlock daemon went away {when}: {error}"))
+}
+
+/// Encode and write one request frame over the connected socket.
+fn send_request(stream: &mut UnixStream, token: &SessionToken, request: &Request) -> Result<()> {
+    let frame = protocol::encode(token, request).map_err(protocol_error)?;
+    stream
+        .write_all(&frame)
+        .and_then(|()| stream.flush())
+        .map_err(|error| socket_failure("before it received the request", error))
 }
 
 /// Terminal outcome of a `run` request.
@@ -146,9 +177,7 @@ where
     let mut stream = socket::connect_at(paths).map_err(socket_error)?;
     stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
 
-    let frame = protocol::encode(token, &Request::Run(run.clone())).map_err(protocol_error)?;
-    stream.write_all(&frame)?;
-    stream.flush()?;
+    send_request(&mut stream, token, &Request::Run(run.clone()))?;
 
     let mut frames = RunStream::new();
     let mut decoder = protocol::FrameDecoder::new();
@@ -158,7 +187,7 @@ where
             Ok(0) => break,
             Ok(read) => read,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err) => return Err(err.into()),
+            Err(err) => return Err(socket_failure("while running the command", err)),
         };
         decoder.push(&buffer[..read]).map_err(protocol_error)?;
         while let Some(body) = decoder.next_frame().map_err(protocol_error)? {
@@ -535,6 +564,56 @@ mod tests {
             .expect("create runtime dir");
         let paths = RuntimePaths::at(&runtime);
         (directory, paths)
+    }
+
+    /// A daemon that goes away between the connect and the request must not
+    /// look like the CLI's own output pipe closing (TODO R.60). A dropped peer
+    /// makes the write fail with `EPIPE` deterministically, so this pins the
+    /// variant `main` sees rather than only the end-to-end exit code: a bare
+    /// `Error::Io(BrokenPipe)` would be mapped to exit 0 by `main`.
+    #[test]
+    fn a_failed_request_write_is_a_daemon_error_not_a_broken_pipe() {
+        let (mut stream, peer) = UnixStream::pair().expect("socket pair");
+        drop(peer);
+
+        let error = send_request(&mut stream, &test_token(), &Request::Ping)
+            .expect_err("a write with no reader must fail");
+        assert!(
+            matches!(error, Error::Daemon(_)),
+            "a socket write failure must not be a bare I/O error: {error:?}"
+        );
+        assert_ne!(
+            error.exit_code(),
+            0,
+            "a lost request must never report success"
+        );
+    }
+
+    /// A daemon that dies after accepting the connection can also fail the
+    /// *read* (an end-of-file, or a reset, depending on which side wins the
+    /// race). That must name the daemon too, not surface as a bare
+    /// `Error::Io`: `main` maps a `BrokenPipe` I/O error to exit 0 for this
+    /// process's own output, and a lost request must never look like success
+    /// (TODO R.60).
+    #[test]
+    fn a_closed_connection_without_an_answer_is_a_daemon_error() {
+        let (mut stream, peer) = UnixStream::pair().expect("socket pair");
+        drop(peer);
+
+        let error = read_response(&mut stream).expect_err("a read with no writer must fail");
+        assert!(
+            matches!(error, Error::Daemon(_)),
+            "a socket read failure must not be a bare I/O error: {error:?}"
+        );
+        assert_ne!(
+            error.exit_code(),
+            0,
+            "a lost answer must never look like success"
+        );
+        assert!(
+            format!("{error}").contains("unlock daemon"),
+            "the failure must name the daemon: {error}"
+        );
     }
 
     #[test]
