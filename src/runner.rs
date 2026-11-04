@@ -58,6 +58,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use zeroize::Zeroize;
+
 use crate::protocol::{MAX_CHUNK_BYTES, MAX_SIGNAL, RunExit, RunFrame};
 use crate::redact::Redactor;
 
@@ -262,7 +264,11 @@ where
     }
     // The value is copied into the child's environment block by the kernel;
     // this process keeps it only in `secret` (owned by the caller) and in the
-    // two redactors below, which zeroize on drop.
+    // two redactors below, which zeroize on drop. `Command` holds its own
+    // copies internally (its env map and the `NAME=value` string it builds for
+    // the spawn): std frees those without wiping them, and it exposes no way
+    // to own or clear them, so they are the residual copies listed in
+    // `SECURITY.md` limit 6 (TODO R.50b).
     command.env(env_name, secret);
     command
         .stdin(Stdio::null())
@@ -530,6 +536,9 @@ fn spawn_reader(
                     Ok(0) => break,
                     Ok(read) => {
                         let output = redactor.push(&buffer[..read]);
+                        // The raw child output may contain the value; do not
+                        // leave it in this thread's stack while the relay runs.
+                        buffer[..read].zeroize();
                         if !emit_chunks(&sender, output, is_stderr) {
                             return;
                         }

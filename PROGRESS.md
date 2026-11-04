@@ -1,3 +1,45 @@
+## 2026-11-03 — Wipe the passmgr-owned copies of an injected value (TODO R.50b)
+
+- `src/redact.rs`: `Redactor::push` now grows the overlap window through a new
+  private `reserve_pending`, which allocates a bigger `Vec`, copies, wipes the
+  old buffer and only then drops it. `Vec::extend_from_slice` used to `realloc`
+  the window, freeing a block that still held up to `secret.len() - 1` bytes of
+  the value. The window can never hold a complete occurrence, so the worst case
+  was a 24-of-25-byte fragment.
+- `src/runner.rs`: the reader thread wipes `buffer[..read]` right after the
+  redactor has consumed it. Corrected the comment at `command.env`: std's own
+  copies (the `OsString` in `Command`'s env map and the `NAME=value` string for
+  `execve`) are freed unwiped after the spawn and cannot be owned or cleared
+  through `Command`'s API.
+- Decision: did **not** port the spawn to `posix_spawn` (the TODO's first
+  option). It would replace `Command`/`Child`, the `pre_exec` `setpgid`, the
+  pipe setup and the waitid/reap/process-group-kill sequence the run's stop
+  paths rely on — far past one iteration, and a mistake there loses the
+  group-kill guarantee. Took the TODO's documented alternative: `SECURITY.md`
+  limit 6 and `DECISIONS.md` now name the residue, and the code comment no
+  longer claims otherwise.
+- Tests (`tests/secret_copies.rs`, its own integration binary with a
+  pass-through `#[global_allocator]` that scans every freed block and
+  `realloc`ated block for a canary, serialized behind a mutex):
+  `the_redactor_leaves_no_copy_of_the_value_in_freed_memory` drives growth while
+  the window holds the value's longest holdable fragment — 4 freed blocks
+  before the fix, 0 after. `a_run_leaves_no_more_copies_than_the_spawn_itself`
+  spawns `/bin/echo <canary>` through `runner::execute` and requires no more
+  secret-bearing freed blocks than a bare `std::process::Command` with the same
+  env and `pre_exec` hook leaves (3 vs 3); an extra passmgr copy fails it (I saw
+  `4` from a copy in the test itself while writing it).
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, full
+  `cargo test` all pass; `cargo audit` unavailable (skipped).
+- **Next iteration must know:** the reader's stack buffer wipe is *not*
+  observable by the allocator scan (thread stacks are not heap), so it is
+  covered by review only — do not delete it believing nothing tests it. The
+  probe for the redactor test is `REDACT_CANARY[..24]`, not the whole canary:
+  the window by design holds back `len - 1` bytes, so a full-match probe would
+  never fire. R.50c (grant-token buffers in `src/protocol/codec.rs` and
+  `src/client.rs`, and `FrameDecoder::drain`) is the next open item and the same
+  fix-or-document trade-off applies, but these buffers cross the socket and
+  `pmd` is long-lived, so prefer wiping.
+
 ## 2026-11-03 — Zeroize an oversized decrypted payload before refusing it (TODO R.50a)
 
 - Split R.50 into three ordered items because it mixed three independent

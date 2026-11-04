@@ -1110,8 +1110,18 @@ Rules that apply to every item:
       global-allocator scan observes no freed block still starting with the
       plaintext canary.
 
-- [ ] **R.50b The injected secret is copied into child-environment buffers
+- [x] **R.50b The injected secret is copied into child-environment buffers
       that are never zeroized.** (Split from R.50(a).)
+      (Done: every copy passmgr owns is now wiped — `Redactor::push` grows the
+      overlap window by allocating, copying, wiping and only then dropping the
+      old buffer (`reserve_pending`), and the reader thread wipes the raw bytes
+      it read. `std::process::Command`'s own copies cannot be owned or cleared,
+      so the comment at `command.env` was corrected and `SECURITY.md` limit 6
+      plus `DECISIONS.md` record them as the accepted residue; porting the
+      spawn to `posix_spawn` was rejected. `tests/secret_copies.rs` is its own
+      allocator-scan binary: the redactor leaves 0 freed blocks with the
+      value's longest holdable fragment (4 before the fix), and a `run` leaves
+      no more than a bare `Command` spawn of the same child.)
       `src/runner.rs:184-187` says the process keeps the value only in
       `secret` and the redactors, but `Command::env` stores an `OsString`
       copy, `spawn` clones it into its env map and builds a `NAME=value`

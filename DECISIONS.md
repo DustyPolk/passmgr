@@ -79,6 +79,14 @@ code does not implement yet.
   simple (16, alphanumeric), pin (6, digits).
 - Keys, master passwords, credential values and decrypted payloads are
   zeroized on drop; `pmd` also `mlock`s its key best-effort.
+- Every buffer passmgr owns for an injected value is wiped, including the
+  redaction overlap window when it grows (allocate, copy, wipe, then drop) and
+  the raw output buffer a reader thread reads into. The one copy that cannot
+  be wiped is `std::process::Command`'s own env map and `NAME=value` string,
+  which std frees unwiped after the spawn; hand-rolling `posix_spawn` to own
+  them was rejected as too risky for the process-group and reap logic it would
+  replace. `SECURITY.md` limit 6 records it, and `tests/secret_copies.rs`
+  proves a `run` adds no secret-bearing freed block beyond that residue.
 - Constant-time comparison for tokens and MACs; secret-bearing types have a
   redacting `Debug` (tested).
 

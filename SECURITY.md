@@ -192,6 +192,20 @@ still write process memory to unencrypted swap or a hibernation image. Use
 encrypted swap and disable hibernation on a machine that holds credentials you
 care about.
 
+One copy of an injected value cannot be wiped by this process.
+`std::process::Command` keeps its own copies — the `OsString` in its
+environment map and the `NAME=value` string it builds for `execve` — and frees
+them, unwiped, as soon as the spawn returns. Its API has no way to hand those
+buffers out or clear them, and the only alternative is to replace
+`Command`/`Child` with a hand-written `posix_spawn` plus pipe, process-group
+and reap handling (TODO R.50b considered and rejected that for the risk).
+Everything passmgr owns *is* wiped: the redaction window including when it
+grows, the reader's raw-output buffer, and the redactors themselves. A `run`
+never creates such a copy for itself — `tests/secret_copies.rs` runs under an
+allocator that scans every freed block for a canary and requires that a `run`
+leaves no more secret-bearing freed blocks than a bare `std::process::Command`
+spawn of the same child leaves.
+
 ### 7. An older `vault.dat` can be put back
 
 The vault is an ordinary 0600 file owned by you, and grant state (`uses`,

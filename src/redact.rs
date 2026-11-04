@@ -25,8 +25,10 @@
 //! # Handling of the secret
 //!
 //! The value is copied into a private buffer, never exposed through `Debug` or
-//! `Display`, and zeroized on drop together with the pending overlap. The
-//! redaction marker is chosen so it cannot spell the value together with the
+//! `Display`, and zeroized on drop together with the pending overlap. Growing
+//! the overlap window allocates a fresh buffer and wipes the old one before it
+//! drops, so a reallocation never leaves part of the value in freed memory.
+//! The redaction marker is chosen so it cannot spell the value together with the
 //! raw text around a substitution: it must not contain the value, must not be
 //! contained in it, and no suffix of either may be a prefix of the other. A
 //! secret such as `"[REDACTED]"` or `"TED]X"` therefore gets a different
@@ -88,6 +90,7 @@ impl Redactor {
         if self.secret.is_empty() {
             return data.to_vec();
         }
+        self.reserve_pending(data.len());
         self.pending.extend_from_slice(data);
         let mut out = Vec::with_capacity(self.pending.len());
         self.consume(&mut out, false);
@@ -143,6 +146,27 @@ impl Redactor {
             }
         }
         self.discard_prefix(consumed);
+    }
+
+    /// Make room for `extra` more bytes without leaving secret bytes in a freed
+    /// allocation.
+    ///
+    /// `Vec::extend_from_slice` grows with `realloc`, which frees the old block
+    /// untouched, so a window that held part of the secret would leave the
+    /// plaintext in freed heap memory (TODO R.50b). Allocate the larger buffer,
+    /// copy, wipe the old one and only then let it drop. The spare capacity of
+    /// the old buffer is already zero: it was either never written or cleared
+    /// by [`Redactor::discard_prefix`].
+    fn reserve_pending(&mut self, extra: usize) {
+        let needed = self.pending.len() + extra;
+        if self.pending.capacity() >= needed {
+            return;
+        }
+        let doubled = self.pending.capacity().saturating_mul(2);
+        let mut grown = Vec::with_capacity(needed.max(doubled));
+        grown.extend_from_slice(&self.pending);
+        self.pending.zeroize();
+        self.pending = grown;
     }
 
     /// Remove the first `count` bytes of `pending`, zeroizing the stale copies
