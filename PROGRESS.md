@@ -1,3 +1,42 @@
+## 2026-11-04 — Multi-secret streaming redaction (TODO 4.5a)
+
+- `RunRequest` carries one env name today, but `run_with_credentials` must
+  inject a whole env block, so the redactor has to remove every injected
+  value. 4.5 was split in `TODO.md` into 4.5a (this, pure redaction), 4.5b
+  (protocol + daemon env set), 4.5c (timeout and output caps) and 4.5d (the
+  MCP tool). This iteration did only 4.5a.
+- `src/redact.rs`: `Redactor::new_many(&[&[u8]])` sorts values longest first
+  (so a value containing another is removed whole), holds back `max_len - 1`
+  bytes mid-stream, and at EOF scans the tail instead of emitting it, so a
+  short value complete inside the tail is still replaced. Only a tail shorter
+  than *every* value is emitted raw. Added `redactions()` and
+  `redact_many(secrets, data)`; `Redactor::new` and `redact` are unchanged
+  wrappers, so `src/runner.rs` and `tests/secret_copies.rs` did not move.
+- `choose_marker_many` picks one marker for the set: the default when safe for
+  every value, else a run of a byte at neither end of any value, one byte
+  longer than the longest run of it. Fixes the old doc/behavior mismatch in
+  `marker_is_safe`'s every-byte-value case (the old marker was `len + 1` bytes
+  and needlessly contained the secret's bytes). Panics (fail closed) if no
+  safe marker exists; impossible below 127 distinct endpoint bytes and the
+  daemon will cap a run at 32 values.
+- Fixed the false R.56 sentence in `finish`'s doc: the held tail is *not*
+  always a proper prefix of the secret once a set has values of different
+  lengths. New doc states the real argument.
+- Tests: 7 new unit tests — every value at every two-way split and byte at a
+  time; contained and overlapping values leave no complete occurrence; the
+  window is sized by the longest value; a short value inside the held tail is
+  replaced at EOF; one marker is safe for both colliding values incl. a
+  streamed case; the count covers three substitutions; empty sets pass
+  through. `debug_never_contains_the_value` now covers two values.
+- Gate: fmt, clippy `-D warnings`, `cargo test` pass (`cargo audit` skipped:
+  not installed).
+- **Next iteration must know:** 4.5b starts by changing the `env` field shape
+  (`src/protocol/mod.rs:345`, `src/protocol/codec.rs` encode/decode) — keep
+  decoding the legacy string as a one-element list, and pass the *whole* value
+  set to one `Redactor::new_many` in `src/runner.rs:305`. No other caller
+  changes until then. Do not add a second redactor per value: overlapping
+  markers would let one value's marker complete another value.
+
 ## 2026-11-04 — MCP `describe_credential` wired to the daemon (TODO 4.4e)
 
 - `src/mcp/call.rs` gains `describe_ref` (exactly one `ref` member, string,

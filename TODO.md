@@ -86,11 +86,38 @@ keeps the dependency tree small and stdout hygiene under our control.
       helper; `structuredContent` is the `Entry` object itself. Out-of-scope
       collapsing is proven at the daemon layer and by the shared
       `not found or not granted` mapping.
-- [ ] **4.5 `run_with_credentials`: env injection via the daemon** (reuse
-      2.6). Command resolution plus the allowlist check, the env-name
-      denylist, a from-scratch child env, timeout with process-group kill,
-      per-stream output caps with truncation flags. Tests: the child sees the
-      var; printenv is redacted; timeout kills grandchildren; output capped.
+- [x] **4.5a Multi-secret streaming redaction.** Every injected value is
+      redacted, not just one: `Redactor::new_many`, one marker chosen for the
+      whole set, a holdback window sized by the longest value (so a short value
+      can hide inside the tail and is found at end of stream), greedy
+      longest-match so a value containing another is removed whole, and a
+      redaction count. Tests: every value at every split and byte at a time,
+      contained/overlapping values, the two marker-collision cases, a short
+      value hidden in the held tail, the empty set.
+      Note: a safe marker always exists for a set of at most 127 distinct
+      endpoint bytes, and the daemon caps a run at 32 values; for a larger set
+      `choose_marker_many` panics (fail closed) rather than relaying a value.
+- [ ] **4.5b Daemon env injection for several credentials.** `RunRequest.env`
+      becomes an ordered list of `{name, ref}` bindings (decode still accepts
+      the legacy single-string form as a one-element list, so an old client
+      keeps working; an old daemon refuses the list with `bad_request`). The
+      daemon authorizes each ref through the same grant path, refuses duplicate
+      env names and the deny-list in `env` and `plain_env`, builds the child
+      env from scratch, and passes the whole value set to one redactor. Tests:
+      two vars visible in the child, both redacted, a ref outside the grant is
+      denied and audited, duplicate names refused.
+- [ ] **4.5c Run timeout and output caps.** `timeout_secs` (1..=600) kills the
+      child's process group with `SIGTERM` then `SIGKILL` after a 2 s grace;
+      per-stream output is capped (default 256 KiB, at most 1 MiB) with
+      `stdout_truncated`/`stderr_truncated` set. Tests: a grandchild is killed
+      on timeout, a large stream is capped, the terminal frame carries the
+      flags, and the grace period is polled, not slept on blindly.
+- [ ] **4.5d MCP `run_with_credentials`.** Validate the tool input, call the
+      daemon `run` request, map frames to the result object, and never echo a
+      secret or raw child bytes outside the capped/redacted streams. Refuse
+      `stdin_ref`/`files` with an actionable error until 5.1/5.2. Tests: a real
+      stdio session, an env canary that appears in neither `stdout`, `stderr`
+      nor any error text, and a denied grant surfaced as `isError`.
 - [ ] **4.6 Encoded-value redaction.** Extend the streaming redactor with
       hex (lower/upper), base64 std/url-safe (with and without padding) and
       percent-encoding of each secret. Count redactions. Refuse secrets

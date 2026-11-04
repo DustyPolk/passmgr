@@ -1,20 +1,23 @@
 //! Streaming redaction of an injected secret from child-process output.
 //!
-//! `passmgr run` injects a secret into a child's environment and relays the
+//! `passmgr run` injects secrets into a child's environment and relays the
 //! child's stdout/stderr back to the caller. The daemon therefore has to remove
-//! any occurrence of that value from the stream before a byte of it reaches the
-//! agent-facing side.
+//! every occurrence of every injected value from the stream before a byte of it
+//! reaches the agent-facing side.
 //!
 //! # Streaming, not buffering
 //!
 //! Output arrives in arbitrary chunks. A naive per-chunk replacement leaks a
 //! secret that straddles a chunk boundary, so [`Redactor`] always holds back
-//! the last `secret.len() - 1` bytes of what it has seen, whatever they are,
-//! until more output arrives or the stream ends. Any split occurrence must
-//! start within that window, so holding a fixed-length suffix is enough to
-//! catch every cross-chunk occurrence. [`Redactor::finish`] flushes the held
-//! bytes at end of stream: fewer than `secret.len()` bytes cannot be the
-//! secret, and keeping them back forever would truncate legitimate output.
+//! the last `max(secret.len()) - 1` bytes of what it has seen, whatever they
+//! are, until more output arrives or the stream ends. Any split occurrence of
+//! any secret must start within that window, so holding a fixed-length suffix
+//! is enough to catch every cross-chunk occurrence. The window is sized by the
+//! longest value in the set, so a shorter value can sit entirely inside it; the
+//! end-of-stream scan still replaces those before they are emitted.
+//! [`Redactor::finish`] flushes the held bytes: a suffix shorter than the
+//! shortest secret cannot start an occurrence, and keeping it back forever
+//! would truncate legitimate output.
 //!
 //! The window depends only on how many bytes have been seen, never on whether
 //! they match the secret. Holding back only a *matching* prefix would make the
@@ -48,31 +51,70 @@ use zeroize::Zeroize;
 /// The usual replacement marker.
 const DEFAULT_MARKER: &[u8] = b"[REDACTED]";
 
-/// Replaces occurrences of one value in a byte stream, across chunk boundaries.
+/// Replaces occurrences of a set of values in a byte stream, across chunk
+/// boundaries.
 ///
 /// See the module documentation for the overlap-window behavior and its
 /// limits. The type deliberately implements only a redacted [`fmt::Debug`].
 pub struct Redactor {
-    secret: Vec<u8>,
+    /// Every non-empty value, longest first so a match is greedy.
+    secrets: Vec<Vec<u8>>,
+    /// The longest value's length; drives the fixed holdback window.
+    max_len: usize,
+    /// The shortest value's length; at end of stream fewer remaining bytes
+    /// cannot start an occurrence.
+    min_len: usize,
+    /// One marker, safe against every value in the set.
     marker: Vec<u8>,
     /// A fixed window of bytes not yet emitted: always the last
-    /// `secret.len() - 1` bytes seen, regardless of content, so the relay's
-    /// timing cannot reveal a correct prefix. Bounded by `secret.len() - 1`
-    /// after every `push`.
+    /// `max_len - 1` bytes seen, regardless of content, so the relay's timing
+    /// cannot reveal a correct prefix. Bounded by `max_len - 1` after every
+    /// `push`.
     pending: Vec<u8>,
+    /// How many occurrences have been replaced, for the run report.
+    redactions: u64,
 }
 
 impl Redactor {
-    /// Build a redactor for `secret`.
+    /// Build a redactor for one value.
     ///
     /// An empty secret is allowed and means "nothing to redact"; callers that
     /// inject credentials reject an empty value before getting here.
     pub fn new(secret: &[u8]) -> Self {
+        Self::new_many(&[secret])
+    }
+
+    /// Build a redactor for every value in `secrets`.
+    ///
+    /// Empty entries are ignored. A value that contains another is matched
+    /// greedily (longest first), so the whole occurrence is removed in one
+    /// substitution. The set must stay bounded: with more than 127 distinct
+    /// first or last bytes no marker can be safe against all of them (see
+    /// [`choose_marker_many`]), so callers such as the daemon's `run` handler
+    /// cap the number of secrets (32 in the protocol) long before that.
+    pub fn new_many(secrets: &[&[u8]]) -> Self {
+        let mut secrets: Vec<Vec<u8>> = secrets
+            .iter()
+            .filter(|secret| !secret.is_empty())
+            .map(|secret| secret.to_vec())
+            .collect();
+        secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+        let max_len = secrets.first().map_or(0, Vec::len);
+        let min_len = secrets.last().map_or(0, Vec::len);
+        let marker = choose_marker_many(&secrets);
         Self {
-            secret: secret.to_vec(),
-            marker: choose_marker(secret),
+            secrets,
+            max_len,
+            min_len,
+            marker,
             pending: Vec::new(),
+            redactions: 0,
         }
+    }
+
+    /// How many occurrences have been replaced so far.
+    pub fn redactions(&self) -> u64 {
+        self.redactions
     }
 
     /// Feed the next chunk of output and return the bytes that are now safe to
@@ -87,7 +129,7 @@ impl Redactor {
         if data.is_empty() {
             return Vec::new();
         }
-        if self.secret.is_empty() {
+        if self.secrets.is_empty() {
             return data.to_vec();
         }
         self.reserve_pending(data.len());
@@ -99,10 +141,12 @@ impl Redactor {
 
     /// Finish the stream and return whatever is still held back.
     ///
-    /// A held-back suffix is by construction only a proper prefix of the
-    /// secret, so emitting it does not reveal the value.
+    /// The held suffix is at most `max_len - 1` bytes, so an occurrence that
+    /// starts in it has not been seen whole; the scan replaces any that did fit
+    /// (a value shorter than the longest one). Only a tail shorter than every
+    /// secret is emitted unchanged, so `finish` cannot reveal a value.
     pub fn finish(&mut self) -> Vec<u8> {
-        if self.secret.is_empty() {
+        if self.secrets.is_empty() {
             return Vec::new();
         }
         let mut out = Vec::with_capacity(self.pending.len());
@@ -114,38 +158,53 @@ impl Redactor {
     /// Scan `pending`, appending safe bytes and the marker to `out`, and drop
     /// the consumed prefix.
     ///
-    /// Mid stream the final `secret.len() - 1` bytes are always kept for the
-    /// next chunk, whether or not they look like the secret. A suffix shorter
-    /// than the secret cannot contain a complete occurrence, and every split
-    /// occurrence starts inside this window, so nothing is missed. Keeping a
-    /// fixed window makes the decision independent of the secret's content.
-    /// At the end of a stream (`at_end`) the window is emitted: it is shorter
-    /// than the secret by construction.
+    /// Mid stream the final `max_len - 1` bytes are always kept for the next
+    /// chunk, whether or not they look like a secret. A suffix shorter than the
+    /// longest secret cannot contain a complete occurrence of it, and every
+    /// split occurrence starts inside this window, so nothing is missed.
+    /// Keeping a fixed window makes the decision independent of content. At the
+    /// end of a stream (`at_end`) the window is scanned normally and only a tail
+    /// shorter than every secret is emitted unchanged.
     fn consume(&mut self, out: &mut Vec<u8>, at_end: bool) {
-        let secret_len = self.secret.len();
         let mut consumed = 0;
         while consumed < self.pending.len() {
-            let remaining = &self.pending[consumed..];
-            if remaining.len() < secret_len {
-                if !at_end {
-                    // Hold the tail: it may still become part of a secret
-                    // split across chunks.
-                    break;
-                }
-                // At end of stream no complete occurrence can start here.
-                out.extend_from_slice(remaining);
+            let remaining_len = self.pending.len() - consumed;
+            if at_end && remaining_len < self.min_len {
+                // No value can start in fewer bytes than the shortest one.
+                out.extend_from_slice(&self.pending[consumed..]);
                 consumed = self.pending.len();
                 break;
             }
-            if remaining[0] == self.secret[0] && remaining[..secret_len] == self.secret[..] {
-                out.extend_from_slice(&self.marker);
-                consumed += secret_len;
-            } else {
-                out.push(remaining[0]);
-                consumed += 1;
+            if !at_end && remaining_len < self.max_len {
+                // Hold the tail: it may still become part of a secret split
+                // across chunks.
+                break;
+            }
+            match self.match_len(&self.pending[consumed..]) {
+                Some(len) => {
+                    out.extend_from_slice(&self.marker);
+                    consumed += len;
+                    self.redactions += 1;
+                }
+                None => {
+                    out.push(self.pending[consumed]);
+                    consumed += 1;
+                }
             }
         }
         self.discard_prefix(consumed);
+    }
+
+    /// The length of the longest secret that starts `remaining`, if any.
+    ///
+    /// `secrets` is sorted longest first, so the first match is the greediest:
+    /// a value that contains another is removed whole rather than leaving its
+    /// tail in the output.
+    fn match_len(&self, remaining: &[u8]) -> Option<usize> {
+        self.secrets.iter().find_map(|secret| {
+            (remaining.len() >= secret.len() && remaining[..secret.len()] == secret[..])
+                .then_some(secret.len())
+        })
     }
 
     /// Make room for `extra` more bytes without leaving secret bytes in a freed
@@ -189,7 +248,9 @@ impl Redactor {
 
 impl Drop for Redactor {
     fn drop(&mut self) {
-        self.secret.zeroize();
+        for secret in &mut self.secrets {
+            secret.zeroize();
+        }
         self.pending.zeroize();
     }
 }
@@ -198,8 +259,10 @@ impl fmt::Debug for Redactor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Never render secret bytes, not even a preview.
         f.debug_struct("Redactor")
-            .field("secret_len", &self.secret.len())
+            .field("secrets", &self.secrets.len())
+            .field("max_len", &self.max_len)
             .field("pending_len", &self.pending.len())
+            .field("redactions", &self.redactions)
             .finish_non_exhaustive()
     }
 }
@@ -207,46 +270,83 @@ impl fmt::Debug for Redactor {
 /// Convenience for a complete in-memory buffer. Streaming callers should use
 /// [`Redactor`] directly.
 pub fn redact(secret: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut redactor = Redactor::new(secret);
+    redact_many(&[secret], data)
+}
+
+/// [`redact`] for a set of values.
+pub fn redact_many(secrets: &[&[u8]], data: &[u8]) -> Vec<u8> {
+    let mut redactor = Redactor::new_many(secrets);
     let mut out = redactor.push(data);
     out.extend_from_slice(&redactor.finish());
     out
 }
 
-/// Pick a marker that cannot spell `secret` together with the text around it.
+/// Pick one marker that cannot spell any secret together with the text around
+/// it.
 ///
-/// The default marker is readable and almost always safe. When it is not, a
-/// run of a byte that is absent from the secret is used instead. Such a marker
-/// contains none of the secret's bytes, so the secret can neither contain the
-/// marker nor cross it, and the marker can neither start nor complete an
-/// occurrence.
-fn choose_marker(secret: &[u8]) -> Vec<u8> {
-    if secret.is_empty() || marker_is_safe(DEFAULT_MARKER, secret) {
+/// The default marker is readable and almost always safe. When it is not, a run
+/// of a byte that is neither the first nor the last byte of any secret is used:
+/// such a marker contains none of the endpoint bytes, so no secret can start or
+/// finish around it. Its length is one more than the longest run of that byte
+/// inside any secret, so no secret can contain the whole marker either.
+///
+/// A safe marker always exists for a bounded set: the marker's first byte must
+/// differ from every secret's last byte (otherwise a proper suffix is a prefix
+/// of the marker) and from every secret's first byte (otherwise a suffix of the
+/// marker is a prefix of the secret). With at most 32 secrets at most 64 byte
+/// values are excluded, so 192 remain. For a larger set (more than 127
+/// distinct endpoints) no safe marker exists at all; this panics rather than
+/// silently relaying a value, and the daemon's protocol caps the set far below
+/// that.
+fn choose_marker_many(secrets: &[Vec<u8>]) -> Vec<u8> {
+    if secrets
+        .iter()
+        .all(|secret| marker_is_safe(DEFAULT_MARKER, secret))
+    {
         return DEFAULT_MARKER.to_vec();
     }
 
-    // A byte the secret does not use makes the marker unbuildable into it.
-    if let Some(byte) = (b'!'..=b'~')
-        .find(|candidate| !secret.contains(candidate))
-        .or_else(|| (0..=u8::MAX).find(|candidate| !secret.contains(candidate)))
-    {
-        let marker = vec![byte; DEFAULT_MARKER.len()];
-        debug_assert!(marker_is_safe(&marker, secret));
-        return marker;
-    }
+    let forbidden = |byte: u8| {
+        secrets
+            .iter()
+            .any(|secret| secret.first() == Some(&byte) || secret.last() == Some(&byte))
+    };
+    let Some(byte) = (b'!'..=b'~')
+        .find(|candidate| !forbidden(*candidate))
+        .or_else(|| (0..=u8::MAX).find(|candidate| !forbidden(*candidate)))
+    else {
+        // Fail closed: the caller must bound the number of distinct endpoint
+        // bytes. Dropping the match instead would be safe too, but silently
+        // changing the marker contract is worse than refusing to start.
+        panic!("no safe redaction marker exists for this set of secrets")
+    };
 
-    // The secret contains every byte value, so no run is free of its bytes.
-    // A run longer than the secret cannot be contained in it, and a byte that
-    // is neither the secret's first nor its last byte can be neither the start
-    // of a suffix of the secret nor the completion of its prefix.
-    let first = secret[0];
-    let last = secret[secret.len() - 1];
-    let byte = (0..=u8::MAX)
-        .find(|candidate| *candidate != first && *candidate != last)
-        .expect("256 byte values, at most two excluded");
-    let marker = vec![byte; secret.len() + 1];
-    debug_assert!(marker_is_safe(&marker, secret));
+    // A run longer than any run of `byte` inside a secret cannot be contained
+    // in one, and `byte` is not an endpoint, so the marker can neither start
+    // nor finish a secret with the surrounding output.
+    let longest_run = secrets
+        .iter()
+        .map(|secret| longest_run_of(secret, byte))
+        .max()
+        .unwrap_or(0);
+    let marker = vec![byte; DEFAULT_MARKER.len().max(longest_run + 1)];
+    debug_assert!(secrets.iter().all(|secret| marker_is_safe(&marker, secret)));
     marker
+}
+
+/// The longest run of `byte` in `secret`.
+fn longest_run_of(secret: &[u8], byte: u8) -> usize {
+    let mut longest = 0;
+    let mut current = 0;
+    for candidate in secret {
+        if *candidate == byte {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
 }
 
 /// Whether `marker` can replace `secret` without the relayed output ever
@@ -517,11 +617,12 @@ mod tests {
 
     #[test]
     fn a_secret_using_every_byte_value_still_gets_a_safe_marker() {
-        // The fallback cannot find an absent byte here; a run longer than the
-        // secret of a byte at neither end is still safe.
+        // The default marker is buildable into this value, so a run of a byte
+        // that is neither endpoint and appears only once is used; it is long
+        // enough that the value cannot contain it.
         let mut secret: Vec<u8> = (0..=u8::MAX).rev().collect();
         secret.extend_from_slice(b"[REDACTED]");
-        let marker = choose_marker(&secret);
+        let marker = choose_marker_many(&[secret.clone()]);
         assert!(marker_is_safe(&marker, &secret), "unsafe marker");
         let out = redact(&secret, &secret);
         assert!(!contains_subslice(&out, &secret));
@@ -530,10 +631,12 @@ mod tests {
     #[test]
     fn debug_never_contains_the_value() {
         let secret = b"super-secret-value";
-        let text = format!("{:?}", Redactor::new(secret));
+        let text = format!("{:?}", Redactor::new_many(&[secret, b"other-value"]));
         assert!(text.contains("Redactor"), "{text}");
-        assert!(text.contains("secret_len"), "{text}");
+        assert!(text.contains("secrets"), "{text}");
+        assert!(text.contains("max_len"), "{text}");
         assert!(!text.contains("super-secret-value"), "{text}");
+        assert!(!text.contains("other-value"), "{text}");
         assert!(!text.contains("115"), "{text}");
     }
 
@@ -547,5 +650,118 @@ mod tests {
         assert!(!text.contains("s3cret"), "{text}");
         assert!(text.contains("pending_len"), "{text}");
         drop(redactor);
+    }
+
+    #[test]
+    fn every_value_in_a_set_is_redacted_at_any_split() {
+        let alpha = b"canary-ALPHA-8f3a";
+        let beta = b"canary-BETA-91c7";
+        let input = b"a canary-ALPHA-8f3a b canary-BETA-91c7 c";
+        let expected = b"a [REDACTED] b [REDACTED] c";
+        for split in 0..=input.len() {
+            let mut redactor = Redactor::new_many(&[alpha.as_slice(), beta.as_slice()]);
+            let mut out = redactor.push(&input[..split]);
+            out.extend_from_slice(&redactor.push(&input[split..]));
+            out.extend_from_slice(&redactor.finish());
+            assert_eq!(out, expected, "split at offset {split}");
+        }
+
+        let mut redactor = Redactor::new_many(&[alpha.as_slice(), beta.as_slice()]);
+        let mut out = Vec::new();
+        for byte in input {
+            out.extend_from_slice(&redactor.push(&[*byte]));
+        }
+        out.extend_from_slice(&redactor.finish());
+        assert_eq!(out, expected, "byte at a time");
+    }
+
+    #[test]
+    fn a_longer_value_containing_a_shorter_one_is_removed_whole() {
+        let short = b"abcd";
+        let long = b"abcdefgh";
+        let out = redact_many(&[short.as_slice(), long.as_slice()], b"xabcdefghy");
+        assert_eq!(out, b"x[REDACTED]y");
+        let out = redact_many(&[short.as_slice(), long.as_slice()], b"xabcdy");
+        assert_eq!(out, b"x[REDACTED]y");
+    }
+
+    #[test]
+    fn overlapping_values_never_leave_a_complete_occurrence() {
+        let left = b"abcdef";
+        let right = b"defghi";
+        let input = b"abcdefghi";
+        for split in 0..=input.len() {
+            let mut redactor = Redactor::new_many(&[left.as_slice(), right.as_slice()]);
+            let mut out = redactor.push(&input[..split]);
+            out.extend_from_slice(&redactor.push(&input[split..]));
+            out.extend_from_slice(&redactor.finish());
+            assert!(!contains_subslice(&out, left), "left at {split}: {out:?}");
+            assert!(!contains_subslice(&out, right), "right at {split}: {out:?}");
+        }
+    }
+
+    #[test]
+    fn the_holdback_window_is_sized_by_the_longest_value() {
+        let mut redactor = Redactor::new_many(&[b"abcd".as_slice(), b"0123456789ab".as_slice()]);
+        // Ten bytes, but the longest value is twelve: nothing is safe to emit.
+        assert!(redactor.push(b"zzzzzzzzzz").is_empty());
+        assert_eq!(redactor.pending.len(), 10);
+        assert_eq!(redactor.finish(), b"zzzzzzzzzz");
+    }
+
+    #[test]
+    fn a_short_value_hidden_in_the_held_tail_is_redacted_at_end_of_stream() {
+        let mut redactor = Redactor::new_many(&[b"abcd".as_slice(), b"0123456789ab".as_slice()]);
+        // The tail is held because a twelve-byte value might still follow, but
+        // it already contains a complete four-byte value.
+        assert!(redactor.push(b"xxabcd").is_empty());
+        assert_eq!(redactor.finish(), b"xx[REDACTED]");
+    }
+
+    #[test]
+    fn one_marker_is_safe_for_every_value_in_the_set() {
+        // Both values collide with the default marker: the second one is built
+        // out of it and the first one contains it.
+        let secrets: &[&[u8]] = &[b"[REDACTED]", b"TED]XY"];
+        for secret in secrets {
+            let out = redact_many(secrets, secret);
+            for value in secrets {
+                assert!(!contains_subslice(&out, value), "{value:?} in {out:?}");
+            }
+
+            let mut redactor = Redactor::new_many(secrets);
+            let mut streamed = Vec::new();
+            for byte in *secret {
+                streamed.extend_from_slice(&redactor.push(&[*byte]));
+            }
+            streamed.extend_from_slice(&redactor.finish());
+            for value in secrets {
+                assert!(
+                    !contains_subslice(&streamed, value),
+                    "streamed {value:?} in {streamed:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_redaction_count_covers_every_substitution() {
+        let alpha = b"canary-alpha-11";
+        let beta = b"canary-beta-22";
+        let mut redactor = Redactor::new_many(&[alpha.as_slice(), beta.as_slice()]);
+        let mut out = redactor.push(b"canary-alpha-11 canary-beta-22 canary-alpha-11");
+        out.extend_from_slice(&redactor.finish());
+        assert_eq!(out, b"[REDACTED] [REDACTED] [REDACTED]");
+        assert_eq!(redactor.redactions(), 3);
+    }
+
+    #[test]
+    fn an_empty_set_is_a_passthrough() {
+        let data = b"\x00\xffnothing to redact";
+        assert_eq!(redact_many(&[], data), data);
+        assert_eq!(redact_many(&[b"".as_slice(), b"".as_slice()], data), data);
+        let mut redactor = Redactor::new_many(&[]);
+        assert_eq!(redactor.push(data), data);
+        assert!(redactor.finish().is_empty());
     }
 }

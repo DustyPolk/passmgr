@@ -37,18 +37,26 @@ code does not implement yet.
   `tests/docs.rs` pins the same limit in MCP.md and forbids claiming encoded
   redaction before 4.6.
 - Redaction always holds back the last `len - 1` bytes of relayed output until
-  more output or EOF, where `len` is the secret's length. The choice is
-  content-independent so relay timing is not a prefix oracle (R.36); the cost
-  is that tail output is delayed by up to `len - 1` bytes. `src/redact.rs`
-  implements it and `tests/redaction_timing.rs` proves a correct and a wrong
-  prefix are held identically. Do not go back to holding only a *matching*
-  prefix.
+  more output or EOF, where `len` is the longest injected value's length. The
+  choice is content-independent so relay timing is not a prefix oracle (R.36);
+  the cost is that tail output is delayed by up to `len - 1` bytes.
+  `src/redact.rs` implements it and `tests/redaction_timing.rs` proves a
+  correct and a wrong prefix are held identically. Do not go back to holding
+  only a *matching* prefix. A value shorter than `len` can be complete inside
+  the held tail; at EOF the tail is scanned normally, so it is replaced there
+  and only a tail shorter than *every* value is emitted unchanged. A run can
+  inject several values (4.5b), so the window is sized by the longest one and
+  one redactor serves the whole set.
 - The redaction marker is `[REDACTED]` only when it is safe; `marker_is_safe`
-  rejects it if the marker contains the secret, the secret contains the
-  marker, the marker starts with a proper suffix of the secret, or the secret
-  starts with a proper suffix of the marker (output around a substitution can
-  supply the missing part). Otherwise the marker is a run of a byte absent
-  from the secret (R.36a). A future marker change must keep this rule.
+  rejects it if the marker contains a value, a value contains the marker, the
+  marker starts with a proper suffix of a value, or a value starts with a
+  proper suffix of the marker (output around a substitution can supply the
+  missing part). Otherwise the marker is a run of a byte that is neither the
+  first nor the last byte of any value, one byte longer than the longest run
+  of that byte in any value (R.36a, 4.5a). A future marker change must keep
+  this rule. If no such byte exists the redactor panics instead of relaying
+  output: a set can exclude at most two byte values per member, so this is
+  unreachable for the daemon's bound of 32 values.
 
 ## Crypto
 
