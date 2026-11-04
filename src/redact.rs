@@ -48,6 +48,8 @@ use std::fmt;
 
 use zeroize::Zeroize;
 
+pub mod encoding;
+
 /// The usual replacement marker.
 const DEFAULT_MARKER: &[u8] = b"[REDACTED]";
 

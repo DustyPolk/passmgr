@@ -1,3 +1,40 @@
+## 2026-11-04 — Encoders for redaction variants (TODO 4.6a)
+
+- 4.6 was split in `TODO.md`: encoded redaction is three concepts (generate
+  variants, redact them, a length policy) plus property tests. 4.6a is the
+  pure encoders; 4.6b wires them into `Redactor`/`src/runner.rs`, 4.6c adds
+  the 8-byte minimum for agent runs, 4.6d the property tests and the encoded
+  MCP canary session.
+- New `src/redact/encoding.rs`: `Encoding` covers hex lower/upper, base64
+  standard and URL-safe (padded and unpadded), and RFC 3986 percent-encoding
+  (`A-Za-z0-9-._~` literal, every other byte `%XX`, upper-case hex).
+  `Encoding::encode(&[u8]) -> Vec<u8>` and `variants(&[u8]) -> Vec<Vec<u8>>`
+  (deduplicated; a form equal to the raw secret is dropped, because an
+  all-unreserved value percent-encodes to itself). Hand-written: no new
+  dependency.
+- Declared `pub mod encoding;` inside the already-public `redact` module so
+  the items are live crate API; a private module's `pub` items would trip
+  `dead_code` until 4.6b starts using them.
+- Tests (9, all in `src/redact/encoding.rs`): fixed vectors for every form
+  including both alphabets and all three padding lengths; RFC 3986 cases;
+  exactly seven distinct forms for a discriminating secret; dedupe and
+  raw-drop; empty secret; ASCII-only output for all 256 byte values; and
+  test-local hex/base64/percent decoders round-tripping deterministic bytes
+  for lengths 0..=40 across four seeds.
+- Docs: `DECISIONS.md` records the fixed encoding list, the no-dependency
+  choice, and that the daemon still redacts only raw occurrences until 4.6b.
+  Behavior is unchanged, so README/SECURITY/MCP stay as they are.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` pass (`cargo audit` skipped: not installed).
+- **Next iteration must know:** 4.6b must build the redactor value set as raw
+  + `encoding::variants` per secret (encoded forms alone would miss the raw
+  value), keep one marker for the whole expanded set, and update the two
+  `tests/docs.rs` pins (`docs_agree_that_redaction_does_not_follow_encodings`,
+  `mcp_documents_the_exact_bytes_redaction_limit`) with the docs in the same
+  commit. `choose_marker_many`'s doc proof must be restated for the expanded
+  set (every variant is ASCII, raw endpoints stay bounded, so the forbidden
+  byte set cannot reach 256).
+
 ## 2026-11-04 — MCP `run_with_credentials` (TODO 4.5d)
 
 - New `src/mcp/call/run.rs` owns the tool boundary: `run_args` (closed key set,

@@ -127,11 +127,50 @@ keeps the dependency tree small and stdout hygiene under our control.
       (`RunFinished`), so the client maps them instead of inventing them;
       argument errors are `isError` results, and validation precedes the grant
       check as it does for the metadata tools.*
-- [ ] **4.6 Encoded-value redaction.** Extend the streaming redactor with
-      hex (lower/upper), base64 std/url-safe (with and without padding) and
-      percent-encoding of each secret. Count redactions. Refuse secrets
-      shorter than 8 bytes for agent runs. Property-style tests with random
-      secrets and random chunk boundaries (deterministic seed).
+- [x] **4.6a Encoders for redaction variants** (`src/redact/encoding.rs`,
+      pure). `Encoding::{HexLower, HexUpper, Base64, Base64NoPad, Base64Url,
+      Base64UrlNoPad, Percent}` with `encode(&[u8]) -> Vec<u8>`, and
+      `variants(&[u8]) -> Vec<Vec<u8>>` (every encoded form, deduplicated,
+      with a form equal to the raw secret dropped, since percent-encoding of
+      an all-unreserved value is the value itself). Hand-written encoders: no
+      new dependency, this is not crypto. Percent-encoding is RFC 3986
+      (unreserved `A-Za-z0-9-._~` literal, everything else `%XX` upper-case).
+      Tests: fixed vectors per encoding (including `+/` vs `-_` and all three
+      padding lengths), a test-local decoder round-trip over deterministic
+      bytes, dedupe and raw-drop cases, every variant is ASCII, and an empty
+      secret yields no variants.
+      Note: `src/redact/encoding.rs` is declared `pub mod encoding;` inside
+      `pub mod redact` so its items are live crate API (a private module's
+      `pub` items would trip `dead_code` until 4.6b wires them in).
+- [ ] **4.6b Redact encoded variants too.** `Redactor::new_secret_values`
+      builds the value set from each secret plus `encoding::variants(secret)`
+      (raw value included), leaving `new_many` unchanged for explicit value
+      sets; `src/runner.rs` switches to it so a child echoing hex, base64 or
+      percent forms is redacted. One marker across the expanded set, window
+      sized by the longest variant, one redaction counted per substitution
+      whichever form matched. Tests: every variant at every split and byte at
+      a time, raw and encoded in one stream, the count, marker safety when a
+      variant collides with the marker, and 32 realistic secrets still get a
+      marker (no panic). Restate `choose_marker_many`'s endpoint proof for the
+      expanded set: every encoded variant is ASCII and the raw endpoints stay
+      bounded, so the forbidden byte set cannot reach all 256. Docs:
+      DECISIONS (covered forms vs uncovered ones: base32, case changes,
+      compression), MCP.md, SECURITY.md, README and the `tests/docs.rs` pins
+      that currently say encoded copies are not redacted.
+- [ ] **4.6c Refuse short secrets for agent runs.** The daemon's `run`
+      handler refuses an injected value shorter than
+      `MIN_AGENT_SECRET_LEN = 8` bytes (`bad_request` naming the env var, never
+      the value), because short values make encoded forms indistinguishable
+      from ordinary output. The local human run is unaffected. Tests: seven
+      bytes refused and audited, eight bytes accepted, the refusal text holds
+      no value.
+- [ ] **4.6d Property-style encoded-redaction tests.** Deterministic-seed
+      random secrets (8..=64 bytes), random encodings interspersed with raw
+      output and random chunk schedules; assert no emitted byte sequence ever
+      contains a complete raw or encoded value, and the redaction count is at
+      least the number of inserted occurrences. Extend the MCP session canary
+      test so the hex and base64 forms are absent from stdout, stderr and the
+      audit log (`MCP.md` tests #1/#2). No `proptest` yet (9.2 adds it).
 - [ ] **4.7 `access_status` tool.**
 - [ ] **4.8 Access requests.** Daemon `request_create` (pending requests held
       in daemon memory, max 3 per client connection id, expire after 1 h),
