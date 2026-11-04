@@ -5,6 +5,7 @@
 use super::*;
 
 use crate::grant::Grant;
+use crate::protocol::GrantRevokeRequest;
 
 fn handover_bytes(key: &[u8], token: &SessionToken) -> Vec<u8> {
     let mut bytes = key.to_vec();
