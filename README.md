@@ -56,6 +56,9 @@ order:
 2. the `PASSMGR_DB` environment variable
 3. `./passwords.dat`
 
+The path must name the vault file itself. A symbolic link is refused with exit
+code 5, because the write lock and the atomic save both work on the name given.
+
 `lock`, `run` and `grant revoke` do not read that path: they talk to the
 running daemon, which holds the key for the vault it was unlocked with.
 `run` and `grant revoke` therefore refuse `--db` and `PASSMGR_DB` with exit
@@ -635,7 +638,7 @@ These codes are stable: scripts and agents may rely on them.
 | 2 | Usage error (unknown command or option, bad arguments) or invalid input at a prompt |
 | 3 | Not found (missing vault file, unknown service, unknown reference, or unknown grant id) |
 | 4 | Authentication failed (wrong master password) |
-| 5 | Refused: a security check said no (plaintext reveal without a terminal or in agent mode, a run without a usable grant, a missing or insecure grant file, a refused environment variable, creating a grant in agent mode, or a run that finished but could not be recorded) |
+| 5 | Refused: a security check said no (a vault path that is a symbolic link, plaintext reveal without a terminal or in agent mode, a run without a usable grant, a missing or insecure grant file, a refused environment variable, creating a grant in agent mode, or a run that finished but could not be recorded) |
 | 6 | Malformed, truncated, or unsupported vault file, or an audit log whose hash chain does not verify |
 | 141 | `run` could not relay its output because the pipe was closed; the run was cancelled |
 

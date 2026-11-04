@@ -14,6 +14,9 @@ use crate::grant::{
     Capabilities, DEAD_GRANT_RETENTION_SECS, Grant, GrantSpec, MAX_GRANTS, Scope, TokenHash,
 };
 
+#[cfg(unix)]
+mod file_kinds;
+
 fn credential(service: &str, username: &str, password: &str) -> Credential {
     Credential::new(
         service.to_owned(),

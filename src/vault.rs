@@ -5,7 +5,7 @@ mod lock;
 mod tests;
 
 use std::fs::{self, File};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use crate::crypto::{self, KdfParams};
@@ -396,27 +396,46 @@ impl Vault {
 ///
 /// `unlock` needs the bytes (not the decrypted vault) to derive the key it
 /// hands to the daemon; every check here is format-independent.
+///
+/// A symbolic link is refused. The write lock is `<path>.lock` beside the
+/// name given and a save renames a new file over that name, so a link would
+/// let two writers hold different locks and the first save would replace the
+/// link with a copy.
 pub fn read_container(path: &Path) -> Result<Vec<u8>> {
-    let metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NONBLOCK so that opening a FIFO returns at once; the regular-file
+        // check below then refuses it.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
         Err(err) if err.kind() == io::ErrorKind::NotFound => {
             return Err(Error::VaultNotFound(path.to_path_buf()));
         }
+        #[cfg(unix)]
+        Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(Error::Refused(format!(
+                "vault path '{}' is a symbolic link; pass the real file with --db",
+                path.display()
+            )));
+        }
         Err(err) => return Err(with_path(path, err)),
     };
+    let metadata = file.metadata().map_err(|err| with_path(path, err))?;
     if !metadata.is_file() {
         return Err(Error::MalformedVault(format!(
             "'{}' is not a regular file",
             path.display()
         )));
     }
-    if metadata.len() > crypto::MAX_VAULT_BYTES as u64 {
-        return Err(Error::MalformedVault(format!(
-            "'{}' is too large",
-            path.display()
-        )));
-    }
-    let data = fs::read(path).map_err(|err| with_path(path, err))?;
+    let mut data = Vec::new();
+    file.take(crypto::MAX_VAULT_BYTES as u64 + 1)
+        .read_to_end(&mut data)
+        .map_err(|err| with_path(path, err))?;
     if data.len() > crypto::MAX_VAULT_BYTES {
         return Err(Error::MalformedVault(format!(
             "'{}' is too large",
