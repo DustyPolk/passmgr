@@ -56,14 +56,15 @@ order:
 2. the `PASSMGR_DB` environment variable
 3. `./passwords.dat`
 
-`lock` and `run` do not read that path: they talk to the running daemon, which
-holds the key for the vault it was unlocked with. `run` therefore refuses `--db`
-and `PASSMGR_DB` with exit code 2 (see below) instead of injecting from a vault
-the caller did not name.
+`lock`, `run` and `grant revoke` do not read that path: they talk to the
+running daemon, which holds the key for the vault it was unlocked with.
+`run` and `grant revoke` therefore refuse `--db` and `PASSMGR_DB` with exit
+code 2 (see below) instead of acting on a vault the caller did not name.
 
 The master password is prompted for every command except `generate`, `help`,
-`version`, `lock`, and `run`; `lock` and `run` talk to an already-unlocked
-daemon instead, and `unlock` prompts once to start it. Prompts are written to
+`version`, `lock`, `run` and `grant revoke`; `lock`, `run` and `grant revoke`
+talk to an already-unlocked daemon instead, and `unlock` prompts once to start
+it. Prompts are written to
 stderr, so stdout only contains command data. When stdin is a pipe, passwords are read as ordinary lines, which makes
 the tool scriptable:
 
@@ -209,7 +210,9 @@ signal N. If the reader closes passmgr's output pipe (for example
 longer relay the child's status, so reporting success would hide a failure.
 The vault is always the one the running daemon was unlocked with, so
 `run` refuses `--db` and `PASSMGR_DB` with exit code 2 rather than inject from
-a different vault. Loader and shell-hook
+a different vault. Without a valid, active grant that covers this credential
+and command, `run` exits 5 without starting anything; an unknown reference
+exits 3. Loader and shell-hook
 names (`PATH`, `LD_*`, `BASH_ENV`, ...) are refused with exit code 5. The
 secret never crosses the socket to the CLI: only references and
 already-redacted output do.
@@ -549,9 +552,9 @@ These codes are stable: scripts and agents may rely on them.
 | 0 | Success |
 | 1 | Other runtime error (duplicate entry, I/O failure, crypto setup failure) |
 | 2 | Usage error (unknown command or option, bad arguments) or invalid input at a prompt |
-| 3 | Not found (missing vault file or unknown service) |
+| 3 | Not found (missing vault file, unknown service, unknown reference, or unknown grant id) |
 | 4 | Authentication failed (wrong master password) |
-| 5 | Refused (plaintext reveal without a terminal, in an agent context, or with `--agent`) |
+| 5 | Refused: a security check said no (plaintext reveal without a terminal or in agent mode, a run without a usable grant, a missing or insecure grant file, a refused environment variable, or creating a grant in agent mode) |
 | 6 | Malformed, truncated, or unsupported vault file |
 | 141 | `run` could not relay its output because the pipe was closed; the run was cancelled |
 

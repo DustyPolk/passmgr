@@ -1162,7 +1162,7 @@ Rules that apply to every item:
       runs encode -> push -> next_request under the freed-block allocator scan
       and requires zero hits (1 hit with the envelope wipe removed).
 
-- [ ] **R.51 More docs drift beyond R.32.**
+- [x] **R.51 More docs drift beyond R.32.**
       `DECISIONS.md:420-421` says the daemon's only vault write is
       `revoked_at` (since 3.6 `record_use` writes `uses`/`last_used` on every
       run); `FORMAT.md:217-220` describes key-reuse re-encryption as a CLI
@@ -1190,6 +1190,17 @@ Rules that apply to every item:
       `Request` wire names (minus `run`) and scopes the check to its section;
       the README exit-code table is checked against `Error::exit_code`; the
       protocol module doc lists every `Request` variant.
+      Done: fixed DECISIONS.md, FORMAT.md, src/client.rs, the protocol module
+      doc and run-stream error list, the `Busy` doc, `help.rs` (password
+      exceptions, `--db`, a nonexistent ref is exit 3), and `README.md`
+      (password exceptions, daemon-only commands, run's exit 3/5 split, exit
+      table rows 3 and 5). Also corrected the stale Done notes for 3.5/3.6 in
+      this file. Added `protocol::REQUEST_WIRE_NAMES` + `Request::wire_name`
+      (with a unit test that reads the emitted `"type"`), and tests/docs.rs
+      now derives the SECURITY session-token list, checks the module doc, and
+      parses the README exit table against `Error::exit_code`. The scoped
+      session-token check (R.32) was already fixed; only the list itself was
+      hardcoded.
 
 - [ ] **R.52 Unit tests depend on the caller's agent environment markers.**
       `agent::tests::the_agent_flag_refuses_even_with_two_terminals` and
@@ -1604,12 +1615,15 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       metadata only, never tokens or hashes. revoke needs no password and takes
       effect on the next request. `revoke --all` exists. Tests for each.
       Done: revoke goes over the daemon session token (`grant_revoke` /
-      `grant_revoked`) and is the daemon's only vault write; it refuses
+      `grant_revoked`) and is one of the daemon's two vault writes (`run`
+      records a use); it refuses
       `--db`/`PASSMGR_DB` like `run`. list/show read the vault locally with the
       master password. Enforcement of `revoked_at` by `run` is still 3.6.
 - [x] **3.6 Daemon authorizes by grant.** `run` and every new
       credential-touching request require a grant token. The unlock session
-      token (2.5) only authorizes `ping`, `lock`, `status` and `revoke`.
+      token (2.5) only authorizes `ping`, `lock`, `challenge`, `prove`,
+      `grant_create` and `grant_revoke`; `run` additionally needs a grant
+      token.
       Record this in `DECISIONS.md`: holding the session file is not enough
       to use secrets. Tests: session token refused for `run`, valid grant
       accepted, uses counted, last_used updated.

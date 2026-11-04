@@ -86,8 +86,9 @@ Commands:
                              appears on the command line. Without a valid,
                              active grant that covers this credential and
                              command, passmgr exits 5 without running
-                             anything. The master password is not prompted, so
-                             this is the agent-facing way to use a secret.
+                             anything; an unknown reference exits 3. The
+                             master password is not prompted, so this is
+                             the agent-facing way to use a secret.
                              NAME must be a valid variable name and may not be
                              a loader or shell-hook variable (PATH, LD_*,
                              BASH_ENV, ...).
@@ -152,7 +153,8 @@ Commands:
 
 Global options:
   --db PATH                  Vault file (default: ./passwords.dat, or $PASSMGR_DB).
-                             'run' does not accept it (see above).
+                             'run' and 'grant revoke' do not accept it (see
+                             above).
   --agent                    Force agent mode. This can only make the tool more
                              restrictive: 'get --reveal' is refused even on a
                              terminal. It never reveals a secret by itself.
@@ -193,9 +195,12 @@ Examples:
   passmgr --db ~/.secrets/work.dat list
 
 Notes:
-  - The master password is required for every command except generate/help/version.
-    'grant create' also prompts for it once, at a terminal, and needs a
-    running daemon; its token is written only to --out.
+  - The master password is prompted for every command that opens the vault:
+    add, edit, delete, get, list, show, unlock, 'grant list' and 'grant show'.
+    'grant create' prompts for it once, at a terminal, and needs a running
+    daemon; its token is written only to --out. generate, help, version, lock,
+    run and 'grant revoke' never prompt; lock, run and 'grant revoke' use the
+    running daemon instead.
   - Prompts are written to stderr; command data is written to stdout.
   - 'add --generate' never prints the generated password; read it back with
     the TTY-gated 'get --reveal'.

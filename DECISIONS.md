@@ -529,16 +529,25 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   deliberately accept `--db`. `pm grant revoke` goes through the daemon over
   the session token, because the daemon holds the key and can write without a
   prompt; it refuses `--db`/`PASSMGR_DB` like `run`, since it can only act on
-  the daemon's own vault (TODO 3.5). The daemon's only vault write is setting
-  `revoked_at` with `Vault::save_with_key`, which reuses the container's salt
-  and KDF parameters so the hot key stays valid. Revoking an already-revoked
-  id is a successful no-op (`revoked: 0`), an unknown id is `not_found`, and
-  `--all` targets only grants that are active at the daemon's captured `now`
-  (one `Grant::status` predicate, shared with `grant list`/`show`), so expired,
-  exhausted and already-revoked grants are left untouched and never counted. The CLI maps a `not_found` answer to exit 3 only when
-  it named an id; `--all` has no id to name, so that answer becomes a daemon
-  error (exit 1) and never a panic, since any same-user process may replace
-  the socket (TODO R.27).
+  the daemon's own vault (TODO 3.5). The daemon's vault writes all go through
+  `Vault::save_with_key`, which reuses the container's salt and KDF parameters
+  so the hot key stays valid: `grant_revoke` sets `revoked_at`, and `run`
+  records the use (`uses`, `last_used`) before injecting, so a crash cannot
+  let a use-limited grant exceed its limit (TODO 3.6). Revoking an
+  already-revoked id is a successful no-op (`revoked: 0`), an unknown id is
+  `not_found`, and `--all` targets only grants that are active at the daemon's
+  captured `now` (one `Grant::status` predicate, shared with `grant
+  list`/`show`), so expired, exhausted and already-revoked grants are left
+  untouched and never counted. The CLI maps a `not_found` answer to exit 3 only
+  when it named an id; `--all` has no id to name, so that answer becomes a
+  daemon error (exit 1) and never a panic, since any same-user process may
+  replace the socket (TODO R.27).
+- The request wire names are published as `protocol::REQUEST_WIRE_NAMES`,
+  beside an exhaustive `Request::wire_name` (TODO R.51). Documentation and
+  tests derive the list of request types from it instead of repeating them, so
+  a new `Request` variant cannot be implemented while a doc still claims the
+  old set. The daemon writes the vault for exactly two requests:
+  `grant_revoke` (`revoked_at`) and `run` (`uses`, `last_used`).
 - The presence proof is implemented in `src/presence.rs` (TODO 3.3). The MAC
   message is `DOMAIN || nonce || digest`, all fixed length, so the fields
   cannot be shifted into one another. The daemon issues nonces through the

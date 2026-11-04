@@ -720,9 +720,10 @@ fn handle_connection(
             }
         }
         Request::GrantRevoke(revoke) => {
-            // The only vault write the daemon performs, and the only request
-            // that needs no proof: it can only take access away. An unknown
-            // id is `not_found`; an already-revoked one is a no-op success.
+            // One of the two vault writes the daemon performs (`run` records
+            // a use), and the only request that needs no proof: it can only
+            // take access away. An unknown id is `not_found`; an
+            // already-revoked one is a no-op success.
             let Some(now) = unix_now() else {
                 return reject(&mut stream, ResponseError::Internal);
             };

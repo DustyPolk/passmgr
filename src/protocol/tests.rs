@@ -111,6 +111,42 @@ fn round_trips_every_request() {
     }
 }
 
+/// TODO R.51: the published list must match the encoder, so documentation can
+/// derive the request types instead of repeating them. Each `"type"` is read
+/// back from the encoded frame, so a rename cannot pass by updating only
+/// [`Request::wire_name`].
+#[test]
+fn request_wire_names_match_the_encoder_for_every_variant() {
+    let requests = [
+        Request::Ping,
+        Request::Lock,
+        Request::Challenge,
+        prove_request(),
+        run_request(),
+        grant_create(),
+        Request::GrantRevoke(GrantRevokeRequest::Id(grant_id())),
+        Request::GrantRevoke(GrantRevokeRequest::All),
+    ];
+    let mut encoded_names = Vec::new();
+    for request in &requests {
+        let frame = encode(request).expect("encode");
+        let value: Value = serde_json::from_slice(&frame[4..]).expect("json");
+        let encoded = value["request"]["type"]
+            .as_str()
+            .expect("every request has a string type");
+        assert_eq!(encoded, request.wire_name(), "{request:?}");
+        encoded_names.push(encoded.to_owned());
+    }
+    encoded_names.sort_unstable();
+    encoded_names.dedup();
+    let mut published = REQUEST_WIRE_NAMES.to_vec();
+    published.sort_unstable();
+    assert_eq!(
+        encoded_names, published,
+        "REQUEST_WIRE_NAMES must name exactly the types the encoder emits"
+    );
+}
+
 #[test]
 fn grant_revoke_frames_name_exactly_one_target() {
     let by_id = encode(&Request::GrantRevoke(GrantRevokeRequest::Id(grant_id()))).expect("encode");

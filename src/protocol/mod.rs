@@ -12,8 +12,8 @@
 //! The `token` is the unlock session token (see [`crate::token`]) and is
 //! required on every request; the daemon rejects a missing or mismatched one
 //! with `unauthorized`. The `request` object always has a `"type"` field; the
-//! types this version knows are `ping`, `lock`, `run`, `challenge`, `prove`
-//! and `grant_create`:
+//! types this version knows are `ping`, `lock`, `run`, `challenge`, `prove`,
+//! `grant_create` and `grant_revoke`:
 //!
 //! ```json
 //! {"version":4,"token":"...","request":{"type":"ping"}}
@@ -31,6 +31,10 @@
 //!                         "fields":["password"],"commands":["/usr/bin/gh"],
 //!                         "capabilities":2,"expires_at":1700003600,
 //!                         "max_uses":2,"token_hash":"<64 hex>"}}
+//! {"version":4,"token":"...","request":{"type":"grant_revoke",
+//!                         "id":"<32 hex>"}}
+//! {"version":4,"token":"...","request":{"type":"grant_revoke",
+//!                         "all":true}}
 //! ```
 //!
 //! The sketch above is illustrative; the exact `grant_create` body, byte for
@@ -42,6 +46,13 @@
 //! token assigns the id and writes the grant. The daemon re-normalizes the
 //! payload and requires that its digest matches the one-shot approval, so it
 //! can never mint or widen a grant on its own.
+//!
+//! `grant_revoke` marks exactly one grant (`id`) or every grant (`all: true`)
+//! revoked. It needs no human-presence proof because it only removes access,
+//! and an already-revoked id is a successful no-op. It is one of the two
+//! requests for which `pmd` writes the vault: `grant_revoke` sets
+//! `revoked_at`, and `run` records the use (`uses`, `last_used`) before it
+//! injects. Neither creates or widens a grant.
 //!
 //! `challenge`/`prove` are the human-presence proof (TODO 3.3): the daemon
 //! issues a single-use nonce and accepts a key-derived MAC over it exactly
@@ -66,8 +77,11 @@
 //!
 //! `run` is answered with a stream of [`RunFrame`]s rather than one response:
 //! zero or more `stdout`/`stderr` chunks, then exactly one terminal frame —
-//! either `exit` (`code` or `signal`) or `error` (`not_found`,
-//! `spawn_failed`, `bad_request`). Chunk payloads are hex-encoded so arbitrary
+//! either `exit` (`code` or `signal`) or `error` (one of `not_found`,
+//! `spawn_failed`, `bad_request`, `denied`, `internal` or `busy`). A request
+//! that fails authentication or decoding never starts a stream at all: `pmd`
+//! answers it with a one-shot `error` response (`unauthorized`,
+//! `bad_request`). Chunk payloads are hex-encoded so arbitrary
 //! child bytes survive JSON, and each chunk is capped at [`MAX_CHUNK_BYTES`]
 //! so one frame always fits in [`MAX_MESSAGE_BYTES`].
 //!
@@ -198,14 +212,46 @@ pub enum Request {
     GrantCreate(GrantCreateRequest),
     /// Mark one grant, or every grant, revoked.
     ///
-    /// This is the only request that makes the daemon write the vault, and
-    /// the only write it performs is setting `revoked_at` on grants that
-    /// already exist. It needs no human-presence proof because it only
-    /// removes access: an agent may revoke for itself. Answer:
+    /// Along with `run` (which records the use), this is one of the two
+    /// requests for which the daemon writes the vault; its only write is
+    /// setting `revoked_at` on grants that already exist. It needs no
+    /// human-presence proof because it only removes access: an agent may
+    /// revoke for itself. Answer:
     /// [`Response::GrantRevoked`](crate::protocol::Response::GrantRevoked)
     /// with the number of grants newly revoked, or `not_found` for an
     /// unknown id. An already-revoked id is a successful no-op.
     GrantRevoke(GrantRevokeRequest),
+}
+
+/// The `"type"` of every [`Request`] variant, in declaration order.
+///
+/// Published so documentation and tests can derive the request-type list
+/// instead of hardcoding it (TODO R.51). Adding a variant must add its name
+/// here as well; [`Request::wire_name`] is an exhaustive match, so the
+/// compiler points at it.
+pub const REQUEST_WIRE_NAMES: &[&str] = &[
+    "ping",
+    "lock",
+    "run",
+    "challenge",
+    "prove",
+    "grant_create",
+    "grant_revoke",
+];
+
+impl Request {
+    /// The wire `"type"` this request is encoded with.
+    pub fn wire_name(&self) -> &'static str {
+        match self {
+            Self::Ping => "ping",
+            Self::Lock => "lock",
+            Self::Run(_) => "run",
+            Self::Challenge => "challenge",
+            Self::Prove(_) => "prove",
+            Self::GrantCreate(_) => "grant_create",
+            Self::GrantRevoke(_) => "grant_revoke",
+        }
+    }
 }
 
 /// The target of a `grant_revoke` request: exactly one id or every grant.

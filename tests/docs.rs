@@ -286,14 +286,12 @@ fn security_current_status_matches_the_implemented_grant_flow() {
         !status.contains("authorized by the session token"),
         "SECURITY.md Current status must not say run is authorized by the session token"
     );
-    for request in [
-        "ping",
-        "lock",
-        "challenge",
-        "prove",
-        "grant_create",
-        "grant_revoke",
-    ] {
+    for request in passmgr::protocol::REQUEST_WIRE_NAMES {
+        if *request == "run" {
+            // `run` is listed separately: it needs a grant token, not just
+            // the session token.
+            continue;
+        }
         assert!(
             status.contains(request),
             "SECURITY.md Current status must list {request} as authorized by the session token"
@@ -307,6 +305,126 @@ fn security_current_status_matches_the_implemented_grant_flow() {
         status.contains("TODO 3.8") && status.contains("no audit record is written today"),
         "SECURITY.md Current status must say the audit log is still TODO 3.8"
     );
+}
+
+/// Body of a `## ` section, line for line rather than flattened by [`plain`],
+/// for contracts that need Markdown structure such as a table.
+fn markdown_section_lines<'a>(markdown: &'a str, heading: &str) -> Option<Vec<&'a str>> {
+    let mut collecting = false;
+    let mut body = Vec::new();
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("## ") {
+            if collecting {
+                break;
+            }
+            if trimmed == heading {
+                collecting = true;
+                continue;
+            }
+        }
+        if collecting && !trimmed.is_empty() {
+            body.push(trimmed);
+        }
+    }
+    if body.is_empty() { None } else { Some(body) }
+}
+
+/// TODO R.51: the README exit-code table is the contract scripts and agents
+/// read. Every code the library can return must be documented (plus 0 and
+/// 141, which `main` produces without an `Error`), and the two rows the R.51
+/// review found incomplete must name the conditions that actually cause them.
+/// Deriving the table instead of matching prose keeps a new code or a changed
+/// mapping from silently drifting out of the docs.
+#[test]
+fn readme_exit_code_table_covers_every_error_code() {
+    let mut codes = std::collections::BTreeMap::new();
+    for line in
+        markdown_section_lines(README, "## Exit codes").expect("README must keep Exit codes")
+    {
+        let cells: Vec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+        if cells.len() != 2 {
+            continue;
+        }
+        if let Ok(code) = cells[0].parse::<u16>() {
+            codes.insert(code, plain(cells[1]));
+        }
+    }
+    assert_eq!(
+        codes.keys().copied().collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4, 5, 6, 141],
+        "the README table must document exactly the stable codes"
+    );
+
+    use passmgr::error::Error;
+    let grant_id = passmgr::grant::GrantId::from_hex("00112233445566778899aabbccddeeff")
+        .expect("fixed grant id");
+    let errors = [
+        Error::Io(std::io::Error::other("x")),
+        Error::VaultNotFound(std::path::PathBuf::from("v.dat")),
+        Error::NotAVault,
+        Error::LegacyVault,
+        Error::UnsupportedVersion(9),
+        Error::UnsupportedFormat("x".into()),
+        Error::MalformedVault("x".into()),
+        Error::Crypto("x".into()),
+        Error::AuthenticationFailed,
+        Error::Refused("no".into()),
+        Error::DuplicateService("svc".into()),
+        Error::ServiceNotFound("svc".into()),
+        Error::EntryNotFound("pm://00".into()),
+        Error::GrantNotFound(grant_id),
+        Error::ReadOnlyVault(std::path::PathBuf::from("v.dat")),
+        Error::VaultBusy(std::path::PathBuf::from("v.dat")),
+        Error::VaultChanged(std::path::PathBuf::from("v.dat")),
+        Error::Daemon("x".into()),
+        Error::InvalidInput("x".into()),
+    ];
+    for error in &errors {
+        let code = u16::from(error.exit_code());
+        assert!(
+            codes.contains_key(&code),
+            "README must document exit code {code} ({error:?})"
+        );
+    }
+
+    let not_found = &codes[&3];
+    assert!(
+        not_found.contains("reference") && not_found.contains("grant id"),
+        "README exit code 3 must name an unknown reference and an unknown grant id"
+    );
+    let refused = &codes[&5];
+    for condition in [
+        "run without a usable grant",
+        "grant file",
+        "environment variable",
+        "creating a grant in agent mode",
+    ] {
+        assert!(
+            refused.contains(condition),
+            "README exit code 5 must mention {condition}"
+        );
+    }
+}
+
+/// TODO R.51: the protocol module doc is what a client author reads first.
+/// Derive the request types from [`passmgr::protocol::REQUEST_WIRE_NAMES`] so a
+/// new `Request` variant cannot be implemented without a line here.
+#[test]
+fn protocol_module_doc_lists_every_request_type() {
+    let doc: String = include_str!("../src/protocol/mod.rs")
+        .lines()
+        .take_while(|line| line.starts_with("//!") || line.is_empty())
+        .map(|line| line.trim_start_matches("//!"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let doc = plain(&doc);
+    for name in passmgr::protocol::REQUEST_WIRE_NAMES {
+        assert!(
+            doc.contains(name),
+            "src/protocol/mod.rs module doc must name the {name} request"
+        );
+    }
 }
 
 /// TODO R.32: `DECISIONS.md` said the CLI could not create a grant after

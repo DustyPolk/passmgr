@@ -1,3 +1,36 @@
+## 2026-11-03 — Pin the docs that had drifted since grants landed (TODO R.51)
+
+- Corrected every stale claim in the item: the daemon's vault writes are
+  `grant_revoke` (`revoked_at`) and `run` (`uses`/`last_used`), in
+  `DECISIONS.md`, the protocol module doc and the `daemon.rs` comment;
+  `FORMAT.md` names `pmd` as a key-reuse writer; `src/client.rs` no longer
+  says grants are TODO 3.1 or that the session token can use secrets;
+  `protocol::mod` lists `grant_revoke` (with JSON), its run-stream error list
+  names `denied`/`internal`/`busy` and says authentication failures are
+  one-shot responses; `ResponseError::Busy` drops the removed nonce-pool case.
+- `help.rs` and `README.md`: the password exceptions now include `lock`,
+  `run` and `grant revoke`; `--db` is refused by both `run` and
+  `grant revoke`; `run` with an unknown ref exits 3 (5 is only a grant
+  refusal). README exit rows 3 and 5 now list unknown ref/grant id and every
+  refusal cause. TODO.md's Done notes for 3.5/3.6 were corrected too, since
+  they carried the same wrong claims.
+- Added `protocol::REQUEST_WIRE_NAMES` and an exhaustive
+  `Request::wire_name` as the single published list. Unit test
+  `request_wire_names_match_the_encoder_for_every_variant` reads the emitted
+  `"type"` back out, so an encoder rename cannot pass by editing only
+  `wire_name`. `tests/docs.rs` derives the SECURITY session-token list from it
+  (minus `run`), checks the module doc names every entry, and parses the README
+  exit table against `Error::exit_code` (exact code set, every variant, and the
+  rows R.51 found incomplete). `tests/fixtures/help.txt` was regenerated from
+  the new binary; the golden test still pins every byte of `--help`.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, full
+  `cargo test` all pass; `cargo audit` unavailable (skipped).
+- **Next iteration must know:** the new docs tests read source text
+  (`include_str!` of `src/protocol/mod.rs`) and the raw README table, so
+  rewording the module doc must keep each wire name present, and a new
+  `Request` variant needs its name in `REQUEST_WIRE_NAMES`, `wire_name` and
+  the module doc before the docs test passes. No behavior changed.
+
 ## 2026-11-03 — Wipe every buffer the wire codec copies a request into (TODO R.50c)
 
 - `src/protocol/codec.rs`: `encode`/`encode_body` return `Zeroizing<Vec<u8>>`.

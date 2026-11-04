@@ -29,10 +29,12 @@
 //! Every request carries the session token from the 0600 session file, and the
 //! daemon rejects a mismatch with `unauthorized`. The token proves the client
 //! can read the owner's runtime directory, which every same-user process can;
-//! it is not yet a boundary between an agent and its owner (grants are TODO
-//! 3.1). There is still no request that returns plaintext, so the worst a
-//! process holding the token can do is use secrets through `run` (when it
-//! lands) or make the human unlock again.
+//! it is not a boundary between an agent and its owner, and it is never enough
+//! to use a secret: `run` also needs a grant token whose grant covers the
+//! credential and command (TODO 3.6). There is still no request that returns
+//! plaintext, so a process holding only the session token cannot read or
+//! inject anything; the worst it can do is make the human unlock again or
+//! revoke grants.
 
 use std::env;
 use std::fs::File;

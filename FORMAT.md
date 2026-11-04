@@ -243,8 +243,9 @@ version and returns `LegacyVault`; it never writes to a legacy file.
   the current defaults. Only a brand-new file takes a fresh salt and the
   current defaults. Reusing the header is safe because the nonce is fresh, and
   it is authenticated before reuse: `crypto::encrypt_with_template` (the
-  password path) and `crypto::encrypt_with_key` (a writer holding the key, such
-  as the CLI writing a grant while `pmd` is unlocked) both decrypt the current
+  password path) and `crypto::encrypt_with_key` (a writer holding the key —
+  the CLI writing an approved grant while `pmd` is unlocked, or `pmd` itself
+  recording a use or a revocation) both decrypt the current
   container first, so a wrong password or key writes nothing.
 - The format does not compress, deduplicate, or encrypt field lengths. Length
   metadata is visible only after decryption; the outer container leaks only its

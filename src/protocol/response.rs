@@ -66,8 +66,9 @@ pub enum ResponseError {
     Internal,
     /// The daemon is already serving its maximum number of concurrent `run`
     /// requests (or could not create a worker). Nothing was decrypted or
-    /// spawned; the caller may retry once an earlier run finishes. Also used
-    /// when too many challenge nonces are already outstanding.
+    /// spawned; the caller may retry once an earlier run finishes. Also the
+    /// answer to `challenge` when the daemon cannot generate a nonce (a
+    /// failing CSPRNG); the nonce pool itself never refuses (TODO R.16).
     Busy,
     /// A human-presence proof was refused: unknown or spent nonce, expired
     /// nonce, or a MAC that does not match the nonce and digest. All three
