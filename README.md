@@ -279,8 +279,10 @@ stateless `_meta`) and `tools/list`, which returns five tools:
 `access_status`, `list_credentials`, `describe_credential`,
 `run_with_credentials` and `request_access`. `list_credentials` and
 `describe_credential` are wired to the daemon and return metadata covered by
-the session's grant; the remaining tools answer "unknown tool" until their
-daemon path lands (TODO 4.5).
+the session's grant; `run_with_credentials` runs a command through the daemon
+with secrets injected and reports only the redacted output, its exit status
+and counts. The remaining tools answer "unknown tool" until their daemon path
+lands (TODO 4.7+).
 [MCP.md](MCP.md) is the contract for the rest. stdout carries only JSON-RPC
 lines and diagnostics go to stderr.
 

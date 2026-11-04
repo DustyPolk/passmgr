@@ -1,3 +1,41 @@
+## 2026-11-04 — MCP `run_with_credentials` (TODO 4.5d)
+
+- New `src/mcp/call/run.rs` owns the tool boundary: `run_args` (closed key set,
+  argv/env/plain_env/cwd/limit bounds, canonical refs, schema-stricter env
+  names, duplicate refusal, `stdin_ref`/non-empty `files` refused with a
+  "not available in this build, use env" message), `resolve_command` (reuses
+  the CLI's `resolve_program`, now `src/program.rs`), `request_run` (session
+  token from the runtime dir, `client::run`, frames into a `RunSink` bounded by
+  the requested cap) and `run_output` (the nine schema fields).
+- `RunFinished` gained `redactions: u64` and `duration_ms: u64`, computed in
+  `src/runner.rs` (a shared `AtomicU64` summed over both readers, `Instant` at
+  the spawn) and encoded in the `exit` frame; absent fields decode to 0, so an
+  old daemon or client still works. `src/mcp/server.rs` holds the agent's cwd
+  and `PATH` (manual `Default`) so `command[0]` is resolved before the request.
+- `src/mcp/tools.rs`: the `timeout_secs` default/description said 120; it is
+  600, matching MCP.md and `RunLimits::default()` (it now imports the constant).
+- Tests: 13 unit tests in `src/mcp/call/tests.rs` (validation, refusals, Debug
+  hides `plain_env` values, cap, signal names, exit mapping, refusal mapping),
+  two runner tests for the new statistics, and four `tests/mcp_serve.rs`
+  end-to-end sessions: canary injected into both streams, redacted, exit 3 and
+  `redactions >= 2` with the canary absent from all output; no grant; a
+  list-only grant denied as `isError`; `stdin_ref` refused.
+- `tests/support/mod.rs` grew `exit_frame`/`is_exited`/`assert_exited`: 16
+  existing assertions compared a whole `RunFinished` and now cannot, because a
+  real run's `duration_ms` varies.
+- MCP.md: implementation note, the run section's implementation status, the
+  documented marker is `[REDACTED]` (it said `[REDACTED:<VAR>]`), and the
+  older-daemon paragraph now covers all four terminal fields.
+- Decisions: the daemon is the only source of run statistics (DECISIONS.md);
+  run argument errors are `isError`, metadata tools keep `-32602`.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass.
+- **Next iteration must know:** `files`/`stdin_ref` validation is deliberately
+  in `run_args` and must be deleted there when 5.1/5.2 land; `run_args`
+  requires at least one `env` binding because `pmd` refuses a run without one;
+  field-path refs (`pm://…/field`) are refused by `EntryId::parse_ref`
+  everywhere, so 6.1 has to add that to the parser, not to the MCP layer.
+
 ## 2026-11-04 — Run timeout and per-stream output caps (TODO 4.5c)
 
 - `RunRequest` gained `limits: {timeout_secs, max_output_bytes}` (defaults 600 s,

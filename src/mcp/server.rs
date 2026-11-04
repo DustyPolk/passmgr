@@ -16,7 +16,9 @@
 //! out of logs; the token itself is only ever reduced to its hash when a
 //! daemon request is built, and never crosses a write.
 
+use std::ffi::OsString;
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
@@ -38,10 +40,41 @@ pub const TOOLS_CALL_METHOD: &str = "tools/call";
 /// The session holds the legacy handshake state and, when the host named one,
 /// the grant token it may present to `pmd`. Pending access requests and the
 /// client name arrive with the tools that need them (4.5 onwards).
-#[derive(Debug, Default)]
+///
+/// The server also remembers where it was started, because
+/// `run_with_credentials` resolves `command[0]` through the *agent's* `PATH`
+/// and working directory before `pmd` sees an absolute path.
 pub struct Server {
     session: Session,
     grant: Option<GrantToken>,
+    cwd: Option<PathBuf>,
+    path_var: OsString,
+}
+
+impl std::fmt::Debug for Server {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Hand-written so the grant's redacted `Debug` is the only token
+        // representation, and so a future field cannot start printing here.
+        formatter
+            .debug_struct("Server")
+            .field("session", &self.session)
+            .field("grant", &self.grant)
+            .field("cwd", &self.cwd)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for Server {
+    /// A server bound to this process's working directory and `PATH`, which is
+    /// what an agent host sees.
+    fn default() -> Self {
+        Self {
+            session: Session::default(),
+            grant: None,
+            cwd: std::env::current_dir().ok(),
+            path_var: std::env::var_os("PATH").unwrap_or_default(),
+        }
+    }
 }
 
 impl Server {
@@ -54,8 +87,8 @@ impl Server {
     /// refuse for want of a grant.
     pub fn with_grant(grant: Option<GrantToken>) -> Self {
         Self {
-            session: Session::default(),
             grant,
+            ..Self::default()
         }
     }
 
@@ -146,6 +179,30 @@ impl Server {
                     Ok(response) => call::describe_response(response),
                     Err(message) => call::error_result(&message),
                 })
+            }
+            call::RUN_WITH_CREDENTIALS => {
+                // `MCP.md` says an argument the schema would reject is an
+                // `isError` result with a fixable message, not a protocol
+                // error: the host shows the text, and the agent can retry.
+                let args = match call::run_args(arguments, self.cwd.as_deref())
+                    .and_then(|args| call::resolve_command(args, &self.path_var))
+                {
+                    Ok(args) => args,
+                    Err(message) => return Ok(call::error_result(&message)),
+                };
+                let Some(grant) = self.grant.as_ref() else {
+                    return Ok(call::error_result(call::NO_GRANT));
+                };
+                // The sink is bounded by the cap the daemon applies, so even
+                // a daemon that ignored it cannot make this process buffer
+                // unbounded output. The daemon still does the redaction.
+                let mut sink = call::RunSink::new(args.limits.max_output_bytes as usize);
+                Ok(
+                    match call::request_run(grant, args, |frame| sink.push(frame)) {
+                        Ok(outcome) => call::run_response(outcome, &sink),
+                        Err(message) => call::error_result(&message),
+                    },
+                )
             }
             _ => Err(ErrorObject::new(
                 ErrorCode::InvalidParams,

@@ -16,6 +16,8 @@ pub mod grant;
 pub mod mcp;
 pub mod password;
 pub mod presence;
+#[cfg(unix)]
+pub mod program;
 pub mod protocol;
 pub mod redact;
 #[cfg(unix)]

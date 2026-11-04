@@ -251,24 +251,28 @@ fn exit_frames_round_trip_and_validate_the_status() {
 }
 
 #[test]
-fn exit_flags_round_trip_and_legacy_frames_default_to_false() {
+fn exit_flags_and_stats_round_trip_and_legacy_frames_default_to_zero() {
     let finished = RunFinished {
         exit: RunExit::Signal(9),
         timed_out: true,
         stdout_truncated: true,
         stderr_truncated: false,
+        redactions: 2,
+        duration_ms: 1234,
     };
     let encoded = encode_run_frame(&RunFrame::Exit(finished)).expect("encode exit");
     let value: serde_json::Value = serde_json::from_slice(&encoded[4..]).expect("json");
     assert_eq!(value["response"]["timed_out"], true);
     assert_eq!(value["response"]["stdout_truncated"], true);
     assert_eq!(value["response"]["stderr_truncated"], false);
+    assert_eq!(value["response"]["redactions"], 2);
+    assert_eq!(value["response"]["duration_ms"], 1234);
     assert_eq!(
         decode_run_frame(&encoded).expect("decode exit"),
         RunFrame::Exit(finished)
     );
 
-    // A frame from an older peer has no flag fields: all false.
+    // A frame from an older peer has no flag or stat fields: all false/zero.
     let legacy = frame(r#"{"version":4,"response":{"type":"exit","code":0}}"#);
     assert_eq!(
         decode_run_frame(&legacy).expect("legacy exit"),
@@ -279,6 +283,10 @@ fn exit_flags_round_trip_and_legacy_frames_default_to_false() {
         r#"{"version":4,"response":{"type":"exit","code":0,"timed_out":1}}"#,
         r#"{"version":4,"response":{"type":"exit","code":0,"stdout_truncated":"true"}}"#,
         r#"{"version":4,"response":{"type":"exit","code":0,"stderr_truncated":null}}"#,
+        r#"{"version":4,"response":{"type":"exit","code":0,"redactions":-1}}"#,
+        r#"{"version":4,"response":{"type":"exit","code":0,"redactions":1.5}}"#,
+        r#"{"version":4,"response":{"type":"exit","code":0,"duration_ms":null}}"#,
+        r#"{"version":4,"response":{"type":"exit","code":0,"duration_ms":"12"}}"#,
     ] {
         assert!(
             decode_run_frame(&frame(body)).is_err(),

@@ -117,12 +117,16 @@ keeps the dependency tree small and stdout hygiene under our control.
       flags, and the grace period is polled, not slept on blindly.
       *Caps count redacted bytes, and the local human run is deliberately
       unbounded; the terminal frame is now `RunFinished` (flags + `timed_out`).*
-- [ ] **4.5d MCP `run_with_credentials`.** Validate the tool input, call the
+- [x] **4.5d MCP `run_with_credentials`.** Validate the tool input, call the
       daemon `run` request, map frames to the result object, and never echo a
       secret or raw child bytes outside the capped/redacted streams. Refuse
       `stdin_ref`/`files` with an actionable error until 5.1/5.2. Tests: a real
       stdio session, an env canary that appears in neither `stdout`, `stderr`
       nor any error text, and a denied grant surfaced as `isError`.
+      *The daemon now reports `redactions` and `duration_ms` in the exit frame
+      (`RunFinished`), so the client maps them instead of inventing them;
+      argument errors are `isError` results, and validation precedes the grant
+      check as it does for the metadata tools.*
 - [ ] **4.6 Encoded-value redaction.** Extend the streaming redactor with
       hex (lower/upper), base64 std/url-safe (with and without padding) and
       percent-encoding of each secret. Count redactions. Refuse secrets

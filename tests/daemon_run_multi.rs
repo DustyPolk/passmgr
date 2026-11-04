@@ -13,9 +13,7 @@ use std::fs;
 
 use passmgr::crypto;
 use passmgr::grant::{Capabilities, Grant, GrantSpec, Scope};
-use passmgr::protocol::{
-    EnvBinding, Request, Response, ResponseError, RunExit, RunFinished, RunFrame,
-};
+use passmgr::protocol::{EnvBinding, Request, Response, ResponseError, RunFrame};
 use passmgr::store::{self, Credential};
 use passmgr::vault::Vault;
 
@@ -65,10 +63,7 @@ fn a_run_injects_and_redacts_every_binding() {
         b"[REDACTED]|[REDACTED]|visible",
         "both secrets are injected and redacted, the plain value is untouched"
     );
-    assert_eq!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
-    );
+    assert_exited(&frames, 0);
     for secret in [SECRET, SECOND_SECRET] {
         assert!(
             !raw.windows(secret.len())

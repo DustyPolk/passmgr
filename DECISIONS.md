@@ -925,6 +925,16 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   final record is not, and is documented as SECURITY limit 8 rather than
   papered over.
 
+- Run statistics belong to the daemon: the `exit` frame's `redactions`
+  (matches replaced across both streams) and `duration_ms` (child wall clock)
+  are computed inside `pmd` and copied by the MCP server, never estimated by
+  the client, and both decode to 0 when absent so a version skew cannot
+  fabricate them. `run_with_credentials` argument problems are `isError`
+  results (MCP.md promises a fixable message), while `list_credentials` and
+  `describe_credential` keep answering `-32602`; validation precedes the grant
+  check in all three, so a malformed request is diagnosed before a grant is
+  demanded.
+
 ## Dependencies
 
 - Allowed: `aes-gcm`, `argon2`, `getrandom`, `libc`, `serde_json`, `sha2`,

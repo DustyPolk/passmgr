@@ -14,8 +14,7 @@ use std::time::{Duration, Instant};
 use passmgr::crypto;
 use passmgr::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope};
 use passmgr::protocol::{
-    GrantRevokeRequest, MAX_CHUNK_BYTES, Request, Response, ResponseError, RunExit, RunFinished,
-    RunFrame,
+    GrantRevokeRequest, MAX_CHUNK_BYTES, Request, Response, ResponseError, RunExit, RunFrame,
 };
 use passmgr::store::{self, Credential};
 use passmgr::vault::Vault;
@@ -42,10 +41,7 @@ fn run_injects_the_secret_and_redacts_stdout_and_stderr() {
 
     assert_eq!(stdout_bytes(&frames), b"[REDACTED]");
     assert_eq!(stderr_bytes(&frames), b"[REDACTED]");
-    assert_eq!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
-    );
+    assert_exited(&frames, 0);
     assert!(
         !raw.windows(SECRET.len())
             .any(|window| window == SECRET.as_bytes())
@@ -137,10 +133,7 @@ fn run_requires_a_grant_beyond_the_session_token() {
         &fixture.token,
         &fixture.run_request("API_KEY", &["/bin/true"]),
     );
-    assert_eq!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
-    );
+    assert_exited(&frames, 0);
 
     let vault = Vault::open_with_key(&fixture.vault, fixture.key.as_slice()).expect("open vault");
     assert_eq!(vault.grants().len(), 1);
@@ -183,10 +176,7 @@ fn run_stops_at_a_use_limited_grant() {
         &fixture.token,
         &fixture.run_request("API_KEY", &["/bin/true"]),
     );
-    assert_eq!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
-    );
+    assert_exited(&frames, 0);
 
     // The second use exceeds the limit recorded in the vault.
     let (frames, _) = read_run(
@@ -219,10 +209,7 @@ fn restoring_an_older_vault_cannot_restore_a_spent_use() {
         &fixture.token,
         &fixture.run_request("API_KEY", &["/bin/true"]),
     );
-    assert_eq!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
-    );
+    assert_exited(&frames, 0);
 
     fs::write(&fixture.vault, &snapshot).expect("restore older vault");
     let (frames, raw) = read_run(
@@ -520,10 +507,7 @@ fn run_streams_large_output_in_protocol_sized_chunks_and_redacts() {
     assert_eq!(stdout.len(), 40 * 1024 + b"[REDACTED]".len());
     assert!(stdout[..40 * 1024].iter().all(|byte| *byte == b'x'));
     assert_eq!(&stdout[40 * 1024..], b"[REDACTED]");
-    assert_eq!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
-    );
+    assert_exited(&frames, 0);
 
     assert!(
         !raw.windows(secret.len())
@@ -569,10 +553,7 @@ fn the_child_is_spawned_as_the_canonical_program_not_the_request_path() {
     );
 
     assert_eq!(stdout_bytes(&frames), canonical.as_bytes());
-    assert_eq!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
-    );
+    assert_exited(&frames, 0);
 
     assert_eq!(
         request(&socket, &fixture.token, &Request::Lock),
@@ -672,10 +653,7 @@ fn a_symlink_swapped_after_the_allowlist_check_cannot_change_the_program() {
         !loot.exists(),
         "the swapped program ran and captured the injected secret"
     );
-    assert_eq!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
-    );
+    assert_exited(&frames, 0);
     assert!(
         !raw.windows(SECRET.len())
             .any(|window| window == SECRET.as_bytes())
@@ -895,12 +873,7 @@ fn concurrent_runs_cannot_exceed_max_uses() {
         .map(|reader| reader.join().expect("run thread"))
         .collect();
 
-    let ran = results
-        .iter()
-        .filter(|frames| {
-            frames.last() == Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
-        })
-        .count();
+    let ran = results.iter().filter(|frames| is_exited(frames, 0)).count();
     let denied = results
         .iter()
         .filter(|frames| frames.as_slice() == [RunFrame::Error(ResponseError::Denied)])

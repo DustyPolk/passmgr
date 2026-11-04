@@ -23,9 +23,7 @@ use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
-use passmgr::protocol::{
-    self, MAX_RUN_OUTPUT_BYTES, Request, Response, RunExit, RunFinished, RunFrame,
-};
+use passmgr::protocol::{self, MAX_RUN_OUTPUT_BYTES, Request, Response, RunExit, RunFrame};
 
 /// A child that writes 64 x 64 KiB = 4 MiB to stdout and nothing to stderr:
 /// far past any socket buffer (and past the 1 MiB relay cap), so a client that
@@ -133,13 +131,10 @@ fn a_paused_reader_gets_every_byte_and_the_exit_frame() {
         MAX_RUN_OUTPUT_BYTES as usize,
         "the paused reader lost relayed child output"
     );
-    assert_eq!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished {
-            stdout_truncated: true,
-            ..RunFinished::exited(RunExit::Code(0))
-        }))
-    );
+    let finished = exit_frame(&frames);
+    assert_eq!(finished.exit, RunExit::Code(0));
+    assert!(finished.stdout_truncated, "the cap must be reported");
+    assert!(!finished.timed_out);
     assert!(
         !stdout
             .windows(SECRET.len())
@@ -177,10 +172,6 @@ fn lock_is_not_delayed_by_a_stalled_run_client() {
     // The lock cancelled the run: the client got what was already queued, then
     // EOF without an exit frame, so nothing claims the child finished.
     let frames = read_until_eof(stream);
-    assert_ne!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0)))),
-        "a cancelled run claimed to finish"
-    );
+    assert!(!is_exited(&frames, 0), "a cancelled run claimed to finish");
     assert!(wait_for_exit(&mut child, WAIT).success());
 }

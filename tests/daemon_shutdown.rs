@@ -17,7 +17,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use passmgr::protocol::{Request, Response, RunExit, RunFinished, RunFrame};
+use passmgr::protocol::{Request, Response};
 use passmgr::socket::RuntimePaths;
 
 /// A `run` whose child reports its pid, closes both output pipes and then
@@ -199,10 +199,7 @@ fn a_run_in_flight_is_not_killed_by_the_idle_timeout() {
         b"done",
         "the idle timeout killed the run: {frames:?}"
     );
-    assert_eq!(
-        frames.last(),
-        Some(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))))
-    );
+    assert_exited(&frames, 0);
     assert!(
         child.try_wait().expect("try_wait").is_none(),
         "the daemon stopped while the run was still going"

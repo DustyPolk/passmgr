@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 use passmgr::crypto::{self, KEY_LEN, KdfParams};
 use passmgr::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope};
-use passmgr::protocol::{self, EnvBinding, Request, Response, RunFrame, RunRequest};
+use passmgr::protocol::{
+    self, EnvBinding, Request, Response, RunExit, RunFinished, RunFrame, RunRequest,
+};
 use passmgr::socket::RuntimePaths;
 use passmgr::store::{self, Credential};
 use passmgr::token::SessionToken;
@@ -366,6 +368,34 @@ pub fn read_run(
         }
     }
     (frames, raw)
+}
+
+/// The terminal frame of a run, or a panic naming what arrived instead.
+///
+/// The daemon fills in `redactions` and `duration_ms` per run, so a test can
+/// never compare a whole [`RunFinished`] against a literal; it asserts on the
+/// fields it controls.
+pub fn exit_frame(frames: &[RunFrame]) -> &RunFinished {
+    match frames.last() {
+        Some(RunFrame::Exit(finished)) => finished,
+        other => panic!("expected a terminal exit frame, found {other:?}"),
+    }
+}
+
+/// Whether the run ended with an untimed exit of `code`.
+pub fn is_exited(frames: &[RunFrame], code: u8) -> bool {
+    let Some(RunFrame::Exit(finished)) = frames.last() else {
+        return false;
+    };
+    finished.exit == RunExit::Code(code) && !finished.timed_out
+}
+
+/// Assert that the run ended with an untimed exit of `code`.
+pub fn assert_exited(frames: &[RunFrame], code: u8) {
+    assert!(
+        is_exited(frames, code),
+        "expected exit {code}, got {frames:?}"
+    );
 }
 
 pub fn stdout_bytes(frames: &[RunFrame]) -> Vec<u8> {

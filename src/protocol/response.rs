@@ -171,13 +171,22 @@ pub enum RunExit {
     Signal(u8),
 }
 
-/// The terminal status of a `run`, plus the two limits that shaped it.
+/// The terminal status of a `run`, the two limits that shaped it and two
+/// statistics about it.
 ///
 /// `timed_out` means the daemon's deadline fired and it killed the child's
 /// process group; `exit` is then whatever signal the kill produced. The
 /// truncation flags mean the relayed stream hit its cap: the cap is applied
 /// to already-redacted bytes, so a truncated stream never ends in the middle
 /// of a secret.
+///
+/// `redactions` and `duration_ms` are facts the daemon alone knows: how many
+/// injected values its redactors replaced, and how long the child ran. They
+/// are metadata only -- a count and a duration, never a value -- and they let
+/// an agent and a human see that redaction happened without seeing what was
+/// redacted. A peer that predates them omits both fields and they decode as
+/// zero; [`RunFinished::exited`] zeroes them too, for a run that never
+/// happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunFinished {
     /// How the child exited, when it did.
@@ -188,16 +197,22 @@ pub struct RunFinished {
     pub stdout_truncated: bool,
     /// Standard error hit the per-stream cap and was cut short.
     pub stderr_truncated: bool,
+    /// How many injected values the daemon replaced in the relayed output.
+    pub redactions: u64,
+    /// How long the child ran, in milliseconds.
+    pub duration_ms: u64,
 }
 
 impl RunFinished {
-    /// A finished run that hit neither limit.
+    /// A finished run that hit neither limit, with unknown statistics.
     pub const fn exited(exit: RunExit) -> Self {
         Self {
             exit,
             timed_out: false,
             stdout_truncated: false,
             stderr_truncated: false,
+            redactions: 0,
+            duration_ms: 0,
         }
     }
 }
@@ -359,6 +374,10 @@ pub fn encode_run_frame(frame: &RunFrame) -> Result<Vec<u8>, ProtocolError> {
                 "stderr_truncated".to_owned(),
                 json!(finished.stderr_truncated),
             );
+            // Always written, so a peer never has to guess whether redaction
+            // was counted for this daemon.
+            exit.insert("redactions".to_owned(), json!(finished.redactions));
+            exit.insert("duration_ms".to_owned(), json!(finished.duration_ms));
             Value::Object(exit)
         }
         RunFrame::Error(error) => json!({ "type": "error", "code": error.code() }),
@@ -524,7 +543,26 @@ fn decode_exit(response: &Map<String, Value>) -> Result<RunFinished, ProtocolErr
         timed_out: optional_flag(response, "timed_out")?,
         stdout_truncated: optional_flag(response, "stdout_truncated")?,
         stderr_truncated: optional_flag(response, "stderr_truncated")?,
+        redactions: optional_count(response, "redactions")?,
+        duration_ms: optional_count(response, "duration_ms")?,
     })
+}
+
+/// Read an optional non-negative counter from an exit frame.
+///
+/// A peer that predates the field omits it, and the statistic then reads as
+/// zero rather than being invented; `null` or any other type is refused, so a
+/// broken daemon cannot smuggle a value through a field a caller reads as a
+/// number.
+fn optional_count(response: &Map<String, Value>, field: &str) -> Result<u64, ProtocolError> {
+    match response.get(field) {
+        None => Ok(0),
+        Some(value) => value.as_u64().ok_or_else(|| {
+            ProtocolError::InvalidResponse(format!(
+                "'response.{field}' must be a non-negative integer"
+            ))
+        }),
+    }
 }
 
 /// Read an optional boolean flag from an exit frame. A peer that predates the

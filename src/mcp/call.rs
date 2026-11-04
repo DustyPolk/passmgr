@@ -28,10 +28,17 @@ use crate::session;
 use crate::socket::RuntimePaths;
 use crate::store::{EntryId, MAX_TAGS_PER_CREDENTIAL, validate_tag};
 use crate::timestamp;
+use crate::token::SessionToken;
+
+mod run;
+
+pub use run::{RunArgs, RunSink, request_run, resolve_command, run_args, run_output, run_response};
 
 /// The metadata tools this module implements (TODO 4.4d, 4.4e).
 pub const LIST_CREDENTIALS: &str = "list_credentials";
 pub const DESCRIBE_CREDENTIAL: &str = "describe_credential";
+/// The one tool that makes `pmd` run a command (TODO 4.5d).
+pub const RUN_WITH_CREDENTIALS: &str = "run_with_credentials";
 
 /// The one refusal shared by every non-canonical reference, so a bad
 /// reference can never be echoed back and no parse detail reaches the agent.
@@ -235,25 +242,35 @@ pub fn request_describe(grant: &GrantToken, reference: String) -> Result<Respons
 /// Send one already-validated request to the session's daemon.
 fn send(request: &Request) -> Result<Response, String> {
     let paths = RuntimePaths::resolve();
-    let token = match session::load(&paths) {
-        Ok(token) => token,
+    let token = session_token(&paths)?;
+    client::request(&paths, &token, request).map_err(|error| {
+        format!("cannot reach the passmgr daemon ({error}); ask the human to run `pm unlock`")
+    })
+}
+
+/// The session token this process presents to `pmd`.
+///
+/// The token comes from the runtime directory, never from the agent, and the
+/// error text distinguishes "nothing is running" from "a daemon is running
+/// but this process cannot authenticate to it" exactly as `pm lock` does. A
+/// probe connection carries no request.
+fn session_token(paths: &RuntimePaths) -> Result<SessionToken, String> {
+    match session::load(paths) {
+        Ok(token) => Ok(token),
         Err(error) => {
             // Distinguish "nothing is running" from "a daemon is running but
-            // this process cannot authenticate to it", exactly as `pm lock`
-            // does. A probe connection carries no request.
-            return Err(if crate::socket::connect_at(&paths).is_ok() {
+            // this process cannot authenticate to it". A probe connection
+            // carries no request.
+            Err(if crate::socket::connect_at(paths).is_ok() {
                 format!(
                     "cannot authenticate to the passmgr daemon ({error}); \
                      ask the human to run `pm unlock` again"
                 )
             } else {
                 "the passmgr daemon is not running; ask the human to run `pm unlock`".to_owned()
-            });
+            })
         }
-    };
-    client::request(&paths, &token, request).map_err(|error| {
-        format!("cannot reach the passmgr daemon ({error}); ask the human to run `pm unlock`")
-    })
+    }
 }
 
 /// One `Entry` in the MCP shape, with RFC 3339 timestamps.

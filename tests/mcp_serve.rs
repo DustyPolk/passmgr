@@ -683,3 +683,185 @@ fn describe_is_denied_when_the_grant_lacks_the_list_capability() {
         "{message}"
     );
 }
+
+/// A modern `tools/call` line for any tool.
+fn tool_call_line(id: u64, name: &str, arguments: &Value) -> String {
+    format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\
+         \"name\":\"{name}\",\"arguments\":{arguments},{MODERN_META}}}}}\n"
+    )
+}
+
+/// Start `mcp serve` against a running daemon, answer one line, stop the daemon.
+fn serve_one_call(
+    fixture: &Fixture,
+    daemon: &mut std::process::Child,
+    input: &str,
+) -> std::process::Output {
+    let output = run_with_env(
+        &[
+            "mcp",
+            "serve",
+            "--grant-file",
+            fixture.grant_file.to_str().expect("path"),
+        ],
+        input,
+        &[
+            ("PASSMGR_AGENT", "1"),
+            (
+                "XDG_RUNTIME_DIR",
+                fixture._directory.path().to_str().expect("path"),
+            ),
+        ],
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    output
+}
+
+#[test]
+fn run_with_credentials_injects_redacts_and_reports_the_exit() {
+    let _guard = serial();
+    // A canary unique to this test, so a leak from another fixture is visible.
+    let canary = format!("canary-mcp-run-{}", std::process::id());
+    let fixture = Fixture::with_secret(&canary);
+    let mut daemon = fixture.start();
+    session::store(&RuntimePaths::at(&fixture.runtime), &fixture.token).expect("store session");
+
+    let arguments = json!({
+        "command": [
+            "/bin/sh",
+            "-c",
+            "printf 'out:%s\n' \"$CANARY\"; printf 'err:%s\n' \"$CANARY\" >&2; exit 3"
+        ],
+        "env": {"CANARY": fixture.reference},
+        "cwd": "/",
+        "timeout_secs": 30,
+    });
+    let output = serve_one_call(
+        &fixture,
+        &mut daemon,
+        &tool_call_line(1, "run_with_credentials", &arguments),
+    );
+
+    assert_success(&output);
+    assert_eq!(stderr(&output), "", "{}", stderr(&output));
+    assert!(
+        !stdout(&output).contains(&canary),
+        "stdout leaked the canary"
+    );
+    assert!(
+        !stderr(&output).contains(&canary),
+        "stderr leaked the canary"
+    );
+
+    let answers = lines(&output);
+    assert_eq!(answers.len(), 1);
+    let result = &answers[0]["result"];
+    assert_eq!(result["isError"], false, "{result}");
+    let structured = &result["structuredContent"];
+    assert_eq!(structured["exit_code"], 3);
+    assert_eq!(structured["signal"], Value::Null);
+    assert_eq!(structured["timed_out"], false);
+    assert_eq!(structured["stdout"], "out:[REDACTED]\n");
+    assert_eq!(structured["stderr"], "err:[REDACTED]\n");
+    assert_eq!(structured["stdout_truncated"], false);
+    assert_eq!(structured["stderr_truncated"], false);
+    assert!(
+        structured["redactions"]
+            .as_u64()
+            .is_some_and(|count| count >= 2),
+        "both streams were redacted: {structured}"
+    );
+    assert!(structured["duration_ms"].is_u64(), "{structured}");
+    // A non-zero exit is a normal result, not an error.
+    assert!(result.get("structuredContent").is_some());
+}
+
+#[test]
+fn run_with_credentials_without_a_grant_says_to_call_request_access() {
+    let _guard = serial();
+    // Validation comes first, as it does for the metadata tools, so this is a
+    // well-formed request that only the missing grant stops.
+    let arguments = json!({
+        "command": ["/bin/true"],
+        "env": {"TOKEN": "pm://00112233445566778899aabbccddeeff"},
+        "cwd": "/",
+    });
+    let output = run_with_env(
+        &["mcp", "serve"],
+        &tool_call_line(1, "run_with_credentials", &arguments),
+        &[("PASSMGR_AGENT", "1")],
+    );
+    assert_success(&output);
+    assert_eq!(stderr(&output), "");
+
+    let answers = lines(&output);
+    assert_eq!(answers.len(), 1);
+    let result = &answers[0]["result"];
+    assert_eq!(result["isError"], true);
+    assert_eq!(
+        result["content"][0]["text"],
+        "no active grant; call request_access"
+    );
+}
+
+#[test]
+fn run_with_credentials_is_denied_by_a_grant_without_the_run_capability() {
+    let _guard = serial();
+    let fixture = Fixture::with_capabilities(Capabilities::LIST);
+    let mut daemon = fixture.start();
+    session::store(&RuntimePaths::at(&fixture.runtime), &fixture.token).expect("store session");
+
+    let arguments = json!({
+        "command": ["/bin/true"],
+        "env": {"TOKEN": fixture.reference},
+        "cwd": "/",
+    });
+    let output = serve_one_call(
+        &fixture,
+        &mut daemon,
+        &tool_call_line(1, "run_with_credentials", &arguments),
+    );
+
+    assert_success(&output);
+    assert_eq!(stderr(&output), "", "{}", stderr(&output));
+    let answers = lines(&output);
+    assert_eq!(answers.len(), 1);
+    let result = &answers[0]["result"];
+    assert_eq!(result["isError"], true, "{result}");
+    assert!(
+        result.get("structuredContent").is_none(),
+        "a denied run must not look like a completed one"
+    );
+    let text = result["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("denied"), "{text}");
+}
+
+#[test]
+fn run_with_credentials_refuses_stdin_ref_with_an_actionable_error() {
+    let _guard = serial();
+    let arguments = json!({
+        "command": ["/bin/true"],
+        "env": {"TOKEN": "pm://00112233445566778899aabbccddeeff"},
+        "stdin_ref": "pm://00112233445566778899aabbccddeeff",
+    });
+    let output = run_with_env(
+        &["mcp", "serve"],
+        &tool_call_line(1, "run_with_credentials", &arguments),
+        &[("PASSMGR_AGENT", "1")],
+    );
+    assert_success(&output);
+    assert_eq!(stderr(&output), "");
+
+    let answers = lines(&output);
+    assert_eq!(answers.len(), 1);
+    let result = &answers[0]["result"];
+    assert_eq!(result["isError"], true);
+    let text = result["content"][0]["text"].as_str().expect("text");
+    assert!(text.contains("'stdin_ref' is not available"), "{text}");
+    assert!(
+        text.contains("'env'"),
+        "the error must say what to do: {text}"
+    );
+}

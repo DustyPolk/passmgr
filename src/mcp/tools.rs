@@ -16,6 +16,8 @@
 
 use serde_json::{Value, json};
 
+use crate::protocol::DEFAULT_RUN_TIMEOUT_SECS;
+
 /// The canonical reference form, `pm://` plus 32 lowercase hex characters.
 const REF_PATTERN: &str = "^pm://[0-9a-f]{32}$";
 /// A reference, optionally naming one field of the entry (`pm://<id>/<field>`).
@@ -231,8 +233,8 @@ fn run_with_credentials() -> Value {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 600,
-                    "default": 120,
-                    "description": "Kill the child after this many seconds. Default 120."
+                    "default": DEFAULT_RUN_TIMEOUT_SECS,
+                    "description": "Kill the child after this many seconds. Default 600."
                 },
                 "max_output_bytes": {
                     "type": "integer",

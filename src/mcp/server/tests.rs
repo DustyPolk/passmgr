@@ -268,11 +268,30 @@ fn tools_call_refuses_unknown_tools_and_bad_arguments_without_a_grant() {
     assert_eq!(error(&refused).code, ErrorCode::InvalidParams.code());
     assert!(error(&refused).message.contains("canonical"));
 
+    // `run_with_credentials` answers argument problems with an `isError`
+    // result instead (MCP.md promises a fixable message), still before any
+    // grant is demanded.
     let refused = server
         .handle(Message::request(
             Id::Number(4),
             TOOLS_CALL_METHOD,
             Some(json!({"name": "run_with_credentials", "arguments": {}})),
+        ))
+        .expect("a request");
+    let refused = result(&refused);
+    assert_eq!(refused["isError"], true);
+    assert!(
+        refused["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("requires 'command'")
+    );
+
+    let refused = server
+        .handle(Message::request(
+            Id::Number(5),
+            TOOLS_CALL_METHOD,
+            Some(json!({"name": "request_access", "arguments": {}})),
         ))
         .expect("a request");
     assert_eq!(error(&refused).code, ErrorCode::InvalidParams.code());
@@ -405,6 +424,23 @@ fn a_peer_request_reaches_the_tool_dispatcher() {
         id: Id::String("x".into()),
         method: TOOLS_CALL_METHOD.into(),
         params: Some(json!({"name": "run_with_credentials"})),
+    };
+    // The dispatcher reaches the run tool, which refuses the missing argument
+    // object as an `isError` result before it looks for a grant.
+    let answer = server.handle(Message::Request(request)).expect("a request");
+    let answer = result(&answer);
+    assert_eq!(answer["isError"], true);
+    assert!(
+        answer["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("requires 'command'")
+    );
+
+    let request = Request {
+        id: Id::String("y".into()),
+        method: TOOLS_CALL_METHOD.into(),
+        params: Some(json!({"name": "rotate_credential"})),
     };
     let answer = server.handle(Message::Request(request)).expect("a request");
     assert_eq!(error(&answer).code, ErrorCode::InvalidParams.code());

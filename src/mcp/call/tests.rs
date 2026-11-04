@@ -3,7 +3,8 @@
 use serde_json::json;
 
 use super::*;
-use crate::protocol::ResponseError;
+use crate::client::RunOutcome;
+use crate::protocol::{ResponseError, RunExit, RunFinished, RunFrame};
 
 fn entry() -> Entry {
     Entry {
@@ -335,4 +336,309 @@ fn the_no_grant_message_is_exactly_the_contract_message() {
     assert_eq!(result["isError"], true);
     assert_eq!(result["content"][0]["text"], NO_GRANT);
     assert!(result.get("structuredContent").is_none());
+}
+
+// --- run_with_credentials (TODO 4.5d) -------------------------------------
+
+fn reference() -> String {
+    "pm://00112233445566778899aabbccddeeff".to_owned()
+}
+
+fn run_object(extra: serde_json::Value) -> serde_json::Value {
+    let mut object = json!({
+        "command": ["/bin/echo", "hello"],
+        "env": {"TOKEN": reference()},
+    });
+    let extra = extra.as_object().expect("extra is an object").clone();
+    for (key, value) in extra {
+        object.as_object_mut().expect("object").insert(key, value);
+    }
+    object
+}
+
+fn args(extra: serde_json::Value) -> Result<RunArgs, String> {
+    run_args(Some(&run_object(extra)), Some(std::path::Path::new("/")))
+}
+
+#[test]
+fn run_args_defaults_the_limits_and_the_working_directory() {
+    let defaults = args(json!({})).expect("valid run");
+    assert_eq!(
+        defaults.command,
+        vec!["/bin/echo".to_owned(), "hello".to_owned()]
+    );
+    assert_eq!(defaults.env.len(), 1);
+    assert_eq!(defaults.env[0].name, "TOKEN");
+    assert_eq!(defaults.env[0].reference, reference());
+    assert!(defaults.plain_env.is_empty());
+    assert_eq!(defaults.cwd, "/");
+    assert_eq!(defaults.limits.timeout_secs, 600);
+    assert_eq!(defaults.limits.max_output_bytes, 262_144);
+
+    let explicit = args(json!({"timeout_secs": 5, "max_output_bytes": 1024, "cwd": "/tmp"}))
+        .expect("valid run");
+    assert_eq!(explicit.limits.timeout_secs, 5);
+    assert_eq!(explicit.limits.max_output_bytes, 1024);
+    assert_eq!(explicit.cwd, "/tmp");
+}
+
+#[test]
+fn run_args_requires_a_command_and_a_secret_binding() {
+    assert!(
+        run_args(None, Some(std::path::Path::new("/")))
+            .expect_err("no arguments")
+            .contains("requires 'command'")
+    );
+    let without_env = json!({"command": ["/bin/echo"]});
+    assert!(
+        run_args(Some(&without_env), Some(std::path::Path::new("/")))
+            .expect_err("no env")
+            .contains("at least one credential reference")
+    );
+    // A run without a usable working directory has no absolute cwd to send.
+    let object = run_object(json!({}));
+    assert!(
+        run_args(Some(&object), None)
+            .expect_err("no cwd")
+            .contains("pass an absolute 'cwd'")
+    );
+}
+
+#[test]
+fn run_args_rejects_unknown_members_and_bad_argv() {
+    for (extra, needle) in [
+        (
+            json!({"shell": "/bin/sh"}),
+            "unknown run_with_credentials argument 'shell'",
+        ),
+        (json!({"command": "echo"}), "must be an array"),
+        (json!({"command": []}), "at least one program"),
+        (json!({"command": [""]}), "command[0]' must not be empty"),
+        (json!({"command": [3]}), "command[0]' must be a string"),
+        (
+            json!({"command": ["/bin/echo", "a\0b"]}),
+            "must not contain a NUL byte",
+        ),
+        (
+            json!({"command": ["/bin/echo", "x".repeat(4097)]}),
+            "command[1]' exceeds 4096 bytes",
+        ),
+    ] {
+        let message = args(extra).expect_err("rejected");
+        assert!(message.contains(needle), "unexpected message: {message}");
+    }
+}
+
+#[test]
+fn run_args_refuses_the_unimplemented_injections() {
+    let stdin = args(json!({"stdin_ref": reference()})).expect_err("stdin_ref");
+    assert!(stdin.contains("'stdin_ref' is not available"), "{stdin}");
+    assert!(stdin.contains("'env'"), "{stdin}");
+
+    let files = args(json!({"files": {"CONFIG": reference()}})).expect_err("files");
+    assert!(files.contains("'files' is not available"), "{files}");
+    assert!(files.contains("'env'"), "{files}");
+
+    // An absent member, `null` and `{}` all mean "no files".
+    for extra in [json!({}), json!({"files": null}), json!({"files": {}})] {
+        assert!(args(extra).is_ok());
+    }
+}
+
+#[test]
+fn run_args_validates_env_and_plain_env_without_echoing_values() {
+    let canary = "canary-run-literal-7f2c";
+    let literal = args(json!({"env": {"TOKEN": canary}})).expect_err("literal secret");
+    assert!(literal.contains("'env.TOKEN'"), "{literal}");
+    assert!(
+        !literal.contains(canary),
+        "the literal was echoed: {literal}"
+    );
+
+    let name = args(json!({"env": {"lower": reference()}})).expect_err("bad name");
+    assert!(
+        name.contains("not a valid environment variable name"),
+        "{name}"
+    );
+    assert!(
+        name.contains("\"lower\"") || name.contains("lower"),
+        "{name}"
+    );
+
+    let upper = args(json!({"env": {"TOKEN": "pm://00112233445566778899AABBCCDDEEFF"}}))
+        .expect_err("non-canonical reference");
+    assert!(
+        upper.contains("canonical pm:// references from list_credentials"),
+        "{upper}"
+    );
+
+    let duplicate = args(json!({"plain_env": {"TOKEN": "x"}})).expect_err("duplicate");
+    assert!(duplicate.contains("more than once"), "{duplicate}");
+
+    let too_many: serde_json::Map<String, serde_json::Value> = (0..33)
+        .map(|index| (format!("NAME_{index}"), json!(reference())))
+        .collect();
+    let many = args(json!({"env": too_many})).expect_err("too many");
+    assert!(many.contains("at most 32"), "{many}");
+
+    let plain = args(json!({"plain_env": {"CI": "1"}})).expect("plain env");
+    assert_eq!(plain.plain_env, vec![("CI".to_owned(), "1".to_owned())]);
+    // A field path is a form the schema mentions, but the daemon's parser
+    // rejects it everywhere (`describe_ref` does too), so the boundary does
+    // the same rather than sending something `pmd` would refuse.
+    let field = args(json!({"env": {"TOKEN": format!("{}/password", reference())}}))
+        .expect_err("field path");
+    assert!(field.contains("canonical pm:// references"), "{field}");
+}
+
+#[test]
+fn run_args_bounds_the_working_directory_and_the_limits() {
+    for (extra, needle) in [
+        (json!({"cwd": "relative"}), "must be an absolute path"),
+        (json!({"cwd": ""}), "must not be empty"),
+        (json!({"cwd": "/a\0b"}), "must not contain a NUL byte"),
+        (json!({"timeout_secs": 0}), "between 1 and 600"),
+        (json!({"timeout_secs": 601}), "between 1 and 600"),
+        (json!({"timeout_secs": 1.5}), "must be an integer"),
+        (json!({"timeout_secs": "60"}), "must be an integer"),
+        (json!({"max_output_bytes": 0}), "between 1 and 1048576"),
+        (
+            json!({"max_output_bytes": 1_048_577}),
+            "between 1 and 1048576",
+        ),
+    ] {
+        let message = args(extra).expect_err("rejected");
+        assert!(message.contains(needle), "unexpected message: {message}");
+    }
+}
+
+#[test]
+fn resolve_command_makes_the_program_absolute() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().expect("temp dir");
+    let program = directory.path().join("fixture-run");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").expect("write");
+    let mut permissions = std::fs::metadata(&program).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&program, permissions).expect("chmod");
+
+    let run = args(json!({"command": ["fixture-run", "--flag"]})).expect("valid run");
+    let resolved = resolve_command(run, directory.path().as_os_str()).expect("resolved");
+    assert_eq!(resolved.command[0], program.to_str().expect("utf-8 path"));
+    assert_eq!(resolved.command[1], "--flag");
+
+    let missing = args(json!({"command": ["canary-missing-program-5b1d"]})).expect("valid run");
+    let message = resolve_command(missing, directory.path().as_os_str()).expect_err("missing");
+    assert_eq!(
+        message,
+        "the program in 'command[0]' was not found: use an absolute path or a name on PATH"
+    );
+    assert!(!message.contains("canary-missing-program-5b1d"));
+}
+
+#[test]
+fn run_output_maps_the_exit_signal_and_daemon_statistics() {
+    let mut sink = RunSink::new(1024);
+    sink.push(&RunFrame::Stdout(b"out\n".to_vec()));
+    sink.push(&RunFrame::Stderr(b"err\n".to_vec()));
+
+    let finished = RunFinished {
+        exit: RunExit::Code(3),
+        timed_out: false,
+        stdout_truncated: true,
+        stderr_truncated: false,
+        redactions: 2,
+        duration_ms: 987,
+    };
+    let result = run_output(&finished, &sink);
+    assert_eq!(result["isError"], false);
+    let structured = &result["structuredContent"];
+    assert_eq!(structured["exit_code"], 3);
+    assert_eq!(structured["signal"], serde_json::Value::Null);
+    assert_eq!(structured["timed_out"], false);
+    assert_eq!(structured["stdout"], "out\n");
+    assert_eq!(structured["stderr"], "err\n");
+    assert_eq!(structured["stdout_truncated"], true);
+    assert_eq!(structured["stderr_truncated"], false);
+    assert_eq!(structured["redactions"], 2);
+    assert_eq!(structured["duration_ms"], 987);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("truncated")
+    );
+
+    let signalled = RunFinished {
+        exit: RunExit::Signal(9),
+        timed_out: true,
+        ..finished
+    };
+    let result = run_output(&signalled, &sink);
+    assert_eq!(
+        result["structuredContent"]["exit_code"],
+        serde_json::Value::Null
+    );
+    assert_eq!(result["structuredContent"]["signal"], "SIGKILL");
+    assert_eq!(result["structuredContent"]["timed_out"], true);
+    assert!(
+        result["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("timed out")
+    );
+}
+
+#[test]
+fn run_output_replaces_bytes_that_are_not_utf8() {
+    let mut sink = RunSink::new(16);
+    sink.push(&RunFrame::Stdout(vec![0x66, 0xff, 0x6f]));
+    let result = run_output(&RunFinished::exited(RunExit::Code(0)), &sink);
+    let stdout = result["structuredContent"]["stdout"]
+        .as_str()
+        .expect("string");
+    assert!(stdout.starts_with('f'), "{stdout:?}");
+    assert!(stdout.ends_with('o'), "{stdout:?}");
+}
+
+#[test]
+fn run_sink_caps_each_stream_and_ignores_terminal_frames() {
+    let mut sink = RunSink::new(4);
+    sink.push(&RunFrame::Stdout(b"hello world".to_vec()));
+    sink.push(&RunFrame::Stdout(b"more".to_vec()));
+    sink.push(&RunFrame::Stderr(b"error".to_vec()));
+    sink.push(&RunFrame::Exit(RunFinished::exited(RunExit::Code(0))));
+    assert_eq!(sink.stdout(), b"hell");
+    assert_eq!(sink.stderr(), b"erro");
+}
+
+#[test]
+fn a_refused_run_is_an_error_result_with_the_daemon_message() {
+    let sink = RunSink::new(16);
+    let refused = run_response(RunOutcome::Refused(ResponseError::Denied), &sink);
+    assert_eq!(refused["isError"], true);
+    assert!(refused.get("structuredContent").is_none());
+    let text = refused["content"][0]["text"].as_str().expect("text");
+    assert_eq!(text, daemon_error(ResponseError::Denied));
+}
+
+#[test]
+fn signal_names_are_conventional_and_fall_back_to_the_number() {
+    assert_eq!(super::run::signal_name(9), "SIGKILL");
+    assert_eq!(super::run::signal_name(15), "SIGTERM");
+    assert_eq!(super::run::signal_name(77), "SIG77");
+}
+
+#[test]
+fn run_args_debug_names_variables_but_not_plain_env_values() {
+    let canary = "canary-debug-plain-env-1c9e";
+    let args = args(json!({"plain_env": {"CI_TOKEN": canary}})).expect("valid run");
+    let debug = format!("{args:?}");
+    assert!(debug.contains("CI_TOKEN"), "{debug}");
+    assert!(
+        !debug.contains(canary),
+        "the plain_env value was printed: {debug}"
+    );
+    assert!(debug.contains("RunArgs"), "{debug}");
 }

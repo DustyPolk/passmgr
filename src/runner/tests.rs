@@ -831,3 +831,49 @@ fn reaching_the_cap_keeps_draining_the_pipe() {
         started.elapsed()
     );
 }
+
+#[test]
+fn the_redaction_count_and_duration_are_reported() {
+    // A unique canary: the count proves redaction ran, and the bytes prove the
+    // value itself never left the reader. Every match on both streams counts.
+    let canary = "canary-8f3c2a9d-redaction-count";
+    let (frames, result) = collect(
+        &[
+            "/bin/sh",
+            "-c",
+            "printf '%s\\n' \"$PM_CANARY\"; printf '%s\\n' \"$PM_CANARY\" >&2",
+        ],
+        "PM_CANARY",
+        canary,
+    );
+    let finished = result.expect("run");
+    assert_eq!(finished.exit, RunExit::Code(0));
+    assert_eq!(finished.redactions, 2, "one match per stream");
+    assert!(
+        finished.duration_ms < 60_000,
+        "a short run must not report a wild duration: {}",
+        finished.duration_ms
+    );
+    assert_eq!(stdout_bytes(&frames), b"[REDACTED]\n");
+    assert_eq!(stderr_bytes(&frames), b"[REDACTED]\n");
+    for frame in &frames {
+        if let RunFrame::Stdout(data) | RunFrame::Stderr(data) = frame {
+            assert!(
+                !data.windows(canary.len()).any(|w| w == canary.as_bytes()),
+                "the canary reached a frame"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_run_without_a_match_reports_no_redactions() {
+    let (frames, result) = collect(
+        &["/bin/sh", "-c", "printf hello"],
+        "PM_TEST",
+        "unused-canary",
+    );
+    let finished = result.expect("run");
+    assert_eq!(finished.redactions, 0);
+    assert_eq!(stdout_bytes(&frames), b"hello");
+}

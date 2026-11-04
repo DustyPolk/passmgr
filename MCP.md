@@ -141,7 +141,20 @@ Implementation notes (`src/mcp/server.rs`, `src/mcp/tools.rs`, `src/mcp/call.rs`
   are refused before the daemon sees them), and its `structuredContent` is the
   `Entry` object itself. A daemon `not_found` is rendered as "not found or not
   granted", the same text for a missing reference and one outside the grant.
-  Errors never echo a supplied reference. `ping` answers `{}`.
+  Errors never echo a supplied reference.
+- `run_with_credentials` (4.5d) validates the whole argument object, resolves
+  `command[0]` to an absolute path through the agent's `PATH` and `cwd`, runs
+  the request through `pmd` and maps the terminal frame to `structuredContent`.
+  Its own argument errors are `isError` results, not `-32602` (the schema
+  promises a fixable message and the host renders `isError` text), and
+  validation happens before the grant check, exactly as for the metadata
+  tools. It refuses `stdin_ref` and a non-empty `files` with an actionable
+  message until 5.1/5.2 land, rather than running the command without the
+  injection the caller asked for. The server never holds a secret: it only
+  collects the daemon's already-redacted, already-capped frames, and a
+  local sink re-applies the request's cap in case an older daemon ignored it.
+  `redactions` and `duration_ms` come from the daemon; the server cannot
+  invent them. `ping` answers `{}`.
 - The loop does not write to stderr today. A future diagnostic must never
   include a secret, a token, a reference the caller did not supply, or
   agent-supplied text without escaping.
@@ -228,7 +241,8 @@ Rules, enforced by the **daemon** (the MCP server is untrusted plumbing):
 - Every injected secret is redacted from stdout and stderr as an **exact,
   contiguous byte sequence**. Redaction is streaming, with an overlap window
   so a secret split across reads is still caught. Replace each match with
-  `[REDACTED:<VAR>]`.
+  `[REDACTED]` (one redactor serves the whole value set, so the marker never
+  names which variable matched).
 - Encoded or transformed copies (lower/upper hex, standard and URL-safe
   base64, percent-encoding, case changes) are **not redacted yet**; TODO 4.6
   adds them. Until then an allowlisted encoder can exfiltrate a value, which
@@ -247,8 +261,17 @@ Rules, enforced by the **daemon** (the MCP server is untrusted plumbing):
 - `max_output_bytes` caps each relayed stream **after** redaction, so a cut
   can never expose half a secret. Past the cap the daemon keeps draining the
   pipe (the child cannot block on a full pipe) but relays nothing more, and
-  the terminal frame sets `stdout_truncated`/`stderr_truncated`. A frame from
-  an older daemon omits the flags; they then read as false.
+  the terminal frame sets `stdout_truncated`/`stderr_truncated`.
+- The terminal frame also carries `redactions` (how many injected values the
+  daemon replaced, both streams together) and `duration_ms` (the child's wall
+  clock, measured by the daemon). Both are counts; neither can be a value. A
+  frame from an older daemon omits any of the four fields, and the client then
+  reads false/0, so a version skew never fabricates a statistic.
+
+Implementation status (4.5d): `env` and `plain_env` injection work end to
+end. `stdin_ref` and a non-empty `files` are refused with an `isError` message
+that points at `env` until 5.1/5.2 implement them, and at least one `env`
+binding is required because the daemon refuses a run without a secret.
 
 ### `access_status`  (readOnlyHint, idempotentHint)
 Output: `{ daemon: "unlocked"|"locked"|"not_running", grant: GrantView|null,

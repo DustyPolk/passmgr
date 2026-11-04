@@ -62,7 +62,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -354,10 +354,17 @@ where
 
     let mut child = command.spawn().map_err(RunError::Spawn)?;
     drop(command);
+    // The clock starts at the spawn: `duration_ms` is the time the child and
+    // its group were alive, not the time the caller spent building the
+    // request.
+    let started = Instant::now();
     let pgid = child.id() as libc::pid_t;
     let deadline = limits.timeout.map(|timeout| Instant::now() + timeout);
     let stdout_truncated = Arc::new(AtomicBool::new(false));
     let stderr_truncated = Arc::new(AtomicBool::new(false));
+    // One counter for both streams: `redactions` is about the run, not about
+    // which pipe a match happened to arrive on.
+    let redactions = Arc::new(AtomicU64::new(0));
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
@@ -371,6 +378,7 @@ where
     ] {
         let redactor = Redactor::new_many(&redact_values);
         let reader_stop = Arc::clone(&readers_stop);
+        let redaction_count = Arc::clone(&redactions);
         let truncated = if is_stderr {
             Arc::clone(&stderr_truncated)
         } else {
@@ -384,6 +392,7 @@ where
             reader_stop,
             limits.max_output_bytes,
             truncated,
+            redaction_count,
         ) {
             Ok(handle) => readers.push(handle),
             Err(err) => {
@@ -425,13 +434,21 @@ where
                                 timed_out: false,
                                 stdout_truncated: stdout_truncated.load(Ordering::SeqCst),
                                 stderr_truncated: stderr_truncated.load(Ordering::SeqCst),
+                                redactions: redactions.load(Ordering::SeqCst),
+                                duration_ms: elapsed_ms(started),
                             })
                             .map_err(RunError::Output);
                     }
                     Ok(false) => {
                         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                             let status = abort(&mut child, receiver, readers, &readers_stop);
-                            return timed_out(status, &stdout_truncated, &stderr_truncated);
+                            return timed_out(
+                                status,
+                                &stdout_truncated,
+                                &stderr_truncated,
+                                &redactions,
+                                started,
+                            );
                         }
                         if stop.requested() {
                             abort(&mut child, receiver, readers, &readers_stop);
@@ -456,9 +473,21 @@ where
         }
         Relay::TimedOut => {
             let status = abort(&mut child, receiver, readers, &readers_stop);
-            timed_out(status, &stdout_truncated, &stderr_truncated)
+            timed_out(
+                status,
+                &stdout_truncated,
+                &stderr_truncated,
+                &redactions,
+                started,
+            )
         }
     }
+}
+
+/// Milliseconds since `started`, saturating instead of wrapping on the
+/// (unreachable) 584-million-year run.
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Turn "the deadline killed the group" into a finished run.
@@ -471,6 +500,8 @@ fn timed_out(
     status: Option<ExitStatus>,
     stdout_truncated: &AtomicBool,
     stderr_truncated: &AtomicBool,
+    redactions: &AtomicU64,
+    started: Instant,
 ) -> Result<RunFinished, RunError> {
     let status = status.ok_or_else(|| RunError::Output(io::Error::other("the child was lost")))?;
     Ok(RunFinished {
@@ -478,6 +509,8 @@ fn timed_out(
         timed_out: true,
         stdout_truncated: stdout_truncated.load(Ordering::SeqCst),
         stderr_truncated: stderr_truncated.load(Ordering::SeqCst),
+        redactions: redactions.load(Ordering::SeqCst),
+        duration_ms: elapsed_ms(started),
     })
 }
 
@@ -651,6 +684,7 @@ fn spawn_reader(
     stop: Arc<AtomicBool>,
     cap: Option<usize>,
     truncated: Arc<AtomicBool>,
+    redactions: Arc<AtomicU64>,
 ) -> io::Result<JoinHandle<()>> {
     let fd = reader.as_raw_fd();
     std::thread::Builder::new()
@@ -662,6 +696,9 @@ fn spawn_reader(
         .spawn(move || {
             let mut buffer = [0u8; READ_CHUNK];
             let mut remaining = cap;
+            // Add only the delta: `Redactor::redactions` is cumulative for
+            // this stream, and both readers share one counter.
+            let mut counted = 0u64;
             loop {
                 if !wait_readable(fd, &stop) {
                     // The run is being aborted: the client is gone or the
@@ -672,6 +709,11 @@ fn spawn_reader(
                     Ok(0) => break,
                     Ok(read) => {
                         let output = redactor.push(&buffer[..read]);
+                        let total = redactor.redactions();
+                        if total > counted {
+                            redactions.fetch_add(total - counted, Ordering::SeqCst);
+                            counted = total;
+                        }
                         // The raw child output may contain the value; do not
                         // leave it in this thread's stack while the relay runs.
                         buffer[..read].zeroize();
@@ -684,6 +726,10 @@ fn spawn_reader(
                 }
             }
             let tail = redactor.finish();
+            let total = redactor.redactions();
+            if total > counted {
+                redactions.fetch_add(total - counted, Ordering::SeqCst);
+            }
             let _ = emit_chunks(&sender, tail, is_stderr, &mut remaining, &truncated);
             let _ = sender.send(Message::Done);
         })
