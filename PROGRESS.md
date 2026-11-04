@@ -1,3 +1,30 @@
+## 2026-11-04 — Measure grant growth headroom from the codec (TODO R.61)
+
+- `src/store/payload.rs`: deleted the public `GRANT_GROWTH_BYTES` (production
+  never read it; only the test and the `src/store.rs` re-export did) and its
+  re-export. The private `grant_growth_bytes` is now `pub(super)` and stays the
+  single accounting `encode` subtracts from the encoded size. No behavior
+  change: `content` and `MAX_PAYLOAD_BYTES` are unchanged.
+- `src/store/tests.rs`: rewrote `grant_growth_headroom_covers_the_whole_grant_cap`
+  to measure the growth instead of restating a constant. The fixture sets
+  every optional field (max_uses, a listed field scope, two tags, two refs,
+  two commands), then encodes the one-grant payload before `mark_used`, after
+  it and after `revoke`; the delta is the measured growth. Asserts:
+  `measured == grant_growth_bytes(&grant)` (encoder drift fails),
+  the attributed content size is identical before and after the transitions,
+  and `measured * MAX_GRANTS <= MAX_PLAINTEXT_GROWTH_BYTES`.
+- Mutation-checked: removing the `last_used` term from `grant_growth_bytes`
+  fails it (16 vs 8). The exact-cap daemon test
+  (`a_revocation_fits_a_vault_written_at_the_payload_cap`) still covers the
+  end-to-end save.
+- `DECISIONS.md`: the payload-limit bullet now names the private helper and the
+  measured test instead of a public constant.
+- Gate: fmt, clippy, full `cargo test` green; `cargo audit` skipped.
+- **Next iteration must know:** Phase R is now empty of `- [ ]` items; the next
+  unchecked item is **3.7** (`pm run` for humans — local path without a
+  grant). This matters for the test suite: `tests/run.rs` is near the 1,000
+  line limit, so split before adding e2e coverage there.
+
 ## 2026-11-04 — Never let a failed request write look like success (TODO R.60)
 
 - `src/client.rs`: the new private `send_request` is the only request-frame

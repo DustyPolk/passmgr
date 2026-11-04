@@ -29,15 +29,14 @@ fn contents_too_large() -> Error {
     Error::InvalidInput("vault contents are too large".into())
 }
 
-/// Bytes a stored grant can gain **after** it is created: `revoked_at` and
-/// `last_used` each add 8 bytes, and `max_uses` is fixed at creation. The
+/// Bytes this stored grant has gained **after** it was created: `revoked_at`
+/// and `last_used` each add 8 bytes, and `max_uses` is fixed at creation. The
 /// vault content cap deliberately excludes this growth, and
-/// [`crate::crypto::MAX_PLAINTEXT_GROWTH_BYTES`] reserves
-/// `GRANT_GROWTH_BYTES * MAX_GRANTS` for it, so a vault accepted at the cap
-/// can always save a revocation or a recorded use (TODO R.46).
-pub const GRANT_GROWTH_BYTES: usize = 16;
-
-fn grant_growth_bytes(grant: &Grant) -> usize {
+/// [`crate::crypto::MAX_PLAINTEXT_GROWTH_BYTES`] reserves 16 bytes per grant
+/// for it, so a vault accepted at the cap can always save a revocation or a
+/// recorded use (TODO R.46). The reserve is measured against the encoder in
+/// `grant_growth_headroom_covers_the_whole_grant_cap` (TODO R.61).
+pub(super) fn grant_growth_bytes(grant: &Grant) -> usize {
     let mut growth = 0;
     if grant.revoked_at_unix().is_some() {
         growth += 8;

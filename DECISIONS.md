@@ -148,6 +148,12 @@ code does not implement yet.
   therefore always save a revocation or a recorded use (TODO R.46). Chosen
   over refusing grant growth at the cap because the kill switch must not fail
   on a full vault. Readers accept 16 KiB more plaintext than writers produce.
+  The per-grant growth lives only in the private
+  `store::payload::grant_growth_bytes`; there is no separate public constant.
+  The test measures the same number from the encoder (encoded payload before
+  and after `mark_used` + `revoke`) and requires it to equal the accounting,
+  so an encoder change that the cap does not know about fails a test rather
+  than silently making a full vault unrevocable (TODO R.61).
 - Saves are atomic: temp file in the vault's directory, fsync, rename, and a
   best-effort directory fsync. The vault is mode 0600.
 - Writers serialize on an exclusive `flock` over the sidecar `<vault>.lock`

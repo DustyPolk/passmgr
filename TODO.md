@@ -1433,7 +1433,7 @@ Rules that apply to every item:
       use an accept-then-close stub and require exit 1 naming the daemon. All
       fail with the old `?` (exit 0 vs 1).
 
-- [ ] **R.61 R.46's headroom test asserts a property of two constants, not of
+- [x] **R.61 R.46's headroom test asserts a property of two constants, not of
       the encoder, so the change it exists to catch cannot fail it.**
       `src/store/tests.rs:804-812` asserts `GRANT_GROWTH_BYTES == 16` and
       `16 * MAX_GRANTS <= MAX_PLAINTEXT_GROWTH_BYTES`. `GRANT_GROWTH_BYTES`
@@ -1458,6 +1458,17 @@ Rules that apply to every item:
       Test: `MAX_GRANTS * measured_growth <= MAX_PLAINTEXT_GROWTH_BYTES` with
       `measured_growth` taken from the codec, using a grant with every optional
       field set so a future field cannot be forgotten.
+      Done: deleted the unused `GRANT_GROWTH_BYTES` (and its re-export);
+      `grant_growth_bytes` is now `pub(super)` and remains the one accounting
+      `encode` uses. The rewritten test builds a grant with every optional
+      field (max_uses, listed field scope, tags, two refs, two commands),
+      encodes the payload before `mark_used`, after it, and after `revoke`, and
+      uses the byte delta as the growth. It then asserts the delta equals
+      `grant_growth_bytes` (so encoder drift fails), that the attributed
+      content size is unchanged by the transitions, and that
+      `measured_growth * MAX_GRANTS <= MAX_PLAINTEXT_GROWTH_BYTES`.
+      Mutation-checked: dropping the `last_used` term from the accounting makes
+      it fail (16 vs 8).
 
 ## Phase 3 — grants and audit log
 

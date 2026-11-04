@@ -887,16 +887,70 @@ fn rejects_oversized_field_length() {
     ));
 }
 
-/// TODO R.46: a stored grant grows by 16 bytes after creation (`revoked_at`
-/// and `last_used`). The container's plaintext headroom must cover that for
-/// every grant the payload can hold, or a vault written at the content cap
-/// could never record a revocation or a use (the kill switch would fail).
+/// TODO R.46/R.61: a stored grant grows after it is created — `revoked_at`
+/// and `last_used` each add 8 bytes, and `max_uses` is fixed at creation. The
+/// container's plaintext headroom must cover that growth for every grant the
+/// payload can hold, or a vault written at the content cap could never record
+/// a revocation or a use (the kill switch would fail).
+///
+/// The growth is measured from the codec — the encoded payload before and
+/// after the two post-creation transitions — instead of restating a constant,
+/// and the fixture sets every optional field so the measured record is the
+/// largest one the format allows. The measurement is tied to the accounting
+/// `encode` uses: bytes the encoder adds on a transition must be exactly the
+/// bytes the content cap excludes.
 #[test]
 fn grant_growth_headroom_covers_the_whole_grant_cap() {
-    // Evaluated at compile time: a change to either bound fails the build
-    // instead of silently making a vault written at the cap unrevocable.
-    const {
-        assert!(GRANT_GROWTH_BYTES == 16); // revoked_at + last_used, 8 each
-        assert!(GRANT_GROWTH_BYTES * MAX_GRANTS <= crate::crypto::MAX_PLAINTEXT_GROWTH_BYTES);
-    }
+    let mut grant = Grant::create(
+        GrantSpec {
+            label: "every optional field".to_owned(),
+            scope: Scope::new(
+                vec![EntryId::generate().unwrap(), EntryId::generate().unwrap()],
+                vec!["git".to_owned(), "prod".to_owned()],
+                Some(vec!["password".to_owned(), "username".to_owned()]),
+            )
+            .unwrap(),
+            commands: vec![
+                std::path::PathBuf::from("/usr/bin/git"),
+                std::path::PathBuf::from("/usr/bin/gh"),
+            ],
+            capabilities: Capabilities::LIST.union(Capabilities::RUN),
+            expires_at: 1_700_003_600,
+            max_uses: Some(2),
+        },
+        TokenHash::of(b"canary-growth-token"),
+        1_700_000_000,
+    )
+    .unwrap();
+
+    let encoded_len = |grant: &Grant| encode(&[], std::slice::from_ref(grant)).unwrap().len();
+
+    let created = encoded_len(&grant);
+    grant.mark_used(1_700_000_100).unwrap();
+    let used = encoded_len(&grant);
+    grant.revoke(1_700_000_200).unwrap();
+    let revoked_and_used = encoded_len(&grant);
+
+    assert!(used > created, "mark_used must add its field to the record");
+    assert!(
+        revoked_and_used > used,
+        "revoke must add its field to the record"
+    );
+    let measured_growth = revoked_and_used - created;
+
+    // The bytes the encoder really adds are exactly the bytes `encode`
+    // attributes to post-creation growth, so the content size a save reports
+    // does not move when a grant is used or revoked.
+    assert_eq!(measured_growth, super::payload::grant_growth_bytes(&grant));
+    assert_eq!(
+        revoked_and_used - measured_growth,
+        created,
+        "a post-creation transition must not grow the content size"
+    );
+
+    // The container reserves this much for every grant the payload can hold.
+    assert!(
+        measured_growth * MAX_GRANTS <= crate::crypto::MAX_PLAINTEXT_GROWTH_BYTES,
+        "MAX_PLAINTEXT_GROWTH_BYTES must cover {measured_growth} bytes x {MAX_GRANTS} grants"
+    );
 }
