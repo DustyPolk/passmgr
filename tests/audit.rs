@@ -106,8 +106,11 @@ fn a_denied_run_is_recorded_without_a_grant_or_any_token() {
     let mut daemon = fixture.start();
     let forged = GrantToken::generate().expect("forged token");
     let request = Request::Run(RunRequest {
-        env: "TOKEN".into(),
-        reference: fixture.reference.clone(),
+        env: vec![passmgr::protocol::EnvBinding {
+            name: "TOKEN".into(),
+            reference: fixture.reference.clone(),
+        }],
+        plain_env: Vec::new(),
         command: vec!["/bin/true".into()],
         cwd: "/".into(),
         grant: forged.clone(),

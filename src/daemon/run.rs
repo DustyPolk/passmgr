@@ -5,6 +5,7 @@
 //! and the program path are all re-checked, and the grant is looked up in the
 //! vault that the daemon opens itself.
 
+use std::collections::HashSet;
 use std::io::{self, Read, Write};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -99,11 +100,17 @@ pub(super) fn serve_run(
         );
         return;
     }
-    // Metadata only: the reference and argv the client sent, the grant that
-    // authorized (if any) and how the run ended. No secret or token is in
+    // Metadata only: the first reference and argv the client sent, the grant
+    // that authorized (if any) and how the run ended. No secret or token is in
     // scope here, and `Event` has no field that could carry one. The result is
     // returned, not swallowed: a run that reports success must have a record
-    // on disk (TODO R.68).
+    // on disk (TODO R.68). A multi-binding run has one record and names its
+    // first binding; `run_with_credentials` (TODO 4.5d) is still one call, but
+    // a follow-up should carry every reference.
+    let first_reference = request
+        .env
+        .first()
+        .map(|binding| binding.reference.as_str());
     let record = |outcome: audit::Outcome,
                   grant: Option<GrantId>,
                   command: Option<&str>,
@@ -113,7 +120,7 @@ pub(super) fn serve_run(
             source: audit::Source::Daemon,
             outcome,
             grant,
-            reference: Some(request.reference.as_str()),
+            reference: first_reference,
             command,
             args: request.command.get(1..).unwrap_or(&[]),
             termination,
@@ -128,22 +135,36 @@ pub(super) fn serve_run(
         }
     };
     // The protocol guarantees these, but the daemon must not rely on a
-    // client-side check for a security decision.
-    let Ok(id) = EntryId::parse_ref(&request.reference) else {
-        warn(record(
-            audit::Outcome::BadRequest,
-            None,
-            request.command.first().map(String::as_str),
-            None,
-        ));
-        let _ = write_client_frame(
-            &mut stream,
-            &RunFrame::Error(ResponseError::BadRequest),
-            &stop,
-        );
-        return;
-    };
-    if runner::denied_env_name(&request.env) {
+    // client-side check for a security decision. Parse every reference, and
+    // refuse duplicate or loader/shell-hook names across both maps.
+    let mut ids = Vec::with_capacity(request.env.len());
+    let mut names = HashSet::with_capacity(request.env.len() + request.plain_env.len());
+    let mut bad_env = request.env.is_empty();
+    for binding in &request.env {
+        let Ok(id) = EntryId::parse_ref(&binding.reference) else {
+            bad_env = true;
+            break;
+        };
+        ids.push(id);
+        if !protocol::valid_env_name(&binding.name)
+            || runner::denied_env_name(&binding.name)
+            || !names.insert(binding.name.as_str())
+        {
+            bad_env = true;
+            break;
+        }
+    }
+    for (name, value) in &request.plain_env {
+        if !protocol::valid_env_name(name)
+            || runner::denied_env_name(name)
+            || value.contains('\0')
+            || !names.insert(name.as_str())
+        {
+            bad_env = true;
+            break;
+        }
+    }
+    if bad_env {
         warn(record(
             audit::Outcome::BadRequest,
             None,
@@ -183,7 +204,8 @@ pub(super) fn serve_run(
         return;
     };
     let program_text = program.to_string_lossy();
-    let (grant_id, secret) = match record_use(vault_path, key, watermarks, request, id, &program) {
+    let (grant_id, secrets) = match record_use(vault_path, key, watermarks, request, &ids, &program)
+    {
         Ok(value) => value,
         Err(RecordError::Denied) => {
             warn(record(
@@ -237,11 +259,17 @@ pub(super) fn serve_run(
         ));
         return;
     }
+    let secret_env: Vec<(String, Zeroizing<String>)> = request
+        .env
+        .iter()
+        .map(|binding| binding.name.clone())
+        .zip(secrets)
+        .collect();
     let result = runner::execute(
         &program,
         &request.command[1..],
-        &request.env,
-        secret.as_str(),
+        &secret_env,
+        &request.plain_env,
         Path::new(&request.cwd),
         &inherited,
         &stop,
@@ -404,8 +432,8 @@ fn client_closed(fd: RawFd) -> bool {
     poll_fd.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
 }
 
-/// Authorize the grant, record the use in the vault, then return the one
-/// secret value to inject.
+/// Authorize the grant, record the use in the vault, then return one secret
+/// value per requested reference.
 ///
 /// The use is written before the secret is copied and before the child can
 /// start, so a crash or a bug cannot let a use-limited grant exceed its limit.
@@ -433,12 +461,18 @@ fn record_use(
     key: &LockedKey,
     watermarks: &GrantWatermarks,
     request: &protocol::RunRequest,
-    id: EntryId,
+    ids: &[EntryId],
     program: &Path,
-) -> Result<(GrantId, Zeroizing<String>), RecordError> {
-    record_use_with_save(vault_path, key, watermarks, request, id, program, |vault| {
-        vault.save_with_key(key.as_slice())
-    })
+) -> Result<(GrantId, Vec<Zeroizing<String>>), RecordError> {
+    record_use_with_save(
+        vault_path,
+        key,
+        watermarks,
+        request,
+        ids,
+        program,
+        |vault| vault.save_with_key(key.as_slice()),
+    )
 }
 
 /// [`record_use`] with the vault write supplied by the caller, so a test can
@@ -448,10 +482,10 @@ fn record_use_with_save<F>(
     key: &LockedKey,
     watermarks: &GrantWatermarks,
     request: &protocol::RunRequest,
-    id: EntryId,
+    ids: &[EntryId],
     program: &Path,
     mut save: F,
-) -> Result<(GrantId, Zeroizing<String>), RecordError>
+) -> Result<(GrantId, Vec<Zeroizing<String>>), RecordError>
 where
     F: FnMut(&Vault) -> crate::Result<()>,
 {
@@ -482,18 +516,23 @@ where
     if grant.check_grant_for_run(program, now).is_err() {
         return Err(RecordError::Denied);
     }
-    let Some(credential) = vault.get_by_ref(id) else {
-        return Err(RecordError::NotFound);
-    };
-    let tags = credential.tags().to_vec();
-    let target = Target::new(credential.id(), &tags);
-    match grant.authorizes(&AccessRequest::run(target, None, program), now) {
-        Ok(()) => {}
-        // An existing reference outside the scope answers exactly like a
-        // nonexistent one, or the daemon becomes an existence oracle for
-        // every in-vault reference (DECISIONS.md).
-        Err(Denied::OutOfScope) => return Err(RecordError::NotFound),
-        Err(_) => return Err(RecordError::Denied),
+    // Every binding must be in scope before the use is recorded, so a run
+    // cannot inject the first value and then fail on the second after the
+    // grant was already spent.
+    for id in ids {
+        let Some(credential) = vault.get_by_ref(*id) else {
+            return Err(RecordError::NotFound);
+        };
+        let tags = credential.tags().to_vec();
+        let target = Target::new(credential.id(), &tags);
+        match grant.authorizes(&AccessRequest::run(target, None, program), now) {
+            Ok(()) => {}
+            // An existing reference outside the scope answers exactly like a
+            // nonexistent one, or the daemon becomes an existence oracle for
+            // every in-vault reference (DECISIONS.md).
+            Err(Denied::OutOfScope) => return Err(RecordError::NotFound),
+            Err(_) => return Err(RecordError::Denied),
+        }
     }
     let grant_id: GrantId = grant.id();
 
@@ -510,12 +549,16 @@ where
         return Err(RecordError::Internal);
     }
     watermarks.record(vault.grants());
-    // Copy only the one value, then drop the decrypted vault (which zeroizes
-    // the rest) before the child can run.
-    let Some(credential) = vault.get_by_ref(id) else {
-        return Err(RecordError::Internal);
-    };
-    Ok((grant_id, Zeroizing::new(credential.password().to_owned())))
+    // Copy only the requested values, then drop the decrypted vault (which
+    // zeroizes the rest) before the child can run.
+    let mut secrets = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(credential) = vault.get_by_ref(*id) else {
+            return Err(RecordError::Internal);
+        };
+        secrets.push(Zeroizing::new(credential.password().to_owned()));
+    }
+    Ok((grant_id, secrets))
 }
 
 /// Read one framed request from a stream, without unbounded allocation.
@@ -732,8 +775,11 @@ mod tests {
             LockedKey::new(unlock_key(&container, master).expect("derive key")).expect("lock key");
 
         let request = protocol::RunRequest {
-            env: "TOKEN".to_owned(),
-            reference: id.to_ref(),
+            env: vec![protocol::EnvBinding {
+                name: "TOKEN".to_owned(),
+                reference: id.to_ref(),
+            }],
+            plain_env: Vec::new(),
             command: vec!["/usr/bin/true".to_owned()],
             cwd: "/".to_owned(),
             grant: token,
@@ -746,7 +792,7 @@ mod tests {
             &key,
             &watermarks,
             &request,
-            id,
+            &[id],
             Path::new("/usr/bin/true"),
             |_vault| {
                 attempts.set(attempts.get() + 1);

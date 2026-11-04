@@ -22,7 +22,7 @@ use serde_json::{Map, Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    AuthenticatedRequest, DescribeRequest, GrantCreateRequest, GrantRevokeRequest,
+    AuthenticatedRequest, DescribeRequest, EnvBinding, GrantCreateRequest, GrantRevokeRequest,
     LENGTH_PREFIX_BYTES, ListRequest, MAX_BUFFERED_BYTES, MAX_MESSAGE_BYTES, MAX_TYPE_CHARS,
     PROTOCOL_VERSION, ProtocolError, ProveRequest, Request, RunRequest, validate_request,
 };
@@ -279,8 +279,13 @@ fn encode_body(
         Request::Lock => json!({ "type": "lock" }),
         Request::Run(run) => json!({
             "type": "run",
-            "env": run.env,
-            "ref": run.reference,
+            "env": run.env.iter().map(|binding| json!({
+                "name": binding.name,
+                "ref": binding.reference,
+            })).collect::<Vec<_>>(),
+            "plain_env": run.plain_env.iter().map(|(name, value)| {
+                (name.clone(), Value::String(value.clone()))
+            }).collect::<Map<String, Value>>(),
             "command": run.command,
             "cwd": run.cwd,
             "grant": run.grant.to_hex().as_str(),
@@ -469,9 +474,10 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
             // The grant-token hex is a bearer credential even in its encoded
             // form: keep it zeroizing rather than in a plain `String`.
             let grant = Zeroizing::new(required_string(request, "grant")?);
+            let (env, plain_env) = decode_run_env(request)?;
             Request::Run(RunRequest {
-                env: required_string(request, "env")?,
-                reference: required_string(request, "ref")?,
+                env,
+                plain_env,
                 command: required_string_array(request, "command")?,
                 cwd: required_string(request, "cwd")?,
                 grant: GrantToken::from_hex(&grant).map_err(|_| invalid_grant_field())?,
@@ -567,6 +573,62 @@ fn decode_grant_revoke(request: &Map<String, Value>) -> Result<GrantRevokeReques
             "grant_revoke must name an id or 'all'".into(),
         )),
     }
+}
+
+/// Decode the `run` environment: the current `env` array of `{name, ref}`
+/// bindings, or the legacy `env: "NAME"` string plus top-level `ref` as one
+/// binding. `plain_env` is an optional object of non-secret values.
+///
+/// A string `env` without `ref` is malformed rather than an empty binding; a
+/// list is never silently reinterpreted as a single name.
+type DecodedRunEnv = (Vec<EnvBinding>, Vec<(String, String)>);
+
+fn decode_run_env(request: &Map<String, Value>) -> Result<DecodedRunEnv, ProtocolError> {
+    let env = match request.get("env") {
+        Some(Value::String(name)) => vec![EnvBinding {
+            name: name.clone(),
+            reference: required_string(request, "ref")?,
+        }],
+        Some(Value::Array(bindings)) => bindings
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let binding = value.as_object().ok_or_else(|| {
+                    ProtocolError::MalformedJson(format!(
+                        "'env[{index}]' must be an object with 'name' and 'ref'"
+                    ))
+                })?;
+                Ok(EnvBinding {
+                    name: required_string(binding, "name")?,
+                    reference: required_string(binding, "ref")?,
+                })
+            })
+            .collect::<Result<Vec<_>, ProtocolError>>()?,
+        Some(_) => {
+            return Err(ProtocolError::MalformedJson(
+                "'env' must be a string or an array of bindings".into(),
+            ));
+        }
+        None => return Err(ProtocolError::MalformedJson("missing 'env'".into())),
+    };
+    let plain_env = match request.get("plain_env") {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Object(values)) => values
+            .iter()
+            .map(|(name, value)| {
+                let value = value.as_str().ok_or_else(|| {
+                    ProtocolError::MalformedJson(format!("'plain_env.{name}' must be a string"))
+                })?;
+                Ok((name.clone(), value.to_owned()))
+            })
+            .collect::<Result<Vec<_>, ProtocolError>>()?,
+        Some(_) => {
+            return Err(ProtocolError::MalformedJson(
+                "'plain_env' must be an object".into(),
+            ));
+        }
+    };
+    Ok((env, plain_env))
 }
 
 fn required_string(object: &Map<String, Value>, key: &str) -> Result<String, ProtocolError> {

@@ -1,3 +1,36 @@
+## 2026-11-04 — Daemon env injection for several credentials (TODO 4.5b)
+
+- `RunRequest.env` is now `Vec<EnvBinding>` (`{name, ref}`) plus
+  `plain_env: Vec<(String, String)>` (`src/protocol/mod.rs`). `src/protocol/codec.rs`
+  encodes only the array form; decode still accepts the old `env: "NAME"` +
+  top-level `ref` as one binding, so an old client works while an old daemon
+  refuses the array with `bad_request` (no protocol-version bump).
+- Boundary validation: at least one and at most `MAX_ENV_BINDINGS = 32` secret
+  bindings, names valid, refs canonical, unique names across `env` and
+  `plain_env`, plain values <= 4096 bytes and NUL-free. `src/daemon/run.rs`
+  repeats the name/deny-list/duplicate check and parses every reference before
+  it decides anything. Every binding is authorized before the grant's use is
+  marked, so a missing/out-of-scope second binding denies the whole run and
+  spends nothing.
+- `src/runner.rs` now takes `secret_env` and `plain_env`: child env is the
+  inherited allowlist, then plain values, then secrets; the whole secret set
+  goes to one `Redactor::new_many`. Plain values are deliberately not redacted.
+  `src/cli/run.rs` still sends/serves exactly one `--env` binding.
+- Tests: protocol round-trip/order, legacy decode, malformed shapes, empty /
+  duplicate / >32 / oversized names (new `src/protocol/tests/run_env.rs`);
+  runner multi-secret + plain env; daemon e2e two vars visible and both
+  redacted, out-of-scope binding denied + audited + no use spent, duplicate
+  names `bad_request` (new `tests/daemon_run_multi.rs`). Split both test files
+  to keep every file under 1,000 lines.
+- Gate: fmt, clippy `-D warnings`, `cargo test` pass (`cargo audit` skipped:
+  not installed).
+- **Next iteration must know:** a multi-binding run still writes **one** audit
+  record and names its first reference; TODO 4.11 can widen the audit schema.
+  `plain_env` is agent input and is never redacted. `MAX_ENV_BINDINGS = 32`
+  is load-bearing for the redactor's marker proof (4.5a); do not raise it
+  without revisiting `choose_marker_many`. TODO 4.5c (timeout/output caps) and
+  4.5d (`run_with_credentials`) are next.
+
 ## 2026-11-04 — Multi-secret streaming redaction (TODO 4.5a)
 
 - `RunRequest` carries one env name today, but `run_with_credentials` must

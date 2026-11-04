@@ -47,6 +47,7 @@ use passmgr::protocol::{self, FrameDecoder, Request, RunRequest};
 use passmgr::redact::Redactor;
 use passmgr::runner::{self, Stop};
 use passmgr::token::SessionToken;
+use zeroize::Zeroizing;
 
 /// Canary injected into the redactor-only test.
 const REDACT_CANARY: &[u8] = b"r50b-redact-canary-0001";
@@ -177,12 +178,13 @@ fn run_child(program: &str, args: &[String], secret: &str) -> Vec<u8> {
     let inherited = vec![(OsString::from("PATH"), OsString::from("/usr/bin:/bin"))];
     let cancel = Arc::new(AtomicBool::new(false));
     let stop = Stop::on_cancel(&cancel);
+    let env = vec![(ENV_NAME.to_owned(), Zeroizing::new(secret.to_owned()))];
     let mut stdout = Vec::new();
     runner::execute(
         Path::new(program),
         args,
-        ENV_NAME,
-        secret,
+        &env,
+        &[],
         Path::new("/"),
         &inherited,
         &stop,
@@ -358,8 +360,11 @@ fn large_run_request(grant: &GrantToken, arguments: usize, extra: usize) -> Requ
         .chain((extra > 0).then(|| "a".repeat(extra)))
         .collect();
     Request::Run(RunRequest {
-        env: "API_KEY".into(),
-        reference: "pm://00112233445566778899aabbccddeeff".into(),
+        env: vec![passmgr::protocol::EnvBinding {
+            name: "API_KEY".into(),
+            reference: "pm://00112233445566778899aabbccddeeff".into(),
+        }],
+        plain_env: Vec::new(),
         command,
         cwd: "/tmp".into(),
         grant: grant.clone(),

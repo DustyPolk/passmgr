@@ -116,8 +116,11 @@ fn malformed_oversized_and_unknown_requests_are_rejected_without_a_crash() {
         &socket,
         &fixture.token,
         &Request::Run(RunRequest {
-            env: "API_KEY".into(),
-            reference: "pm://00112233445566778899aabbccddeeff".into(),
+            env: vec![passmgr::protocol::EnvBinding {
+                name: "API_KEY".into(),
+                reference: "pm://00112233445566778899aabbccddeeff".into(),
+            }],
+            plain_env: Vec::new(),
             command: vec!["/bin/true".into()],
             cwd: "/".into(),
             grant: fixture.grant.clone(),
@@ -316,8 +319,11 @@ fn the_secret_never_reaches_output_arguments_environment_or_the_socket() {
     for request in [
         Request::Ping,
         Request::Run(RunRequest {
-            env: "API_KEY".into(),
-            reference: "pm://00112233445566778899aabbccddeeff".into(),
+            env: vec![passmgr::protocol::EnvBinding {
+                name: "API_KEY".into(),
+                reference: "pm://00112233445566778899aabbccddeeff".into(),
+            }],
+            plain_env: Vec::new(),
             command: vec!["/bin/sh".into(), "-c".into(), "true".into()],
             cwd: "/".into(),
             grant: fixture.grant.clone(),

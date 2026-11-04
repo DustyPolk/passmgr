@@ -1,4 +1,4 @@
-//! Spawn one child with a single secret injected and relay redacted output.
+//! Spawn one child with secrets injected and relay redacted output.
 //!
 //! This is the mechanism behind a daemon `run` request (TODO 2.6c) and, later,
 //! a human `pm run` (TODO 3.7). The caller supplies an argv (never a shell
@@ -9,10 +9,13 @@
 //! # Child environment
 //!
 //! The child does not inherit the daemon's environment. It starts from a fixed
-//! allowlist ([`INHERITED_ENV`] plus `LC_*`) and then gets exactly one more
-//! variable, the injected secret. [`denied_env_name`] refuses loader and shell
-//! hook names even if a request asks for them: injecting a value into
-//! `LD_PRELOAD` or `BASH_ENV` would change which code the child runs.
+//! allowlist ([`INHERITED_ENV`] plus `LC_*`), then gets the caller's
+//! non-secret `plain_env`, then one variable per injected secret.
+//! [`denied_env_name`] refuses loader and shell hook names even if a request
+//! asks for them: injecting a value into `LD_PRELOAD` or `BASH_ENV` would
+//! change which code the child runs. All secret values go through a single
+//! [`Redactor`] set, so overlapping values cannot let one value's marker
+//! complete another value.
 //!
 //! # Limits
 //!
@@ -58,7 +61,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::protocol::{MAX_CHUNK_BYTES, MAX_SIGNAL, RunExit, RunFrame};
 use crate::redact::Redactor;
@@ -194,8 +197,8 @@ enum Message {
     Done,
 }
 
-/// Run `program` with `args` and `env_name=secret` injected, streaming redacted
-/// output.
+/// Run `program` with `args`, `secret_env` injected, and `plain_env` set,
+/// streaming redacted output.
 ///
 /// `program` is executed exactly as given, and becomes `argv[0]` (the default
 /// for [`Command`]). The daemon passes the same canonical path it checked
@@ -205,9 +208,11 @@ enum Message {
 /// chosen `argv[0]`.
 ///
 /// `inherited` is the already-filtered environment the child starts from
-/// (usually [`inherited_env`] of the daemon's own variables). `stop` is polled
-/// while the child runs; when it reports a shutdown or a vanished client the
-/// child is killed and [`RunError::Cancelled`] is returned.
+/// (usually [`inherited_env`] of the daemon's own variables). `plain_env` is
+/// applied after it and is not redacted; `secret_env` is applied last and
+/// every value is redacted from both output streams. `stop` is polled while
+/// the child runs; when it reports a shutdown or a vanished client the child
+/// is killed and [`RunError::Cancelled`] is returned.
 ///
 /// `cwd` is the caller's working directory. The child starts there, so a
 /// relative argument means what the caller meant; the daemon never runs a
@@ -224,8 +229,8 @@ enum Message {
 pub fn execute<F>(
     program: &Path,
     args: &[String],
-    env_name: &str,
-    secret: &str,
+    secret_env: &[(String, Zeroizing<String>)],
+    plain_env: &[(String, String)],
     cwd: &Path,
     inherited: &[(OsString, OsString)],
     stop: &Stop<'_>,
@@ -246,13 +251,30 @@ where
             "the program is empty",
         )));
     }
-    // The protocol already validates this, but `Command::env` must never be
-    // handed a name it would panic on.
-    if env_name.is_empty() || env_name.contains('=') || env_name.contains('\0') {
-        return Err(RunError::Spawn(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the environment variable name is invalid",
-        )));
+    // The protocol already validates these, but `Command::env` must never be
+    // handed a name it would panic on, and a local caller must not bypass the
+    // same checks.
+    for (name, _) in secret_env {
+        if name.is_empty() || name.contains('=') || name.contains('\0') {
+            return Err(RunError::Spawn(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the environment variable name is invalid",
+            )));
+        }
+    }
+    for (name, value) in plain_env {
+        if name.is_empty() || name.contains('=') || name.contains('\0') {
+            return Err(RunError::Spawn(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the environment variable name is invalid",
+            )));
+        }
+        if value.contains('\0') {
+            return Err(RunError::Spawn(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the environment variable value is invalid",
+            )));
+        }
     }
 
     let mut command = Command::new(program);
@@ -262,14 +284,23 @@ where
     for (name, value) in inherited {
         command.env(name, value);
     }
-    // The value is copied into the child's environment block by the kernel;
-    // this process keeps it only in `secret` (owned by the caller) and in the
+    for (name, value) in plain_env {
+        command.env(name, value);
+    }
+    // The values are copied into the child's environment block by the kernel;
+    // this process keeps them in the caller's `Zeroizing` buffers and in the
     // two redactors below, which zeroize on drop. `Command` holds its own
-    // copies internally (its env map and the `NAME=value` string it builds for
-    // the spawn): std frees those without wiping them, and it exposes no way
-    // to own or clear them, so they are the residual copies listed in
+    // copies internally (its env map and the `NAME=value` strings it builds
+    // for the spawn): std frees those without wiping them, and it exposes no
+    // way to own or clear them, so they are the residual copies listed in
     // `SECURITY.md` limit 6 (TODO R.50b).
-    command.env(env_name, secret);
+    for (name, value) in secret_env {
+        command.env(name, value.as_str());
+    }
+    let redact_values: Vec<&[u8]> = secret_env
+        .iter()
+        .map(|(_, value)| value.as_bytes())
+        .collect();
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -302,7 +333,7 @@ where
         (Box::new(stdout) as Box<dyn OutputPipe + Send>, false),
         (Box::new(stderr) as Box<dyn OutputPipe + Send>, true),
     ] {
-        let redactor = Redactor::new(secret.as_bytes());
+        let redactor = Redactor::new_many(&redact_values);
         let reader_stop = Arc::clone(&readers_stop);
         match spawn_reader(reader, redactor, sender.clone(), is_stderr, reader_stop) {
             Ok(handle) => readers.push(handle),

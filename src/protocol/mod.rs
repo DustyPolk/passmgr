@@ -184,6 +184,11 @@ pub const MAX_QUERY_BYTES: usize = 256;
 
 /// Longest accepted environment variable name.
 pub const MAX_ENV_NAME_BYTES: usize = 128;
+/// Most secret bindings one `run` may inject. Also keeps the redactor's marker
+/// search well below the point where no safe marker exists (TODO 4.5a).
+pub const MAX_ENV_BINDINGS: usize = 32;
+/// Longest accepted value in `run.plain_env`.
+pub const MAX_ENV_VALUE_BYTES: usize = 4096;
 /// Longest accepted `pm://` reference.
 pub const MAX_REFERENCE_BYTES: usize = 128;
 /// Longest accepted single argument in a `run` command.
@@ -330,7 +335,20 @@ pub struct ProveRequest {
     pub proof: Proof,
 }
 
-/// The `run` payload: inject `reference`'s value as `env` for `command`.
+/// One secret environment variable a `run` injects.
+///
+/// `name` is a validated environment variable name and `reference` is a
+/// canonical `pm://` reference. Neither carries a value: the daemon resolves
+/// the reference from its own vault after authorizing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvBinding {
+    /// Environment variable name in the child process.
+    pub name: String,
+    /// `pm://<32 hex chars>` reference of the credential to inject.
+    pub reference: String,
+}
+
+/// The `run` payload: inject each binding's value for `command`.
 ///
 /// `cwd` is the **caller's** working directory, not the daemon's. The daemon
 /// runs the child there, so relative arguments mean what the caller meant.
@@ -338,15 +356,17 @@ pub struct ProveRequest {
 /// through its own `PATH`, which belongs to the shell that ran `unlock`.
 ///
 /// The session token in the envelope only gets the request this far. The
-/// daemon authorizes the actual use against `grant`: the raw token the human
+/// daemon authorizes every binding against `grant`: the raw token the human
 /// handed the agent, matched by its SHA-256 against the grant stored in the
 /// vault. Holding the session file is therefore not enough to use a secret.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
-    /// Environment variable name in the child process.
-    pub env: String,
-    /// `pm://<32 hex chars>` reference of the credential to inject.
-    pub reference: String,
+    /// Ordered secret bindings, one environment variable each. Order is
+    /// preserved on the wire and at least one binding is required.
+    pub env: Vec<EnvBinding>,
+    /// Non-secret variables set after the inherited allowlist and before the
+    /// secret bindings. Never redacted, because the agent supplied them.
+    pub plain_env: Vec<(String, String)>,
     /// Argument vector; `command[0]` is an absolute path to the program.
     pub command: Vec<String>,
     /// Absolute working directory the child starts in (the caller's cwd).
@@ -362,7 +382,7 @@ pub struct RunRequest {
 impl PartialEq for RunRequest {
     fn eq(&self, other: &Self) -> bool {
         self.env == other.env
-            && self.reference == other.reference
+            && self.plain_env == other.plain_env
             && self.command == other.command
             && self.cwd == other.cwd
             && self.grant.hash().matches(&other.grant.hash())
@@ -642,8 +662,7 @@ fn validate_request(request: &Request) -> Result<(), ProtocolError> {
     let Request::Run(run) = request else {
         return Ok(());
     };
-    validate_env_name(&run.env)?;
-    validate_reference("run.ref", &run.reference)?;
+    validate_run_env(run)?;
     validate_absolute_path("run.cwd", &run.cwd)?;
     if run.command.is_empty() {
         return Err(ProtocolError::InvalidRequest(
@@ -766,28 +785,79 @@ pub fn valid_env_name(env: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-fn validate_env_name(env: &str) -> Result<(), ProtocolError> {
-    if env.is_empty() {
+/// Validate the whole `run` environment: at least one secret binding, bounded
+/// count, valid names, canonical references, and no name used twice (including
+/// across `env` and `plain_env`).
+fn validate_run_env(run: &RunRequest) -> Result<(), ProtocolError> {
+    if run.env.is_empty() {
         return Err(ProtocolError::InvalidRequest(
-            "run.env must not be empty".into(),
+            "run.env must contain at least one binding".into(),
         ));
+    }
+    if run.env.len() > MAX_ENV_BINDINGS {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "run.env has more than {MAX_ENV_BINDINGS} bindings"
+        )));
+    }
+    let mut names = std::collections::HashSet::with_capacity(run.env.len() + run.plain_env.len());
+    for (index, binding) in run.env.iter().enumerate() {
+        let field = format!("run.env[{index}].name");
+        validate_env_name_field(&field, &binding.name)?;
+        validate_reference(&format!("run.env[{index}].ref"), &binding.reference)?;
+        if !names.insert(binding.name.as_str()) {
+            return Err(ProtocolError::InvalidRequest(format!(
+                "run.env[{index}].name duplicates another environment name"
+            )));
+        }
+    }
+    for (index, (name, value)) in run.plain_env.iter().enumerate() {
+        validate_env_name_field(&format!("run.plain_env[{index}].name"), name)?;
+        if value.len() > MAX_ENV_VALUE_BYTES {
+            return Err(ProtocolError::InvalidRequest(format!(
+                "run.plain_env[{index}] exceeds {MAX_ENV_VALUE_BYTES} bytes"
+            )));
+        }
+        if value.contains('\0') {
+            return Err(ProtocolError::InvalidRequest(format!(
+                "run.plain_env[{index}] must not contain a NUL byte"
+            )));
+        }
+        if !names.insert(name.as_str()) {
+            return Err(ProtocolError::InvalidRequest(format!(
+                "run.plain_env[{index}].name duplicates another environment name"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_env_name(env: &str) -> Result<(), ProtocolError> {
+    validate_env_name_field("run.env", env)
+}
+
+fn validate_env_name_field(field: &str, env: &str) -> Result<(), ProtocolError> {
+    if env.is_empty() {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{field} must not be empty"
+        )));
     }
     if env.len() > MAX_ENV_NAME_BYTES {
         return Err(ProtocolError::InvalidRequest(format!(
-            "run.env exceeds {MAX_ENV_NAME_BYTES} bytes"
+            "{field} exceeds {MAX_ENV_NAME_BYTES} bytes"
         )));
     }
     let mut bytes = env.bytes();
     let first = bytes.next().expect("checked non-empty");
     if !(first.is_ascii_alphabetic() || first == b'_') {
-        return Err(ProtocolError::InvalidRequest(
-            "run.env must start with an ASCII letter or underscore".into(),
-        ));
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{field} must start with an ASCII letter or underscore"
+        )));
     }
     if !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_') {
-        return Err(ProtocolError::InvalidRequest(
-            "run.env may contain only ASCII letters, digits and underscores".into(),
-        ));
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{field} may contain only ASCII letters, digits and underscores"
+        )));
     }
     Ok(())
 }

@@ -847,8 +847,11 @@ mod tests {
 
     fn run_request() -> protocol::RunRequest {
         protocol::RunRequest {
-            env: "API_KEY".into(),
-            reference: "pm://00112233445566778899aabbccddeeff".into(),
+            env: vec![protocol::EnvBinding {
+                name: "API_KEY".into(),
+                reference: "pm://00112233445566778899aabbccddeeff".into(),
+            }],
+            plain_env: Vec::new(),
             command: vec!["/bin/true".into()],
             cwd: "/tmp".into(),
             grant: crate::grant::GrantToken::from_hex(&"11".repeat(32)).expect("token"),

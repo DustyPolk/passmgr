@@ -41,7 +41,7 @@ use passmgr::client::{self, RunOutcome};
 #[cfg(unix)]
 use passmgr::error::EXIT_OUTPUT_CLOSED;
 #[cfg(unix)]
-use passmgr::protocol::{ResponseError, RunExit, RunFrame, RunRequest};
+use passmgr::protocol::{EnvBinding, ResponseError, RunExit, RunFrame, RunRequest};
 #[cfg(unix)]
 use passmgr::runner;
 #[cfg(unix)]
@@ -165,8 +165,11 @@ fn run_via_daemon(
     })?;
 
     let request = RunRequest {
-        env,
-        reference: reference.clone(),
+        env: vec![EnvBinding {
+            name: env,
+            reference: reference.clone(),
+        }],
+        plain_env: Vec::new(),
         command,
         cwd: cwd_text,
         grant,
@@ -261,13 +264,13 @@ fn run_locally(
             eprintln!("passmgr: could not append the audit record: {error}");
         }
     };
-    let secret = {
+    let secret_env = {
         let (vault, _master) = super::unlock(db_path)?;
         let Some(credential) = vault.get_by_ref(id) else {
             warn(record(audit::Outcome::NotFound, None));
             return Err(Error::EntryNotFound(reference.clone()));
         };
-        Zeroizing::new(credential.password().to_owned())
+        vec![(env, Zeroizing::new(credential.password().to_owned()))]
     };
 
     let inherited = runner::inherited_env(std::env::vars_os());
@@ -281,8 +284,8 @@ fn run_locally(
     let result = runner::execute(
         program,
         &command[1..],
-        &env,
-        secret.as_str(),
+        &secret_env,
+        &[],
         cwd,
         &inherited,
         &stop,

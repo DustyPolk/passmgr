@@ -97,7 +97,7 @@ keeps the dependency tree small and stdout hygiene under our control.
       Note: a safe marker always exists for a set of at most 127 distinct
       endpoint bytes, and the daemon caps a run at 32 values; for a larger set
       `choose_marker_many` panics (fail closed) rather than relaying a value.
-- [ ] **4.5b Daemon env injection for several credentials.** `RunRequest.env`
+- [x] **4.5b Daemon env injection for several credentials.** `RunRequest.env`
       becomes an ordered list of `{name, ref}` bindings (decode still accepts
       the legacy single-string form as a one-element list, so an old client
       keeps working; an old daemon refuses the list with `bad_request`). The
@@ -106,6 +106,9 @@ keeps the dependency tree small and stdout hygiene under our control.
       env from scratch, and passes the whole value set to one redactor. Tests:
       two vars visible in the child, both redacted, a ref outside the grant is
       denied and audited, duplicate names refused.
+      Note: all bindings are authorized before any use is recorded, so a
+      denied set spends nothing; a multi-binding run still writes one audit
+      record and names its first reference (TODO 4.11 covers richer audit).
 - [ ] **4.5c Run timeout and output caps.** `timeout_secs` (1..=600) kills the
       child's process group with `SIGTERM` then `SIGKILL` after a 2 s grace;
       per-stream output is capped (default 256 KiB, at most 1 MiB) with

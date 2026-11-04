@@ -210,8 +210,9 @@ code does not implement yet.
   need no TTY because neither reveals a value (`lock` only stops the daemon,
   `run` only uses a reference).
 - `run` grammar: `passmgr run --env NAME=<ref> -- <command> [args...]`.
-  Exactly one `--env` (the protocol injects one secret per run), required,
-  with `NAME` and `<ref>` validated before connecting; `--` is required and
+  The CLI accepts exactly one `--env`; the daemon protocol carries an ordered
+  list of `{name, ref}` bindings plus `plain_env` for the MCP tool (4.5b/4.5d),
+  required, with `NAME` and `<ref>` validated before connecting; `--` is required and
   everything after it is argv, never re-parsed. A malformed spec is exit 2; a
   loader/shell-hook NAME is refused locally with exit 5 before any socket is
   opened (the daemon independently refuses it too). Daemon refusals map to:
@@ -329,12 +330,25 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Envelope: `{"version":4,"token":"<64 lowercase hex>","request":{...}}`. The
   token is parsed before the request. Version 4 added the required
   `run.grant`; a version-3 daemon would ignore it and authorize with the
-  session token alone, so the bump is a hard downgrade guard. Unknown envelope **fields** are
-  ignored; unknown versions and request types are hard errors. Requests are
-  validated on encode *and* decode.
+  session token alone, so the bump is a hard downgrade guard. A `run` request
+  carries `env` as an ordered array of `{name, ref}` bindings and optional
+  `plain_env` object; decode also accepts the pre-4.5b `env: "NAME"` plus
+  top-level `ref` string as one binding, while encode only writes the list. At
+  least one binding is required and at most 32 (the redactor's marker is safe
+  below 127 distinct endpoint bytes); duplicate names across `env` and
+  `plain_env` are refused. Unknown envelope **fields** are ignored; unknown
+  versions and request types are hard errors. Requests are validated on
+  encode *and* decode.
 - **No request type returns plaintext, ever.** Any same-user process can reach
   the socket, so client-side checks protect nothing; every authorization
   decision is made in `pmd`.
+- Multi-binding `run`: `pmd` authorizes every reference before it records the
+  use, so an out-of-scope or missing binding denies the whole run and spends
+  nothing. `plain_env` is agent-supplied and is applied after the inherited
+  allowlist, before secrets, and is never redacted; names in both maps are
+  checked against the loader/shell-hook deny-list and must be unique. The
+  whole secret value set goes through one `Redactor` (do not create one per
+  value: a marker for one set could complete another value's occurrence).
 - Responses: one-shot `pong`, `locked`, or a fixed error code (`bad_request`,
   `unsupported`, `unauthorized`, `not_found`, `spawn_failed`, `internal`,
   `busy`), and for `run` a

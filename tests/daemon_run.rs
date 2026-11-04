@@ -68,7 +68,7 @@ fn run_reports_a_missing_reference_and_a_spawn_failure_without_dying() {
 
     let mut missing = fixture.run_request("API_KEY", &["/bin/true"]);
     if let Request::Run(run) = &mut missing {
-        run.reference = "pm://00112233445566778899aabbccddeeff".into();
+        run.env[0].reference = "pm://00112233445566778899aabbccddeeff".into();
     }
     let (frames, _) = read_run(&socket, &fixture.token, &missing);
     assert_eq!(frames, vec![RunFrame::Error(ResponseError::NotFound)]);
@@ -305,7 +305,7 @@ fn rewrite_vault(fixture: &Fixture, credentials: &[Credential], grants: &[Grant]
 fn run_with_ref(fixture: &Fixture, reference: &str, command: &[&str]) -> Vec<RunFrame> {
     let mut request = fixture.run_request("API_KEY", command);
     if let Request::Run(run) = &mut request {
-        run.reference = reference.to_owned();
+        run.env[0].reference = reference.to_owned();
     }
     read_run(&fixture.socket(), &fixture.token, &request).0
 }

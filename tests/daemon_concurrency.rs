@@ -267,8 +267,11 @@ fn revocation_succeeds_while_runs_record_their_use() {
         let requests: Vec<Request> = (0..8)
             .map(|_| {
                 Request::Run(RunRequest {
-                    env: "API_KEY".into(),
-                    reference: fixture.reference.clone(),
+                    env: vec![passmgr::protocol::EnvBinding {
+                        name: "API_KEY".into(),
+                        reference: fixture.reference.clone(),
+                    }],
+                    plain_env: Vec::new(),
                     command: vec![program.to_str().expect("program path is UTF-8").to_owned()],
                     cwd: "/".into(),
                     grant: grant_token.clone(),

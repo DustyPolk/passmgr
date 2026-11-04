@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use passmgr::crypto::{self, KEY_LEN, KdfParams};
 use passmgr::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope};
-use passmgr::protocol::{self, Request, Response, RunFrame, RunRequest};
+use passmgr::protocol::{self, EnvBinding, Request, Response, RunFrame, RunRequest};
 use passmgr::socket::RuntimePaths;
 use passmgr::store::{self, Credential};
 use passmgr::token::SessionToken;
@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 
 pub const MASTER: &str = "daemon test master password";
 pub const SECRET: &str = "s3cret-injected-value-must-never-leak";
+pub const SECOND_SECRET: &str = "s3cond-injected-value-must-never-leak";
 pub const WAIT: Duration = Duration::from_secs(10);
 
 pub struct Fixture {
@@ -36,6 +37,8 @@ pub struct Fixture {
     pub token: SessionToken,
     /// The vault entry's `pm://…` reference, so tests can run it.
     pub reference: String,
+    /// The second entry, only in fixtures built by [`Fixture::with_two_secrets`].
+    pub second_reference: Option<String>,
     /// The grant token `run` must present.
     pub grant: GrantToken,
     /// A 0600 file holding the grant token's hex, for the CLI tests.
@@ -61,6 +64,11 @@ impl Fixture {
         Self::with_secret_and_uses(SECRET, Some(max_uses))
     }
 
+    /// A fixture with two credentials, both in the grant scope.
+    pub fn with_two_secrets() -> Self {
+        Self::build_two(SECRET, SECOND_SECRET, None, 3600, Capabilities::RUN)
+    }
+
     /// A fixture whose grant expires `seconds` after it is created.
     pub fn with_grant_expiring_in(seconds: u64) -> Self {
         Self::build(SECRET, None, seconds, Capabilities::RUN)
@@ -81,6 +89,38 @@ impl Fixture {
         expires_in: u64,
         capabilities: Capabilities,
     ) -> Self {
+        Self::build_credentials(
+            &[(secret, "example.test", "alice")],
+            max_uses,
+            expires_in,
+            capabilities,
+        )
+    }
+
+    fn build_two(
+        first: &str,
+        second: &str,
+        max_uses: Option<u32>,
+        expires_in: u64,
+        capabilities: Capabilities,
+    ) -> Self {
+        Self::build_credentials(
+            &[
+                (first, "example.test", "alice"),
+                (second, "second.test", "bob"),
+            ],
+            max_uses,
+            expires_in,
+            capabilities,
+        )
+    }
+
+    fn build_credentials(
+        secrets: &[(&str, &str, &str)],
+        max_uses: Option<u32>,
+        expires_in: u64,
+        capabilities: Capabilities,
+    ) -> Self {
         let directory = tempfile::tempdir().expect("tempdir");
         // tempfile creates the directory 0700, which is exactly what the
         // runtime directory check requires.
@@ -88,14 +128,20 @@ impl Fixture {
         // `RuntimePaths::resolve()` under XDG_RUNTIME_DIR appends "passmgr".
         let runtime = directory.path().join("passmgr");
 
-        let credential = Credential::new(
-            "example.test".into(),
-            "alice".into(),
-            Zeroizing::new(secret.into()),
-        )
-        .expect("credential");
-        let reference = credential.reference();
-        let id = credential.id();
+        let credentials: Vec<Credential> = secrets
+            .iter()
+            .map(|(secret, service, username)| {
+                Credential::new(
+                    (*service).into(),
+                    (*username).into(),
+                    Zeroizing::new((*secret).into()),
+                )
+                .expect("credential")
+            })
+            .collect();
+        let reference = credentials[0].reference();
+        let second_reference = credentials.get(1).map(Credential::reference);
+        let ids = credentials.iter().map(Credential::id).collect();
 
         // Programs the tests may run. Canonicalize them here because the
         // daemon resolves the request path before matching the grant.
@@ -112,7 +158,7 @@ impl Fixture {
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_secs();
-        let scope = Scope::new(vec![id], Vec::new(), None).expect("scope");
+        let scope = Scope::new(ids, Vec::new(), None).expect("scope");
         let grant_expires_at = now + expires_in;
         let grant = Grant::create(
             GrantSpec {
@@ -133,7 +179,7 @@ impl Fixture {
         fs::set_permissions(&grant_file, fs::Permissions::from_mode(0o600))
             .expect("chmod grant file");
 
-        let plaintext = store::encode(&[credential], &[grant]).expect("encode store");
+        let plaintext = store::encode(&credentials, &[grant]).expect("encode store");
         let container = crypto::encrypt(&plaintext, MASTER, KdfParams::new(8 * 1024, 1, 1))
             .expect("encrypt vault");
         fs::write(&vault, &container).expect("write vault");
@@ -149,6 +195,7 @@ impl Fixture {
             key,
             token: SessionToken::generate().expect("session token"),
             reference,
+            second_reference,
             grant: grant_token,
             grant_file,
             spawn_fail_program,
@@ -159,8 +206,11 @@ impl Fixture {
     /// A `run` request authorized by this fixture's grant.
     pub fn run_request(&self, env: &str, command: &[&str]) -> Request {
         Request::Run(RunRequest {
-            env: env.into(),
-            reference: self.reference.clone(),
+            env: vec![EnvBinding {
+                name: env.into(),
+                reference: self.reference.clone(),
+            }],
+            plain_env: Vec::new(),
             command: command.iter().map(|arg| (*arg).to_string()).collect(),
             cwd: "/".into(),
             grant: self.grant.clone(),

@@ -36,10 +36,17 @@ fn describe_request() -> Request {
         grant: grant_token(),
     })
 }
+fn binding(name: &str) -> EnvBinding {
+    EnvBinding {
+        name: name.into(),
+        reference: REF.into(),
+    }
+}
+
 fn run_request() -> Request {
     Request::Run(RunRequest {
-        env: "API_KEY".into(),
-        reference: REF.into(),
+        env: vec![binding("API_KEY")],
+        plain_env: Vec::new(),
         command: vec![
             "/usr/bin/curl".into(),
             "-s".into(),
@@ -476,8 +483,8 @@ fn oversized_encoded_message_is_rejected() {
         command.push("x".repeat(4096));
     }
     let request = Request::Run(RunRequest {
-        env: "API_KEY".into(),
-        reference: REF.into(),
+        env: vec![binding("API_KEY")],
+        plain_env: Vec::new(),
         command,
         cwd: "/tmp".into(),
         grant: grant_token(),
@@ -650,7 +657,10 @@ fn requests_have_no_plaintext_field() {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(keys, ["command", "cwd", "env", "grant", "ref", "type"]);
+    assert_eq!(
+        keys,
+        ["command", "cwd", "env", "grant", "plain_env", "type"]
+    );
 }
 
 #[test]
@@ -675,35 +685,84 @@ fn env_name_syntax_is_shared_with_the_cli() {
 #[test]
 fn run_fields_are_validated() {
     let base = RunRequest {
-        env: "OK".into(),
-        reference: REF.into(),
+        env: vec![binding("OK")],
+        plain_env: Vec::new(),
         command: vec!["/bin/true".into()],
         cwd: "/tmp".into(),
         grant: grant_token(),
     };
     let cases = [
         RunRequest {
-            env: String::new(),
+            env: Vec::new(),
             ..base.clone()
         },
         RunRequest {
-            env: "1BAD".into(),
+            env: vec![binding("")],
             ..base.clone()
         },
         RunRequest {
-            env: "BAD-NAME".into(),
+            env: vec![binding("1BAD")],
             ..base.clone()
         },
         RunRequest {
-            env: "A".repeat(MAX_ENV_NAME_BYTES + 1),
+            env: vec![binding("BAD-NAME")],
             ..base.clone()
         },
         RunRequest {
-            reference: String::new(),
+            env: vec![binding(&"A".repeat(MAX_ENV_NAME_BYTES + 1))],
             ..base.clone()
         },
         RunRequest {
-            reference: "not-a-reference".into(),
+            env: vec![
+                EnvBinding {
+                    name: "DUP".into(),
+                    reference: REF.into(),
+                },
+                EnvBinding {
+                    name: "DUP".into(),
+                    reference: REF.into(),
+                },
+            ],
+            ..base.clone()
+        },
+        RunRequest {
+            env: vec![binding("OK")],
+            plain_env: vec![("OK".into(), "plain".into())],
+            ..base.clone()
+        },
+        RunRequest {
+            env: vec![EnvBinding {
+                name: "OK".into(),
+                reference: String::new(),
+            }],
+            ..base.clone()
+        },
+        RunRequest {
+            env: vec![EnvBinding {
+                name: "OK".into(),
+                reference: "not-a-reference".into(),
+            }],
+            ..base.clone()
+        },
+        RunRequest {
+            env: (0..=MAX_ENV_BINDINGS)
+                .map(|index| EnvBinding {
+                    name: format!("V{index}"),
+                    reference: REF.into(),
+                })
+                .collect(),
+            ..base.clone()
+        },
+        RunRequest {
+            plain_env: vec![("1BAD".into(), "x".into())],
+            ..base.clone()
+        },
+        RunRequest {
+            plain_env: vec![("OK_PLAIN".into(), "x".repeat(MAX_ENV_VALUE_BYTES + 1))],
+            ..base.clone()
+        },
+        RunRequest {
+            plain_env: vec![("OK_PLAIN".into(), "x\0y".into())],
             ..base.clone()
         },
         RunRequest {
@@ -877,7 +936,10 @@ fn errors_do_not_echo_request_field_values() {
     );
     let error = decode(&frame(&body)).expect_err("invalid ref");
     let text = error.to_string();
-    assert!(text.contains("run.ref"), "unexpected message: {text}");
+    assert!(
+        text.contains("run.env[0].ref"),
+        "unexpected message: {text}"
+    );
     assert!(!text.contains(secret_like));
 }
 
@@ -925,3 +987,4 @@ fn taking_a_frame_zeroes_the_stale_tail_behind_the_next_one() {
 
 mod describe;
 mod list;
+mod run_env;

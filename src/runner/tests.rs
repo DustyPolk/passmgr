@@ -10,20 +10,25 @@ fn inherited() -> Vec<(OsString, OsString)> {
     ])
 }
 
+fn secret_env(name: &str, secret: &str) -> Vec<(String, Zeroizing<String>)> {
+    vec![(name.to_owned(), Zeroizing::new(secret.to_owned()))]
+}
+
 fn collect(
     argv: &[&str],
     env_name: &str,
     secret: &str,
 ) -> (Vec<RunFrame>, Result<RunExit, RunError>) {
     let argv: Vec<String> = argv.iter().map(|arg| (*arg).to_string()).collect();
+    let env = secret_env(env_name, secret);
     let cancel = AtomicBool::new(false);
     let stop = Stop::on_cancel(&cancel);
     let mut frames = Vec::new();
     let result = execute(
         Path::new(&argv[0]),
         &argv[1..],
-        env_name,
-        secret,
+        &env,
+        &[],
         Path::new("/"),
         &inherited(),
         &stop,
@@ -91,6 +96,46 @@ fn the_child_sees_the_injected_variable() {
             !String::from_utf8_lossy(data).contains(secret),
         _ => true,
     }));
+}
+
+#[test]
+fn every_secret_is_injected_and_plain_env_is_not_redacted() {
+    let secret_env = vec![
+        (
+            "FIRST".to_owned(),
+            Zeroizing::new("first-canary-9f3a".to_owned()),
+        ),
+        (
+            "SECOND".to_owned(),
+            Zeroizing::new("second-canary-2b7c".to_owned()),
+        ),
+    ];
+    let plain_env = vec![("PLAIN".to_owned(), "visible".to_owned())];
+    let cancel = AtomicBool::new(false);
+    let stop = Stop::on_cancel(&cancel);
+    let mut frames = Vec::new();
+    let result = execute(
+        Path::new("/bin/sh"),
+        &[
+            "-c".to_owned(),
+            "printf %s \"$FIRST|$SECOND|$PLAIN\"".to_owned(),
+        ],
+        &secret_env,
+        &plain_env,
+        Path::new("/"),
+        &inherited(),
+        &stop,
+        |frame| {
+            frames.push(frame);
+            Ok(())
+        },
+    );
+    assert_eq!(result.expect("run"), RunExit::Code(0));
+    assert_eq!(
+        stdout_bytes(&frames),
+        b"[REDACTED]|[REDACTED]|visible",
+        "both secrets redacted in one pass, the plain value passed through"
+    );
 }
 
 #[test]
@@ -202,8 +247,8 @@ fn the_child_starts_in_the_callers_working_directory() {
     let result = execute(
         Path::new(&argv[0]),
         &argv[1..],
-        "PM_TEST",
-        "secret-1234",
+        &secret_env("PM_TEST", "secret-1234"),
+        &[],
         dir.path(),
         &inherited(),
         &stop,
@@ -224,8 +269,8 @@ fn an_invalid_environment_name_is_refused_before_spawning() {
     let err = execute(
         Path::new(&argv[0]),
         &argv[1..],
-        "BAD=NAME",
-        "secret-1234",
+        &secret_env("BAD=NAME", "secret-1234"),
+        &[],
         Path::new("/"),
         &inherited(),
         &stop,
@@ -258,8 +303,8 @@ fn output_errors_and_cancellation_stop_the_child() {
     let err = execute(
         Path::new(&argv[0]),
         &argv[1..],
-        "PM_TEST",
-        "secret-1234",
+        &secret_env("PM_TEST", "secret-1234"),
+        &[],
         Path::new("/"),
         &inherited(),
         &stop,
@@ -274,8 +319,8 @@ fn output_errors_and_cancellation_stop_the_child() {
     let err = execute(
         Path::new(&argv[0]),
         &argv[1..],
-        "PM_TEST",
-        "secret-1234",
+        &secret_env("PM_TEST", "secret-1234"),
+        &[],
         Path::new("/"),
         &inherited(),
         &stop,
@@ -307,8 +352,8 @@ fn a_vanished_client_stops_a_child_that_keeps_its_pipes_open() {
     let err = execute(
         Path::new(&argv[0]),
         &argv[1..],
-        "PM_TEST",
-        "secret-1234",
+        &secret_env("PM_TEST", "secret-1234"),
+        &[],
         Path::new("/"),
         &inherited(),
         &stop,
@@ -359,8 +404,8 @@ fn a_vanished_client_stops_a_child_that_closed_its_pipes() {
     let err = execute(
         Path::new(&argv[0]),
         &argv[1..],
-        "PM_TEST",
-        "secret-1234",
+        &secret_env("PM_TEST", "secret-1234"),
+        &[],
         Path::new("/"),
         &inherited(),
         &stop,
@@ -403,8 +448,8 @@ fn a_client_that_is_already_gone_starts_no_child() {
     let err = execute(
         Path::new(&argv[0]),
         &argv[1..],
-        "PM_TEST",
-        "secret-1234",
+        &secret_env("PM_TEST", "secret-1234"),
+        &[],
         Path::new("/"),
         &inherited(),
         &stop,
@@ -466,8 +511,8 @@ fn cancellation_kills_a_grandchild_that_holds_the_pipes() {
         execute(
             Path::new(&argv[0]),
             &argv[1..],
-            "PM_TEST",
-            "secret-1234",
+            &secret_env("PM_TEST", "secret-1234"),
+            &[],
             Path::new("/"),
             &inherited(),
             &stop,
@@ -520,8 +565,8 @@ fn a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes() {
         execute(
             Path::new(&argv[0]),
             &argv[1..],
-            "PM_TEST",
-            "secret-1234",
+            &secret_env("PM_TEST", "secret-1234"),
+            &[],
             Path::new("/"),
             &inherited(),
             &stop,
