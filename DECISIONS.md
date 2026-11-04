@@ -288,7 +288,9 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - Every buffer the codec copies a request into is wiped, because a request
   carries the session-token hex and (for `run`) the grant-token hex, and `pmd`
   is long-lived: `encode` returns `Zeroizing<Vec<u8>>`, the JSON envelope and
-  the decoded tree have their strings overwritten before they are freed,
+  the decoded tree have their strings overwritten before they are freed on
+  every decode path (the tree is held in a wipe-on-drop guard, so a rejected
+  request is covered too — TODO R.65),
   `FrameDecoder` zeroizes the bytes of a taken frame and its whole buffer on
   drop, and the daemon's fixed read chunk is wiped after each `push` (TODO
   R.50c). Growth never lets `Vec` reallocate in place: `push` and the

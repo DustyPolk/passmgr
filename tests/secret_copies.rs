@@ -442,3 +442,79 @@ fn encoding_a_large_run_request_leaves_no_copy_of_the_token_in_freed_memory() {
         needles[1].len()
     );
 }
+
+/// A rejected request must wipe the parsed envelope too (TODO R.65).
+///
+/// `decode_body` used to run `zeroize_json` only after the request match, so
+/// every early `?` — the version check, a missing field inside `run` or
+/// `grant_create`, and the unknown-type arm — freed the tree while it still
+/// held a plain copy of the session-token hex. An old client (`version` 3)
+/// hits the same path, so this is not only a hostile-peer case.
+#[test]
+fn a_rejected_request_leaves_no_copy_of_the_token_in_freed_memory() {
+    let token = SessionToken::from_bytes(&WIRE_TOKEN_BYTES).expect("fixed token");
+    let grant = GrantToken::from_hex(WIRE_GRANT_HEX).expect("fixed grant");
+    wire_needles(&token, &grant);
+    let token_hex = token.to_hex();
+
+    // Build the malformed frames before the window opens: they are the test's
+    // own buffers and must not be counted. The unknown type returns straight
+    // from the match arm; the `grant_create` fails a field-level `?` inside it.
+    // The version check returns before the token is even parsed, which is the
+    // path an old client takes.
+    let old_version = frame_from_body(&serde_json::json!({
+        "version": protocol::PROTOCOL_VERSION - 1,
+        "token": token_hex.as_str(),
+        "request": { "type": "ping" },
+    }));
+    let unknown_type = frame_from_body(&serde_json::json!({
+        "version": protocol::PROTOCOL_VERSION,
+        "token": token_hex.as_str(),
+        "request": { "type": "nope" },
+    }));
+    let missing_label = frame_from_body(&serde_json::json!({
+        "version": protocol::PROTOCOL_VERSION,
+        "token": token_hex.as_str(),
+        "request": {
+            "type": "grant_create",
+            "refs": [],
+            "tags": [],
+            "fields": [],
+            "commands": [],
+            "capabilities": 0,
+            "expires_at": 1,
+            "max_uses": serde_json::Value::Null,
+            "token_hash": grant.to_hex().as_str(),
+        },
+    }));
+
+    let (_, hits) = count_releases(&WIRE_HITS, || {
+        for frame in [&old_version, &unknown_type, &missing_label] {
+            let mut decoder = FrameDecoder::new();
+            decoder.push(frame).expect("push");
+            assert!(
+                decoder.next_request().is_err(),
+                "the malformed frame must be rejected"
+            );
+        }
+    });
+
+    assert_eq!(
+        hits,
+        0,
+        "a rejected request left a {}-character token hex in freed memory; \
+         wipe the parsed envelope before returning the error (SECURITY.md \
+         limit 6)",
+        token.to_hex().len()
+    );
+}
+
+/// Wrap a JSON body in the length prefix `FrameDecoder` expects. Test-only: no
+/// validation, because the bodies here are deliberately malformed.
+fn frame_from_body(body: &serde_json::Value) -> Vec<u8> {
+    let body = serde_json::to_vec(body).expect("serialize the test body");
+    let mut frame = Vec::with_capacity(protocol::LENGTH_PREFIX_BYTES + body.len());
+    frame.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&body);
+    frame
+}

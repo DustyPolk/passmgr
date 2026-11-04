@@ -379,6 +379,20 @@ impl std::io::Write for BodyWriter {
     }
 }
 
+/// Owns the parsed envelope and wipes every string in it before it is freed.
+///
+/// A `serde_json::Value` has no `Zeroize` impl, and its strings are ordinary
+/// heap allocations: dropping the tree frees the session-token hex (and the
+/// grant-token hex for `run`) unwiped. A guard rather than a trailing call
+/// means no error path can skip the wipe (TODO R.65).
+struct WipingJson(Value);
+
+impl Drop for WipingJson {
+    fn drop(&mut self) {
+        zeroize_json(&mut self.0);
+    }
+}
+
 /// Overwrite every string a JSON value owns.
 ///
 /// `serde_json::Value` has no `Zeroize` impl: its strings are ordinary heap
@@ -395,9 +409,15 @@ fn zeroize_json(value: &mut Value) {
 }
 
 fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
-    let mut value: Value = serde_json::from_slice(body)
+    let parsed: Value = serde_json::from_slice(body)
         .map_err(|err| ProtocolError::MalformedJson(err.to_string()))?;
+    // Hold the tree in a guard so every exit wipes it, including each early
+    // `return` below: the envelope holds a plain copy of the session-token hex
+    // (and, for `run`, of the grant-token hex), and a rejected request used to
+    // free it unwiped (TODO R.65).
+    let value = WipingJson(parsed);
     let envelope = value
+        .0
         .as_object()
         .ok_or_else(|| ProtocolError::MalformedJson("top-level value must be an object".into()))?;
 
@@ -464,8 +484,8 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
         }
     };
     // The decoded request owns zeroizing copies of anything secret; the parsed
-    // tree still holds plain strings (the session-token hex among them).
-    zeroize_json(&mut value);
+    // tree still holds plain strings (the session-token hex among them) and is
+    // wiped when `value` drops at the end of this function.
     validate_request(&decoded)?;
     Ok(AuthenticatedRequest::new(token, decoded))
 }

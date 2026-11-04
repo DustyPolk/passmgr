@@ -40,7 +40,7 @@ Rules that apply to every item:
       copying the request `Value` via `to_value`); `encode_body` now moves the
       request into the envelope and serializes through a wipe-and-swap
       `BodyWriter`, covered by a second test (2 hits old, 0 new).
-- [ ] **R.65 `decode_body` skips `zeroize_json` on every error path after the
+- [x] **R.65 `decode_body` skips `zeroize_json` on every error path after the
       JSON parse, so a rejected request's token hex is freed unwiped.**
       `src/protocol/codec.rs:306` parses the whole envelope, but
       `zeroize_json(&mut value)` runs only at `src/protocol/codec.rs:376`.
@@ -60,6 +60,11 @@ Rules that apply to every item:
       Test: under the scanning allocator, decode an unknown request type and a
       `grant_create` missing its `label`; require 0 hits for both. Both fail
       today.
+      Done: the parsed tree is held in a `WipingJson` guard whose `Drop` runs
+      `zeroize_json`, so no exit — error or success — can skip the wipe; the
+      trailing call after the match is gone because the guard covers it. The
+      test also decodes a `version` 3 envelope (the old-client path) and
+      measured 3 freed copies of the token hex before the fix, 0 after.
 - [ ] **R.66 `read_request` propagates `FrameDecoder::push` errors before
       zeroizing the 4 KiB stack chunk, leaving the raw request in stack
       memory.** `src/daemon/run.rs:397-401` calls

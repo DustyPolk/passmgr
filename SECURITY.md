@@ -202,7 +202,9 @@ and reap handling (TODO R.50b considered and rejected that for the risk).
 Everything passmgr owns *is* wiped: the redaction window including when it
 grows, the reader's raw-output buffer, the redactors themselves, and every
 buffer the wire codec copies a request into (the frame it returns, the encoder's
-JSON tree, the decoder's buffer and the body it hands back — TODO R.50c). A
+JSON tree, the decoder's buffer and the body it hands back — TODO R.50c). The
+decoder wipes its parsed tree on every path, including a rejected request, so
+a malformed frame cannot leave the session-token hex in freed memory. A
 `run` never creates such a copy for itself — `tests/secret_copies.rs` runs under
 an allocator that scans every freed block for a canary and requires that a `run`
 leaves no more secret-bearing freed blocks than a bare `std::process::Command`

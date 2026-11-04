@@ -1,3 +1,27 @@
+## 2026-11-03 — Wipe the parsed envelope on a rejected request (TODO R.65)
+
+- `src/protocol/codec.rs`: `decode_body` now holds the `serde_json::Value` in
+  a `WipingJson` guard whose `Drop` calls `zeroize_json`. Before, the wipe ran
+  only after the request match, so the version check, a missing/invalid
+  `token`, a malformed `run`/`prove`/`grant_create`/`grant_revoke`, and the
+  unknown-type arm all freed the tree with the session-token hex (and the
+  grant hex for `run`) still in it. A guard, not a trailing call, so a future
+  `?` cannot reopen the hole.
+- No behavior change for valid requests; `decode` and `FrameDecoder::
+  next_request` both go through `decode_body`.
+- Tests: `tests/secret_copies.rs::a_rejected_request_leaves_no_copy_of_the_
+  token_in_freed_memory` decodes an unknown type, a `grant_create` missing
+  `label`, and a `version` 3 envelope under the freed-block scan; 3 hits
+  before the fix, 0 after. The existing valid-path wire tests still pass.
+- `DECISIONS.md` and `SECURITY.md` now say the wipe covers every decode path,
+  including a rejection.
+- Gate: fmt, clippy, full test suite pass.
+- **Next iteration must know:** R.66 is the remaining half of the same review
+  (`src/daemon/run.rs:397-401` wipes its read chunk only after `push`'s `?`),
+  then R.67 (the reader-thread stack wipe has no test). Both are independent
+  of this change: R.66 is a stack buffer, so the heap-scanning allocator in
+  `tests/secret_copies.rs` will not see it; that test needs a different seam.
+
 ## 2026-11-03 — Wipe the wire codec's growing buffers (TODO R.64)
 
 - `src/protocol/codec.rs`: `FrameDecoder::push` now reserves through
