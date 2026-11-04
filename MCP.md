@@ -43,8 +43,10 @@ any time. Every use is audited.
 ## Transport (stdio)
 
 - Messages are UTF-8 JSON-RPC 2.0 objects, one per line, delimited by `\n`.
-  No embedded newlines. Max line size: 1 MiB. A longer line produces a parse
-  error, and the server discards input up to the next newline.
+  No embedded newlines. Max line size for messages the server reads: 1 MiB.
+  A longer line produces a parse error, and the server discards input up to
+  the next newline. Lines the server writes are not capped: a
+  `run_with_credentials` result at the largest output caps can exceed it.
 - **stdout carries only JSON-RPC messages.** Diagnostics go to stderr. Treat
   any other write to stdout as a bug, and test for it.
 - JSON-RPC batches (top-level arrays) are rejected with `-32600`.
@@ -129,8 +131,8 @@ Implementation notes (`src/mcp/server.rs`, `src/mcp/tools.rs`, `src/mcp/call.rs`
   closes itself with `additionalProperties: false` (map-shaped inputs use
   `propertyNames` instead), no schema property is named like a secret, and
   the entry/grant shapes carry references, names and timestamps only. The
-  catalogue is tested to fit in one JSON-RPC line, so `tools/list` can never
-  be truncated by the 1 MiB line cap.
+  catalogue is tested to fit in 1 MiB, so a client that reads with the same
+  line limit as this server can always read `tools/list`.
 - `tools/call` has a dispatcher that validates `name` and `arguments` before
   anything reaches the daemon. `list_credentials` (4.4d) and
   `describe_credential` (4.4e) are implemented; other tool names answer

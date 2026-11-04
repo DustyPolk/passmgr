@@ -566,9 +566,10 @@ fn parse_error_object(value: &Value) -> Result<ErrorObject, &'static str> {
 /// Serialize a message as exactly one line, including the trailing `\n`.
 ///
 /// JSON encoding escapes every control character inside a string, so the
-/// result contains no other newline. The caller is responsible for keeping
-/// `result` payloads small enough that the line stays under
-/// [`MAX_LINE_BYTES`]; output caps do that when the run is built.
+/// result contains no other newline. There is no size limit here:
+/// [`MAX_LINE_BYTES`] bounds the lines this server reads, not the ones it
+/// writes. A `run_with_credentials` result at the largest output caps, full of
+/// escaped control bytes, encodes to roughly 12 MB.
 pub fn encode_line(message: &Message) -> Vec<u8> {
     let value = match message {
         Message::Request(request) => {
