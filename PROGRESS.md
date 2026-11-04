@@ -1,3 +1,36 @@
+## 2026-11-03 — Wipe the wire codec's growing buffers (TODO R.64)
+
+- `src/protocol/codec.rs`: `FrameDecoder::push` now reserves through
+  `grow_for`/`grow_wiped`, which allocate a fresh buffer, copy, zeroize the
+  old one and only then drop it. `Vec`'s own growth freed the previous
+  allocation with the token hex still in it.
+- The same leak scan found two *encoder* copies, fixed in the same item
+  because the new tests must assert 0 hits including encode:
+  `serde_json::to_vec` grew its writer after the grant hex was written, and
+  `json!` deep-copied the request `Value` through `to_value`, leaving a second
+  tree (with the grant hex) to be dropped unwiped. `encode_body` now moves the
+  request into the envelope and serializes through `BodyWriter`, which grows
+  with `grow_wiped` and wipes on drop.
+- Correction to the review finding: a 20 KiB frame pushed in 4 KiB chunks
+  does *not* leak via `push`. The envelope puts `request` first, so the token
+  hex (and, for `run`, the grant hex) is in the last ~250 bytes of the body;
+  the final chunk brings it in and no later growth happens. The push leak is
+  real but only when the last chunk crosses the 64 KiB cap, i.e. a body of
+  65533..65536 bytes. The review's 3 hits were the encoder's copies.
+- Tests (`tests/secret_copies.rs`): `a_frame_at_the_size_cap_leaves_no_copy_
+  of_the_token_in_freed_memory` (sizes the body to exactly
+  `MAX_MESSAGE_BYTES` by measuring one encoding; 3 hits old, 0 new) and
+  `encoding_a_large_run_request_leaves_no_copy_of_the_token_in_freed_memory`
+  (16.7 KiB body chunk-pushed; 2 hits old, 0 new). Both use the session and
+  grant hex as needles and run under the freed-block scan.
+- Gate: fmt, clippy and the full test suite pass.
+- **Next iteration must know:** R.65 (`decode_body` error paths skip
+  `zeroize_json`) and R.66 (`read_request` `?` before the chunk wipe) are
+  still open and independent of this change. If you add a test that encodes
+  inside a scan window, remember the probe's own unwiped frees on the *old*
+  code inflate the count; always confirm the count on the old code with the
+  encode outside the window before attributing hits to `push`.
+
 ## 2026-11-03 — Review of c83c9b3..47c64ac
 
 - 4 findings: secret exposure / residue 3 (R.64, R.65, R.66), tests 1

@@ -11,7 +11,7 @@ Rules that apply to every item:
 
 ## Phase R — review findings (fix first)
 
-- [ ] **R.64 `FrameDecoder::push` reallocates the receive buffer without
+- [x] **R.64 `FrameDecoder::push` reallocates the receive buffer without
       wiping the old one, so the session-token hex survives in freed memory.**
       `src/protocol/codec.rs:118` appends with `self.buffer.extend_from_slice(bytes)`.
       When a request is larger than the first `read` (`READ_CHUNK = 4096`,
@@ -30,6 +30,16 @@ Rules that apply to every item:
       Test: with a token whose hex is the canary, push a >4 KiB `run` request
       (valid token + `grant`) in 4 KiB chunks and take the frame under the
       scanning allocator; require 0 hits. It must fail with the current `push`.
+      Done: `push` now grows through `grow_for`/`grow_wiped` (allocate, copy,
+      zeroize the old buffer, swap). The leak needs the *last* push to cross
+      the 64 KiB cap — the token hex is at the end of the envelope, so a
+      mid-size frame's final chunk brings the token and then nothing grows —
+      so the test sizes the body to exactly `MAX_MESSAGE_BYTES`; it failed with
+      3 hits on the old code. The scan also caught two *encoder* copies
+      (`serde_json::to_vec` growth after the grant hex, and `json!` deep-
+      copying the request `Value` via `to_value`); `encode_body` now moves the
+      request into the envelope and serializes through a wipe-and-swap
+      `BodyWriter`, covered by a second test (2 hits old, 0 new).
 - [ ] **R.65 `decode_body` skips `zeroize_json` on every error path after the
       JSON parse, so a rejected request's token hex is freed unwiped.**
       `src/protocol/codec.rs:306` parses the whole envelope, but

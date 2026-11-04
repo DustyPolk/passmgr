@@ -291,9 +291,14 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   the decoded tree have their strings overwritten before they are freed,
   `FrameDecoder` zeroizes the bytes of a taken frame and its whole buffer on
   drop, and the daemon's fixed read chunk is wiped after each `push` (TODO
-  R.50c). Object *keys* in the parsed tree are not wiped: they are protocol
-  field names, never a secret. The kernel's socket buffers are outside the
-  process and are not wiped; see `SECURITY.md` limit 6.
+  R.50c). Growth never lets `Vec` reallocate in place: `push` and the
+  encoder's `BodyWriter` grow through `grow_wiped` (allocate, copy, zeroize
+  the old allocation, swap), and `encode_body` moves the request into the
+  envelope instead of letting `json!` deep-copy it, so no second tree holding
+  the grant hex is dropped unwiped (TODO R.64). Object *keys* in the parsed
+  tree are not wiped: they are protocol field names, never a secret. The
+  kernel's socket buffers are outside the process and are not wiped; see
+  `SECURITY.md` limit 6.
 - Envelope: `{"version":4,"token":"<64 lowercase hex>","request":{...}}`. The
   token is parsed before the request. Version 4 added the required
   `run.grant`; a version-3 daemon would ignore it and authorize with the

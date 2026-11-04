@@ -115,6 +115,9 @@ impl FrameDecoder {
                 max: MAX_BUFFERED_BYTES,
             });
         }
+        self.grow_for(bytes.len());
+        // `grow_for` reserved `bytes.len()` more bytes, so this cannot
+        // reallocate and cannot free a buffer that has held a token.
         self.buffer.extend_from_slice(bytes);
         #[cfg(test)]
         {
@@ -128,6 +131,30 @@ impl FrameDecoder {
         Ok(())
     }
 
+    /// Reserve room for `additional` more bytes without letting `Vec`
+    /// reallocate a buffer whose front may already hold a token.
+    ///
+    /// `Vec::extend_from_slice` grows in place when it can, but otherwise
+    /// frees the old allocation with every byte still in it. A request larger
+    /// than the daemon's 4 KiB read chunk therefore used to leave several
+    /// copies of the session-token hex (and, for `run`, the grant-token hex)
+    /// in `pmd`'s heap for the rest of the session (TODO R.64). Allocate a
+    /// fresh buffer, copy into it, wipe the old one, and only then drop it.
+    /// The new capacity at least doubles, so growth stays amortized linear.
+    fn grow_for(&mut self, additional: usize) {
+        let needed = self.buffer.len() + additional;
+        if needed <= self.buffer.capacity() {
+            return;
+        }
+        grow_wiped(&mut self.buffer, needed);
+        #[cfg(test)]
+        {
+            // The new allocation only holds the bytes just copied; the old
+            // tail (which `written_bytes` could read) went with the wipe.
+            self.written = self.buffer.len();
+        }
+    }
+
     /// The number of bytes currently buffered but not yet returned.
     pub fn buffered(&self) -> usize {
         self.buffer.len()
@@ -138,7 +165,8 @@ impl FrameDecoder {
     /// The returned copy zeroizes on drop, and the frame's bytes are wiped out
     /// of the decoder's own buffer before the buffer is shrunk: `Vec::drain`
     /// would move the following frame down and leave the taken frame's tail in
-    /// the allocation, reachable by nothing but a heap inspection.
+    /// the allocation, reachable by nothing but a heap inspection. Growth in
+    /// [`FrameDecoder::push`] is a wipe-and-swap for the same reason.
     pub fn next_frame(&mut self) -> Result<Option<Zeroizing<Vec<u8>>>, ProtocolError> {
         if self.buffer.len() < LENGTH_PREFIX_BYTES {
             return Ok(None);
@@ -187,8 +215,22 @@ impl FrameDecoder {
     }
 }
 
-/// Read the big-endian length prefix. The caller must pass at least
-/// [`LENGTH_PREFIX_BYTES`] bytes.
+/// Replace `buffer` with a larger allocation, wiping the bytes of the old one
+/// before it is freed.
+///
+/// `Vec`'s own growth frees the previous allocation with every byte still in
+/// it, which for this module means a copy of a token hex surviving in `pmd`'s
+/// heap for the rest of the session (TODO R.64). The new capacity at least
+/// doubles, so repeated growth stays amortized linear.
+fn grow_wiped(buffer: &mut Vec<u8>, needed: usize) {
+    let capacity = needed.max(buffer.capacity().saturating_mul(2));
+    let mut grown = Vec::with_capacity(capacity);
+    // Fits by construction, so no second allocation happens here.
+    grown.extend_from_slice(buffer);
+    buffer.zeroize();
+    *buffer = grown;
+}
+
 fn read_length(prefix: &[u8]) -> usize {
     u32::from_be_bytes([prefix[0], prefix[1], prefix[2], prefix[3]]) as usize
 }
@@ -272,19 +314,69 @@ fn encode_body(
         }),
     };
     let token = token.to_hex();
-    let mut envelope = json!({
-        "version": PROTOCOL_VERSION,
-        "token": token.as_str(),
-        "request": request,
-    });
-    let body = Zeroizing::new(
-        serde_json::to_vec(&envelope)
-            .map_err(|err| ProtocolError::MalformedJson(err.to_string()))?,
-    );
+    // Build the envelope by moving `request` in. `json!` on a `Value` variable
+    // deep-copies it through `serde_json::to_value`, and the tree that was left
+    // behind would be dropped with the grant-token hex still in it (TODO
+    // R.64).
+    let mut envelope = Map::new();
+    envelope.insert("version".to_owned(), Value::from(PROTOCOL_VERSION));
+    envelope.insert("token".to_owned(), Value::String(token.as_str().to_owned()));
+    envelope.insert("request".to_owned(), request);
+    let mut envelope = Value::Object(envelope);
+    // `serde_json::to_vec` starts at 128 bytes and grows through `Vec`'s own
+    // reallocation, so a request long enough to cross a capacity boundary
+    // after the token hex was written used to leave a copy in freed memory.
+    // `BodyWriter` grows with a wipe-and-swap instead.
+    let mut body = BodyWriter::new();
+    let serialized = serde_json::to_writer(&mut body, &envelope);
     // `serde_json` copies the token hex into the tree, and the tree outlives
     // the serialized bytes, so wipe it before it is freed.
     zeroize_json(&mut envelope);
-    Ok(body)
+    serialized.map_err(|err| ProtocolError::MalformedJson(err.to_string()))?;
+    Ok(Zeroizing::new(body.into_inner()))
+}
+
+/// A body buffer for `serde_json` that grows with [`grow_wiped`].
+///
+/// `serde_json::to_vec` starts at 128 bytes and grows through `Vec`'s own
+/// reallocation, so a request long enough to cross a capacity boundary after
+/// the token hex was written used to leave a copy in freed memory (TODO R.64).
+/// Serializing through this writer gives the encoder the same wipe-and-swap
+/// guarantee as [`FrameDecoder::push`]. The writer also wipes its bytes on
+/// drop, so a serialization error cannot leave them behind either.
+struct BodyWriter {
+    bytes: Vec<u8>,
+}
+
+impl BodyWriter {
+    fn new() -> Self {
+        Self { bytes: Vec::new() }
+    }
+
+    fn into_inner(mut self) -> Vec<u8> {
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+impl Drop for BodyWriter {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
+impl std::io::Write for BodyWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let needed = self.bytes.len() + buf.len();
+        if needed > self.bytes.capacity() {
+            grow_wiped(&mut self.bytes, needed);
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Overwrite every string a JSON value owns.

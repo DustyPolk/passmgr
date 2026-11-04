@@ -37,7 +37,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
-use passmgr::protocol::{self, FrameDecoder, Request};
+use passmgr::grant::GrantToken;
+use passmgr::protocol::{self, FrameDecoder, Request, RunRequest};
 use passmgr::redact::Redactor;
 use passmgr::runner::{self, Stop};
 use passmgr::token::SessionToken;
@@ -53,15 +54,25 @@ const ENV_NAME: &str = "PASSMGR_TEST_SECRET";
 /// Bytes of the session token used by the wire-codec test. Its hex encoding is
 /// what a frame carries, so the needle below is derived from it.
 const WIRE_TOKEN_BYTES: [u8; 32] = *b"r50c-wire-token-canary-000000001";
+/// A fixed grant token for the chunked-frame test, in the lowercase hex form a
+/// `run` frame carries. Only its hex matters: it is the second needle the
+/// freed-block scan looks for. Eight copies of an eight-digit pattern.
+const WIRE_GRANT_HEX: &str = concat!(
+    "9f64a9a19f64a9a1",
+    "9f64a9a19f64a9a1",
+    "9f64a9a19f64a9a1",
+    "9f64a9a19f64a9a1",
+);
 
 static WATCHING: AtomicBool = AtomicBool::new(false);
 static REDACT_HITS: AtomicUsize = AtomicUsize::new(0);
 static RUN_HITS: AtomicUsize = AtomicUsize::new(0);
 static BASELINE_HITS: AtomicUsize = AtomicUsize::new(0);
 static WIRE_HITS: AtomicUsize = AtomicUsize::new(0);
-/// The token hex to look for in freed blocks. Set once, before any watched
-/// window opens; reading a `OnceLock` in the allocator allocates nothing.
-static WIRE_NEEDLE: OnceLock<Vec<u8>> = OnceLock::new();
+/// The token hexes (session and grant) to look for in freed blocks. Set once,
+/// before any watched window opens; reading a `OnceLock` in the allocator
+/// allocates nothing.
+static WIRE_NEEDLES: OnceLock<Vec<Vec<u8>>> = OnceLock::new();
 
 /// Serializes the watched windows: the counters are process-wide.
 static WATCH_LOCK: Mutex<()> = Mutex::new(());
@@ -89,13 +100,14 @@ fn scan(ptr: *mut u8, len: usize) {
             counter.fetch_add(1, Ordering::SeqCst);
         }
     }
-    if let Some(needle) = WIRE_NEEDLE.get() {
-        if len >= needle.len() {
-            // SAFETY: same block and bounds as above.
-            let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
-            if bytes.windows(needle.len()).any(|window| window == needle) {
-                WIRE_HITS.fetch_add(1, Ordering::SeqCst);
-            }
+    if let Some(needles) = WIRE_NEEDLES.get() {
+        // SAFETY: same block and bounds as above.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+        if needles
+            .iter()
+            .any(|needle| len >= needle.len() && contains(bytes, needle))
+        {
+            WIRE_HITS.fetch_add(1, Ordering::SeqCst);
         }
     }
 }
@@ -287,9 +299,10 @@ fn a_run_leaves_no_more_copies_than_the_spawn_itself() {
 #[test]
 fn the_wire_codec_leaves_no_copy_of_the_token_in_freed_memory() {
     let token = SessionToken::from_bytes(&WIRE_TOKEN_BYTES).expect("fixed token");
-    // The needle is allocated before the window opens and lives until the
-    // process exits, so it is never itself scanned.
-    let needle = WIRE_NEEDLE.get_or_init(|| token.to_hex().as_bytes().to_vec());
+    let grant = GrantToken::from_hex(WIRE_GRANT_HEX).expect("fixed grant");
+    // The needles are allocated before the window opens and live until the
+    // process exits, so they are never themselves scanned.
+    let needles = wire_needles(&token, &grant);
 
     let (_, hits) = count_releases(&WIRE_HITS, || {
         let frame = protocol::encode(&token, &Request::Ping).expect("encode");
@@ -302,8 +315,130 @@ fn the_wire_codec_leaves_no_copy_of_the_token_in_freed_memory() {
     assert_eq!(
         hits,
         0,
-        "the wire codec left the token hex {} times in freed memory; see \
+        "the wire codec left a {}-character token hex in freed memory; see \
          SECURITY.md limit 6",
-        needle.len()
+        needles[0].len()
+    );
+}
+
+/// The hex needles the freed-block scan looks for, set once before any watched
+/// window opens. Both inputs are fixed constants, so whichever wire test runs
+/// first initializes the same list.
+fn wire_needles(token: &SessionToken, grant: &GrantToken) -> &'static [Vec<u8>] {
+    WIRE_NEEDLES.get_or_init(|| {
+        vec![
+            token.to_hex().as_bytes().to_vec(),
+            grant.to_hex().as_bytes().to_vec(),
+        ]
+    })
+}
+
+/// A `run` request whose command is `/usr/bin/true` followed by `arguments`
+/// 4 KiB arguments and, when it is non-zero, one `extra`-byte argument. The
+/// argument bytes are plain `a`s, so the encoded size grows by exactly `extra`.
+fn large_run_request(grant: &GrantToken, arguments: usize, extra: usize) -> Request {
+    let command = std::iter::once("/usr/bin/true".to_string())
+        .chain(std::iter::repeat_n("a".repeat(4096), arguments))
+        .chain((extra > 0).then(|| "a".repeat(extra)))
+        .collect();
+    Request::Run(RunRequest {
+        env: "API_KEY".into(),
+        reference: "pm://00112233445566778899aabbccddeeff".into(),
+        command,
+        cwd: "/tmp".into(),
+        grant: grant.clone(),
+    })
+}
+
+/// A frame at the size cap must not leave the token hex in freed memory when
+/// the decoder grows its receive buffer (TODO R.64).
+///
+/// The envelope orders the token hex last, so the leak happens at the end:
+/// a body of exactly [`protocol::MAX_MESSAGE_BYTES`] is pushed as sixteen
+/// 4 KiB chunks plus a four-byte tail, and that tail makes `push` grow the
+/// 64 KiB buffer one last time while it already holds the token hex (and the
+/// grant hex). `grow_for`/`grow_wiped` now allocate, copy, wipe and only then
+/// drop the old buffer. The body size is reached by measuring one encoding and
+/// sizing the last argument to the remainder, so the test does not depend on
+/// the exact JSON overhead.
+#[test]
+fn a_frame_at_the_size_cap_leaves_no_copy_of_the_token_in_freed_memory() {
+    let token = SessionToken::from_bytes(&WIRE_TOKEN_BYTES).expect("fixed token");
+    let grant = GrantToken::from_hex(WIRE_GRANT_HEX).expect("fixed grant");
+    let needles = wire_needles(&token, &grant);
+    let frame_bytes = protocol::LENGTH_PREFIX_BYTES + protocol::MAX_MESSAGE_BYTES;
+
+    let (_, hits) = count_releases(&WIRE_HITS, || {
+        // Measure the encoding with a one-byte last argument; every further
+        // byte of that argument adds exactly one byte to the body.
+        let probe =
+            protocol::encode(&token, &large_run_request(&grant, 15, 1)).expect("encode the probe");
+        let extra = 1 + frame_bytes
+            .checked_sub(probe.len())
+            .expect("the fixed arguments must leave room under the cap");
+        assert!(
+            extra <= protocol::MAX_ARG_BYTES,
+            "the last argument needs {extra} bytes, over the {}-byte cap",
+            protocol::MAX_ARG_BYTES
+        );
+        let frame = protocol::encode(&token, &large_run_request(&grant, 15, extra))
+            .expect("encode the frame");
+        assert_eq!(
+            frame.len(),
+            frame_bytes,
+            "the probe-sized argument must produce a frame at the cap"
+        );
+
+        let mut decoder = FrameDecoder::new();
+        for chunk in frame.chunks(4096) {
+            decoder.push(chunk).expect("push");
+        }
+        let decoded = decoder.next_request().expect("decode").expect("request");
+        assert!(decoded.token().matches(&token));
+    });
+
+    assert_eq!(
+        hits,
+        0,
+        "a frame at the size cap left a {}-character token hex in freed \
+         memory; see SECURITY.md limit 6 and wipe the buffer before it is \
+         reallocated",
+        needles[0].len()
+    );
+}
+
+/// Encoding a large `run` request must not leave the token or grant hex in
+/// freed memory (TODO R.64).
+///
+/// The freed-block scan caught two encoder leaks: `serde_json::to_vec` grew
+/// its writer after the grant hex had been written, freeing the old buffer
+/// with the hex in it, and `json!` deep-copied the request `Value` through
+/// `serde_json::to_value`, so a second tree holding the grant hex was dropped
+/// unwiped. `encode_body` now moves the request into the envelope and
+/// serializes through `BodyWriter`, which grows with `grow_wiped`.
+#[test]
+fn encoding_a_large_run_request_leaves_no_copy_of_the_token_in_freed_memory() {
+    let token = SessionToken::from_bytes(&WIRE_TOKEN_BYTES).expect("fixed token");
+    let grant = GrantToken::from_hex(WIRE_GRANT_HEX).expect("fixed grant");
+    let needles = wire_needles(&token, &grant);
+    let request = large_run_request(&grant, 4, 0);
+
+    let (_, hits) = count_releases(&WIRE_HITS, || {
+        let frame = protocol::encode(&token, &request).expect("encode");
+        let mut decoder = FrameDecoder::new();
+        for chunk in frame.chunks(4096) {
+            decoder.push(chunk).expect("push");
+        }
+        let decoded = decoder.next_request().expect("decode").expect("request");
+        assert!(decoded.token().matches(&token));
+    });
+
+    assert_eq!(
+        hits,
+        0,
+        "encoding a large frame left a {}-character grant-token hex in freed \
+         memory; see SECURITY.md limit 6 and wipe the buffer before it is \
+         reallocated",
+        needles[1].len()
     );
 }
