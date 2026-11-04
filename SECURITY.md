@@ -13,13 +13,14 @@ TTY gate or the redactor).
 
 Grant-based authorization is implemented for `run` (TODO 3.1–3.6): every
 agent-facing use needs a grant token that matches an active, in-scope grant in
-the vault, and the daemon records the use before it injects. The hash-chained
-audit log is still open (TODO 3.8–3.9), so no audit record is written today.
-`run` also has a human-only local path (TODO 3.7): without a grant token, at a
-terminal, the CLI prompts for the master password, opens the named vault, and
-injects under the same TTY/agent gate as reveal. It is not audited either
-until TODO 3.8. Any process running as the same user can read the 0600 session
-file, so:
+the vault, and the daemon records the use before it injects. Every `run` that
+reaches `pmd` appends one metadata-only record to the hash-chained audit log
+at `$XDG_STATE_HOME/passmgr/audit.jsonl` (TODO 3.8); the `pm audit` reader and
+`pm audit verify` are still open (TODO 3.9). `run` also has a human-only local
+path (TODO 3.7): without a grant token, at a terminal, the CLI prompts for the
+master password, opens the named vault, and injects under the same TTY/agent
+gate as reveal. A local run is audited too, with `source: local` and no grant.
+Any process running as the same user can read the 0600 session file, so:
 
 - `passmgr run` is the agent-facing way to use a secret, and it prevents
   *accidental* exposure: the value never crosses the socket, and relayed child
@@ -100,9 +101,9 @@ inherits every limit below.
   because it only removes access, and the daemon persists it in the vault
   with the key it already holds. A running `pmd` also remembers the furthest
   `uses` and any revocation it has seen per grant id, so putting an older
-  vault back cannot undo either (limit 7). The hash-chained audit log that
-  records every allowed and denied use without values or tokens is designed
-  in `MCP.md` but still open (TODO 3.8–3.9); today no audit record is written.
+  vault back cannot undo either (limit 7). The hash-chained audit log records
+  every allowed and denied `run` without values or tokens (TODO 3.8); the
+  `pm audit` reader and chain verifier are still open (TODO 3.9).
 
 ## Known limits
 

@@ -1,3 +1,38 @@
+## 2026-11-04 — Hash-chained audit log for daemon and local runs (TODO 3.8)
+
+- New `src/audit.rs`: `$XDG_STATE_HOME/passmgr/audit.jsonl` (fallback
+  `~/.local/state`), one JSON line with `v`, `ts`, `source`, `event`,
+  `outcome`, `grant`, `ref`, `command`, `args`, `exit`/`signal`, `prev`.
+  `prev` = SHA-256 of the previous line without its newline; first is 64 zeros.
+- Appends hold an exclusive `flock`, read only the last line, refuse a torn or
+  oversized (>32 KiB) last line, write `O_APPEND`, and `fsync`. The file is
+  0600 in a 0700 `passmgr` dir; `O_NOFOLLOW`, regular-file, owner and exact-mode
+  checks refuse a loose path instead of repairing it.
+- `src/daemon/run.rs` preflights the log before parsing and records every path
+  (bad request, denied, not found, internal, cancelled, spawn/output failure,
+  allowed); `record_use` now returns the authorizing `GrantId` for the record.
+  An unrecordable run is refused with `internal` before decrypting or spawning.
+- `src/cli/run.rs` audits the grant-less local path too (`source: local`, no
+  grant) with the same outcomes and fail-closed preflight (exit 5 before the
+  password prompt when the log is unusable).
+- Tests: `src/audit.rs` units (path rules, one-line JSON, control-char bounds,
+  chain + 0600/0700, loose file/dir refusal, torn/oversized last line) and new
+  `tests/audit.rs` (real daemon: allowed/denied records free of the secret and
+  both tokens, two-record chain, unrecordable log refuses the run, modes).
+  `tests/run_local.rs` asserts the local record. Tests set `XDG_STATE_HOME` per
+  fixture/binary so they never touch the real log. SECURITY, README, MCP,
+  DECISIONS and `tests/docs.rs` updated.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, full
+  `cargo test` green; `cargo audit` skipped (not installed).
+- **Next iteration must know:** denied records carry `grant: null` even when a
+  token matched an expired/out-of-scope grant (`record_use` returns only the
+  error); TODO 3.9's `--grant` filter should accept that or a follow-up should
+  return the matched id. `args` are capped at 16 × 128 chars (truncated).
+- NEEDS HUMAN REVIEW: the record is appended after the child ends, so a crash
+  mid-run can lose the line even though the secret was injected. The preflight
+  only proves writability. A pre-run "started" record would double every use;
+  left for a human decision.
+
 ## 2026-11-04 — `run` for humans without a grant (TODO 3.7)
 
 - `src/cli/run.rs`: `command_run(options, agent_mode, db_path)` now has two

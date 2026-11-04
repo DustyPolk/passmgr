@@ -178,6 +178,9 @@ impl Fixture {
             .arg("--runtime-dir")
             .arg(&self.runtime)
             .args(extra)
+            // Never let a test daemon write the real user's audit log
+            // (TODO 3.8).
+            .env("XDG_STATE_HOME", self._directory.path().join("state"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());

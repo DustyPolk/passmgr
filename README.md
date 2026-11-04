@@ -196,8 +196,9 @@ This prompts for the master password, opens that vault locally, and uses the
 same direct execution and redaction as the daemon path. It is refused (exit 5)
 when stdin or stdout is not a terminal or when an agent marker (or `--agent`)
 is present; the check happens before the password prompt, so a refusal never
-reads the vault. Local runs are not written to the audit log yet (audit is
-still TODO 3.8).
+reads the vault. Local runs are written to the same hash-chained audit log as
+daemon runs, with `source: local` and no grant (TODO 3.8); the record never
+holds the secret or a token.
 
 On the grant path, `run` needs both the unlock session token and a grant token
 that covers the credential and command. The grant token is read from `--grant-file` or

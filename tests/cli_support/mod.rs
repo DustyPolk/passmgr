@@ -10,7 +10,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,19 @@ pub fn run(args: &[&str], input: &str) -> Output {
     run_with_env(args, input, &[])
 }
 
+/// A state home shared by every CLI test in this binary.
+///
+/// `run` now appends to the audit log (TODO 3.8), and a test must never touch
+/// the developer's real `$XDG_STATE_HOME`. One directory per test binary keeps
+/// the audit file out of the fixture vaults; tests that assert on audit
+/// contents override this with their own directory.
+pub fn state_home() -> &'static Path {
+    static STATE: OnceLock<TempDir> = OnceLock::new();
+    STATE
+        .get_or_init(|| tempfile::tempdir().expect("create the test state home"))
+        .path()
+}
+
 /// Build a command with every agent marker removed, so the environment of the
 /// test harness itself cannot change the outcome. Vault-selection variables
 /// are removed too: a developer shell that exported one must not make a test
@@ -43,6 +56,7 @@ pub fn base_command(args: &[&str]) -> Command {
     }
     command.env_remove("PASSMGR_DB");
     command.env_remove("PASSMGR_GRANT_FILE");
+    command.env("XDG_STATE_HOME", state_home());
     command
 }
 

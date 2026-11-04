@@ -330,8 +330,16 @@ fn security_current_status_matches_the_implemented_grant_flow() {
         "SECURITY.md Current status must say run needs a grant token"
     );
     assert!(
-        status.contains("TODO 3.8") && status.contains("no audit record is written today"),
-        "SECURITY.md Current status must say the audit log is still TODO 3.8"
+        status.contains("audit log") && status.contains("TODO 3.8"),
+        "SECURITY.md Current status must say run is audited (TODO 3.8)"
+    );
+    assert!(
+        !status.contains("no audit record is written today"),
+        "SECURITY.md Current status must not say no audit record is written"
+    );
+    assert!(
+        status.contains("TODO 3.9") && status.contains("pm audit verify"),
+        "SECURITY.md Current status must say pm audit verify is still TODO 3.9"
     );
 }
 

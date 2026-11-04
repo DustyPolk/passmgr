@@ -144,6 +144,7 @@ impl Daemon {
             .arg(&fixture.vault)
             .arg("--runtime-dir")
             .arg(&fixture.runtime)
+            .env("XDG_STATE_HOME", fixture._directory.path().join("state"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -219,6 +220,7 @@ fn command_at(xdg_runtime_dir: &Path, args: &[&str]) -> Command {
 fn run(fixture: &Fixture, args: &[&str]) -> Output {
     command_at(fixture.xdg_runtime_dir(), args)
         .env("PASSMGR_GRANT_FILE", &fixture.grant_file)
+        .env("XDG_STATE_HOME", fixture._directory.path().join("state"))
         .output()
         .expect("run passmgr")
 }

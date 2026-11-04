@@ -364,7 +364,8 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   `runner::execute` and redactor as `pmd`. It accepts `--db`/`PASSMGR_DB`. A
   grant token in the flag or `PASSMGR_GRANT_FILE` always selects the daemon
   path: a missing daemon is an error, never a fallback to local injection.
-  Local runs are not audited yet; TODO 3.8 must cover them.
+  Local runs are audited like daemon runs (TODO 3.8), with `source: local`
+  and no grant id.
 - Protocol code layout: `src/protocol/mod.rs` owns framing, requests and
   errors; `src/protocol/response.rs` owns one-shot responses and the `run`
   stream. `crate::protocol::*` re-exports the public API unchanged.
@@ -800,9 +801,15 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   live in the MCP server's memory, are zeroized, and never appear in tool
   output or the audit log.
 - Audit: append-only `$XDG_STATE_HOME/passmgr/audit.jsonl` (fallback
-  `~/.local/state`), 0600, one JSON object per line, hash-chained with `prev`
-  = SHA-256 of the previous line. No secrets, no tokens; `pm audit verify`
-  reports the first broken link with exit 6.
+  `~/.local/state`), 0600 in a 0700 directory, one JSON object per line,
+  hash-chained with `prev` = SHA-256 of the previous line's bytes without its
+  newline. No secrets, no tokens; `pm audit verify` reports the first broken
+  link with exit 6. Implemented in `src/audit.rs` (TODO 3.8): appends read only
+  the last line under an exclusive `flock`, refuse a torn or oversized last
+  line, `fsync` each record, and a run whose audit record cannot be written is
+  refused before decryption or spawn (fail closed). `O_NOFOLLOW`, regular-file
+  and owner checks match the session file; a group/world-readable file or
+  directory is refused, not repaired.
 
 ## Dependencies
 

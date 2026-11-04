@@ -35,6 +35,8 @@ use zeroize::Zeroizing;
 #[cfg(unix)]
 use passmgr::agent;
 #[cfg(unix)]
+use passmgr::audit;
+#[cfg(unix)]
 use passmgr::client::{self, RunOutcome};
 #[cfg(unix)]
 use passmgr::error::EXIT_OUTPUT_CLOSED;
@@ -228,11 +230,36 @@ fn run_locally(
     // Parse before unlocking: a malformed reference is a usage error and must
     // not cost the human a master-password prompt.
     let id = store::EntryId::parse_ref(&reference)?;
+    // A human run is still a credential use, so it is audited like a daemon
+    // run (TODO 3.8). Refuse before decrypting when the record could not be
+    // written: an unrecorded use is worse than a refused one.
+    let audit_path = audit::default_path().map_err(|error| {
+        Error::Refused(format!("refusing to run without an audit log: {error}"))
+    })?;
+    audit::check_writable(&audit_path).map_err(|error| {
+        Error::Refused(format!("refusing to run without an audit log: {error}"))
+    })?;
+    let program_text = program.to_string_lossy();
+    let record = |outcome: audit::Outcome, termination: Option<audit::Termination>| {
+        let event = audit::Event {
+            source: audit::Source::Local,
+            outcome,
+            grant: None,
+            reference: Some(reference.as_str()),
+            command: Some(program_text.as_ref()),
+            args: command.get(1..).unwrap_or(&[]),
+            termination,
+        };
+        if let Err(error) = audit::append(&audit_path, &event) {
+            eprintln!("passmgr: could not append the audit record: {error}");
+        }
+    };
     let secret = {
         let (vault, _master) = super::unlock(db_path)?;
-        let credential = vault
-            .get_by_ref(id)
-            .ok_or_else(|| Error::EntryNotFound(reference.clone()))?;
+        let Some(credential) = vault.get_by_ref(id) else {
+            record(audit::Outcome::NotFound, None);
+            return Err(Error::EntryNotFound(reference.clone()));
+        };
         Zeroizing::new(credential.password().to_owned())
     };
 
@@ -264,19 +291,36 @@ fn run_locally(
     );
 
     match result {
-        Ok(exit) => Ok(ExitCode::from(status_code(exit))),
+        Ok(exit) => {
+            let termination = match exit {
+                RunExit::Code(code) => audit::Termination::Code(code),
+                RunExit::Signal(signal) => audit::Termination::Signal(signal),
+            };
+            record(audit::Outcome::Allowed, Some(termination));
+            Ok(ExitCode::from(status_code(exit)))
+        }
         Err(runner::RunError::Output(_)) if output_closed.get() => {
+            record(audit::Outcome::OutputError, None);
             let _ = writeln!(
                 err,
                 "passmgr: output pipe closed; cancelled the run (exit {EXIT_OUTPUT_CLOSED})"
             );
             Ok(ExitCode::from(EXIT_OUTPUT_CLOSED))
         }
-        Err(runner::RunError::Spawn(error)) => Err(Error::Daemon(format!(
-            "could not start the command: {error}"
-        ))),
-        Err(runner::RunError::Output(error)) => Err(Error::Io(error)),
-        Err(runner::RunError::Cancelled) => Err(Error::Daemon("the run was cancelled".into())),
+        Err(runner::RunError::Spawn(error)) => {
+            record(audit::Outcome::SpawnFailed, None);
+            Err(Error::Daemon(format!(
+                "could not start the command: {error}"
+            )))
+        }
+        Err(runner::RunError::Output(error)) => {
+            record(audit::Outcome::OutputError, None);
+            Err(Error::Io(error))
+        }
+        Err(runner::RunError::Cancelled) => {
+            record(audit::Outcome::Cancelled, None);
+            Err(Error::Daemon("the run was cancelled".into()))
+        }
     }
 }
 

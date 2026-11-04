@@ -5,6 +5,8 @@
 
 pub mod agent;
 #[cfg(unix)]
+pub mod audit;
+#[cfg(unix)]
 pub mod client;
 pub mod crypto;
 #[cfg(unix)]

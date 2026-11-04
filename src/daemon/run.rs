@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::audit;
 use crate::grant::{AccessRequest, Denied, GrantId, Target, UpdateError};
 use crate::protocol::{self, FrameDecoder, ProtocolError, ResponseError, RunFrame};
 use crate::runner;
@@ -74,9 +75,59 @@ pub(super) fn serve_run(
     let fd = stream.as_raw_fd();
     let client_gone = || client_closed(fd);
     let stop = runner::Stop::new(cancel, &client_gone);
+    // Resolve and check the audit log before doing any work. A use that
+    // cannot be recorded is refused: a run the human cannot see in the audit
+    // trail is worse than a run that did not happen (TODO 3.8).
+    let audit_path = match audit::default_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("pmd: refusing the run: {error}");
+            let _ = write_client_frame(
+                &mut stream,
+                &RunFrame::Error(ResponseError::Internal),
+                &stop,
+            );
+            return;
+        }
+    };
+    if let Err(error) = audit::check_writable(&audit_path) {
+        eprintln!("pmd: refusing the run: {error}");
+        let _ = write_client_frame(
+            &mut stream,
+            &RunFrame::Error(ResponseError::Internal),
+            &stop,
+        );
+        return;
+    }
+    // Metadata only: the reference and argv the client sent, the grant that
+    // authorized (if any) and how the run ended. No secret or token is in
+    // scope here, and `Event` has no field that could carry one.
+    let record = |outcome: audit::Outcome,
+                  grant: Option<GrantId>,
+                  command: Option<&str>,
+                  termination: Option<audit::Termination>| {
+        let event = audit::Event {
+            source: audit::Source::Daemon,
+            outcome,
+            grant,
+            reference: Some(request.reference.as_str()),
+            command,
+            args: request.command.get(1..).unwrap_or(&[]),
+            termination,
+        };
+        if let Err(error) = audit::append(&audit_path, &event) {
+            eprintln!("pmd: could not append the audit record: {error}");
+        }
+    };
     // The protocol guarantees these, but the daemon must not rely on a
     // client-side check for a security decision.
     let Ok(id) = EntryId::parse_ref(&request.reference) else {
+        record(
+            audit::Outcome::BadRequest,
+            None,
+            request.command.first().map(String::as_str),
+            None,
+        );
         let _ = write_client_frame(
             &mut stream,
             &RunFrame::Error(ResponseError::BadRequest),
@@ -85,6 +136,12 @@ pub(super) fn serve_run(
         return;
     };
     if runner::denied_env_name(&request.env) {
+        record(
+            audit::Outcome::BadRequest,
+            None,
+            request.command.first().map(String::as_str),
+            None,
+        );
         let _ = write_client_frame(
             &mut stream,
             &RunFrame::Error(ResponseError::BadRequest),
@@ -93,6 +150,7 @@ pub(super) fn serve_run(
         return;
     }
     let Some(program) = request.command.first() else {
+        record(audit::Outcome::BadRequest, None, None, None);
         let _ = write_client_frame(
             &mut stream,
             &RunFrame::Error(ResponseError::BadRequest),
@@ -107,16 +165,35 @@ pub(super) fn serve_run(
     let Ok(program) = std::fs::canonicalize(program) else {
         // A program that cannot be resolved can never match a grant, and
         // saying so is not an oracle: the grant is checked on the same path.
+        record(
+            audit::Outcome::Denied,
+            None,
+            request.command.first().map(String::as_str),
+            None,
+        );
         let _ = write_client_frame(&mut stream, &RunFrame::Error(ResponseError::Denied), &stop);
         return;
     };
-    let secret = match record_use(vault_path, key, watermarks, request, id, &program) {
-        Ok(secret) => secret,
+    let program_text = program.to_string_lossy();
+    let (grant_id, secret) = match record_use(vault_path, key, watermarks, request, id, &program) {
+        Ok(value) => value,
         Err(RecordError::Denied) => {
+            record(
+                audit::Outcome::Denied,
+                None,
+                Some(program_text.as_ref()),
+                None,
+            );
             let _ = write_client_frame(&mut stream, &RunFrame::Error(ResponseError::Denied), &stop);
             return;
         }
         Err(RecordError::NotFound) => {
+            record(
+                audit::Outcome::NotFound,
+                None,
+                Some(program_text.as_ref()),
+                None,
+            );
             let _ = write_client_frame(
                 &mut stream,
                 &RunFrame::Error(ResponseError::NotFound),
@@ -125,6 +202,12 @@ pub(super) fn serve_run(
             return;
         }
         Err(RecordError::Internal) => {
+            record(
+                audit::Outcome::Internal,
+                None,
+                Some(program_text.as_ref()),
+                None,
+            );
             let _ = write_client_frame(
                 &mut stream,
                 &RunFrame::Error(ResponseError::Internal),
@@ -138,6 +221,12 @@ pub(super) fn serve_run(
     // Re-check after decrypting: a shutdown may have started while the vault
     // was open, and no child may be spawned once the key is being wiped.
     if cancel.load(Ordering::SeqCst) {
+        record(
+            audit::Outcome::Cancelled,
+            Some(grant_id),
+            Some(program_text.as_ref()),
+            None,
+        );
         return;
     }
     let result = runner::execute(
@@ -152,18 +241,49 @@ pub(super) fn serve_run(
     );
     match result {
         Ok(exit) => {
+            let termination = match exit {
+                protocol::RunExit::Code(code) => audit::Termination::Code(code),
+                protocol::RunExit::Signal(signal) => audit::Termination::Signal(signal),
+            };
+            record(
+                audit::Outcome::Allowed,
+                Some(grant_id),
+                Some(program_text.as_ref()),
+                Some(termination),
+            );
             let _ = write_client_frame(&mut stream, &RunFrame::Exit(exit), &stop);
         }
         Err(runner::RunError::Spawn(_)) => {
+            record(
+                audit::Outcome::SpawnFailed,
+                Some(grant_id),
+                Some(program_text.as_ref()),
+                None,
+            );
             let _ = write_client_frame(
                 &mut stream,
                 &RunFrame::Error(ResponseError::SpawnFailed),
                 &stop,
             );
         }
-        // The caller vanished or the daemon is stopping: the child is gone
-        // and there is nobody left to tell.
-        Err(runner::RunError::Output(_) | runner::RunError::Cancelled) => {}
+        Err(runner::RunError::Output(_)) => {
+            record(
+                audit::Outcome::OutputError,
+                Some(grant_id),
+                Some(program_text.as_ref()),
+                None,
+            );
+        }
+        // The daemon is stopping: the child is gone and there is nobody left
+        // to tell.
+        Err(runner::RunError::Cancelled) => {
+            record(
+                audit::Outcome::Cancelled,
+                Some(grant_id),
+                Some(program_text.as_ref()),
+                None,
+            );
+        }
     }
 }
 
@@ -295,7 +415,7 @@ fn record_use(
     request: &protocol::RunRequest,
     id: EntryId,
     program: &Path,
-) -> Result<Zeroizing<String>, RecordError> {
+) -> Result<(GrantId, Zeroizing<String>), RecordError> {
     record_use_with_save(vault_path, key, watermarks, request, id, program, |vault| {
         vault.save_with_key(key.as_slice())
     })
@@ -311,7 +431,7 @@ fn record_use_with_save<F>(
     id: EntryId,
     program: &Path,
     mut save: F,
-) -> Result<Zeroizing<String>, RecordError>
+) -> Result<(GrantId, Zeroizing<String>), RecordError>
 where
     F: FnMut(&Vault) -> crate::Result<()>,
 {
@@ -375,7 +495,7 @@ where
     let Some(credential) = vault.get_by_ref(id) else {
         return Err(RecordError::Internal);
     };
-    Ok(Zeroizing::new(credential.password().to_owned()))
+    Ok((grant_id, Zeroizing::new(credential.password().to_owned())))
 }
 
 /// Read one framed request from a stream, without unbounded allocation.

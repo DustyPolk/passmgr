@@ -172,14 +172,17 @@ iteration: TTY proof, canonical request, daemon write, token file). Ordered:
       exits 5. Tests for all three paths.
       Note: the local path reuses the reveal gate, so stdin **and** stdout must
       be TTYs; a grant token (flag or env) always selects the daemon path and
-      is never a fallback to local injection. Local runs are not audited until
-      3.8.
-- [ ] **3.8 Audit log.** `$XDG_STATE_HOME/passmgr/audit.jsonl` (fallback
+      is never a fallback to local injection. Local runs are audited by 3.8.
+- [x] **3.8 Audit log.** `$XDG_STATE_HOME/passmgr/audit.jsonl` (fallback
       `~/.local/state`), 0600, append-only with `O_APPEND`, one JSON object
       per line, hash-chained (`prev`). Written by the daemon for every
       authorized or denied credential request, and by the CLI for a grant-less
       local `run` (added by 3.7). Tests: one record per run, the
       secret and the token are absent from the file, the chain links.
+      Note: `src/audit.rs` writes `v`, `ts`, `source`, `event`, `outcome`,
+      `grant`, `ref`, `command`, `args`, `exit`/`signal` and `prev`; appends
+      are serialized with `flock` and `fsync`ed, and an unrecordable run is
+      refused before decrypting (fail closed). MCP fields stay with 4.11.
 - [ ] **3.9 `pm audit [--json] [--grant ID] [--since DUR] [--limit N]` and
       `pm audit verify`.** verify reports the first broken link with exit 6.
       Tests: tampering with, deleting or reordering a line is detected.

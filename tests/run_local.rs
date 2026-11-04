@@ -40,6 +40,15 @@ impl LocalVault {
         self.dir.path().to_str().expect("temporary path is UTF-8")
     }
 
+    fn state(&self) -> String {
+        self.dir
+            .path()
+            .join("state")
+            .to_str()
+            .expect("UTF-8 path")
+            .to_owned()
+    }
+
     fn env_argument(&self) -> String {
         format!("API_KEY={}", self.reference)
     }
@@ -66,6 +75,7 @@ fn local_run_injects_and_redacts_both_streams() {
          exit 7\n",
     );
     let env_argument = local.env_argument();
+    let state = local.state();
     let output = run_on_pty(
         &[
             "--db",
@@ -79,7 +89,10 @@ fn local_run_injects_and_redacts_both_streams() {
         "master\n",
         true,
         true,
-        &[("XDG_RUNTIME_DIR", local.runtime())],
+        &[
+            ("XDG_RUNTIME_DIR", local.runtime()),
+            ("XDG_STATE_HOME", state.as_str()),
+        ],
     );
 
     assert_eq!(
@@ -105,6 +118,29 @@ fn local_run_injects_and_redacts_both_streams() {
             "the canary must never be relayed: {stream}"
         );
     }
+
+    // A human local run is a credential use too, so it is audited with the
+    // same metadata-only rule as a daemon run (TODO 3.8).
+    let audit_path = local
+        .dir
+        .path()
+        .join("state")
+        .join("passmgr")
+        .join("audit.jsonl");
+    let text = std::fs::read_to_string(&audit_path).expect("read the audit log");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 1, "one local run, one record: {text}");
+    let record: serde_json::Value = serde_json::from_str(lines[0]).expect("audit JSON");
+    assert_eq!(record["source"], "local");
+    assert_eq!(record["outcome"], "allowed");
+    assert_eq!(record["ref"], local.reference);
+    assert_eq!(record["exit"], 7);
+    assert_eq!(record["command"], program.to_str().expect("UTF-8 path"));
+    assert!(record["grant"].is_null());
+    assert!(
+        !text.contains(EXAMPLE_SECRET),
+        "the local audit record must not contain the secret"
+    );
 }
 
 #[test]

@@ -318,6 +318,11 @@ tool, refs, canonical command path and argv, exit code, redaction count and
 outcome. It **never** holds a secret or a token. Records are hash-chained
 (`prev` = SHA-256 of the previous line). `pm audit verify` checks the chain.
 
+The log and its chain exist from TODO 3.8 for `run` (daemon and human local
+runs, distinguished by the `source` field). The MCP-specific fields above
+(client name, tool, redaction count) are added with TODO 4.11; `pm audit
+verify` is TODO 3.9.
+
 ## Tests that must exist (keep them green forever)
 
 1. Full-session byte capture: drive `pm mcp serve` through both eras with a
