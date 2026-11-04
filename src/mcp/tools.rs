@@ -3,8 +3,8 @@
 //! `MCP.md` defines five tools. This module owns their public face — the
 //! `title`, the model-facing `description`, the `inputSchema`, the
 //! `outputSchema` and the MCP `annotations` — and nothing else. Input
-//! validation and execution arrive with each tool's own TODO (4.4 onwards), so
-//! `tools/list` can be built and tested without a daemon.
+//! validation and execution live in [`super::call`], so `tools/list` can be
+//! built and tested without a daemon.
 //!
 //! The schemas are hand-written JSON on purpose: the repository has no MCP SDK
 //! and no schema-derive dependency, and a schema is part of the contract an
@@ -20,8 +20,6 @@ use crate::protocol::DEFAULT_RUN_TIMEOUT_SECS;
 
 /// The canonical reference form, `pm://` plus 32 lowercase hex characters.
 const REF_PATTERN: &str = "^pm://[0-9a-f]{32}$";
-/// A reference, optionally naming one field of the entry (`pm://<id>/<field>`).
-const REFERENCE_PATTERN: &str = "^pm://[0-9a-f]{32}(/[a-z0-9_-]{1,32})?$";
 /// The longest reference `pmd` accepts.
 const MAX_REFERENCE_BYTES: usize = 128;
 /// A tag: 1-32 bytes of lowercase letters, digits, `_`, `-` and `.`.
@@ -176,21 +174,19 @@ fn describe_credential() -> Value {
 
 fn run_with_credentials() -> Value {
     let mut stdin_ref = reference_schema();
-    stdin_ref["description"] = json!(
-        "Optional reference whose value is written to the child's stdin, then stdin is closed."
-    );
+    stdin_ref["description"] =
+        json!("Not available in this build: a call that sets it is refused. Use env instead.");
     json!({
         "name": Tool::RunWithCredentials.as_str(),
         "title": "Run a command with credentials injected",
         "description": "Run a command with secrets from your grant injected by the local daemon. Pass \
-                        secrets only as references: env or files maps a variable name to a pm:// \
-                        reference, and stdin_ref names a reference for stdin. Never put a literal \
-                        secret in command or plain_env. The daemon checks the grant's scope, command \
-                        allowlist and expiry, spawns the child directly without a shell, and relays \
-                        stdout and stderr with injected values redacted. A refused call returns \
-                        isError with the reason; rather than retrying variants, ask the human for a \
-                        grant that covers what you need. If a secret is missing, the result explains \
-                        which variable was not injected.",
+                        secrets only as references: env maps a variable name to a pm:// reference \
+                        from list_credentials. This build refuses stdin_ref and files; use env. \
+                        Never put a literal secret in command or plain_env. The daemon checks the \
+                        grant's scope, command allowlist and expiry, spawns the child directly \
+                        without a shell, and relays stdout and stderr with injected values redacted. \
+                        A refused call returns isError with the reason; rather than retrying \
+                        variants, ask the human for a grant that covers what you need.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -218,7 +214,7 @@ fn run_with_credentials() -> Value {
                 "stdin_ref": stdin_ref,
                 "files": {
                     "type": "object",
-                    "description": "Variable name to secret reference. The daemon writes the value to a fresh 0600 file and sets the variable to that path.",
+                    "description": "Not available in this build: a non-empty map is refused. Use env instead.",
                     "propertyNames": {"pattern": ENV_NAME_PATTERN},
                     "additionalProperties": reference_schema(),
                     "default": {}
@@ -486,12 +482,14 @@ fn entry_schema() -> Value {
     })
 }
 
-/// A `pm://` reference to a secret field, accepted wherever a value is used.
+/// A canonical `pm://` reference, accepted wherever a value is used. A
+/// `/field` suffix is refused by the call boundary until fields can be
+/// injected, so the schema does not advertise one.
 fn reference_schema() -> Value {
     json!({
         "type": "string",
         "maxLength": MAX_REFERENCE_BYTES,
-        "pattern": REFERENCE_PATTERN
+        "pattern": REF_PATTERN
     })
 }
 

@@ -110,6 +110,13 @@ fn instructions_stay_within_the_contract() {
             "instructions must mention {phrase:?}"
         );
     }
+    // `run_with_credentials` refuses these in this build (5.1/5.2).
+    for injection in ["stdin_ref", "files"] {
+        assert!(
+            !INSTRUCTIONS.contains(injection),
+            "instructions must not recommend {injection:?}"
+        );
+    }
 }
 
 #[test]

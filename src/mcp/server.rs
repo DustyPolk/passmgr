@@ -8,8 +8,8 @@
 //! Every answer is one JSON-RPC line. A malformed or over-long line gets a
 //! parse error and the loop resynchronizes on the next newline, so one bad
 //! line cannot blind the session. Diagnostics (when there are any) belong on
-//! stderr; no tool can make this module print a secret because no tool is
-//! implemented here yet and the daemon has no plaintext request.
+//! stderr; no tool can make this module print a secret because the daemon
+//! has no plaintext request and run output reaches it already redacted.
 //!
 //! The session optionally carries the raw grant token the agent host was
 //! given (TODO 4.4a). Holding it here, behind a redacting `Debug`, keeps it

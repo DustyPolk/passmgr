@@ -259,6 +259,24 @@ fn request_access_cannot_approve_itself() {
 }
 
 #[test]
+fn run_description_matches_what_this_build_injects() {
+    let run = Tool::RunWithCredentials.definition();
+    let description = text(&run, "description");
+    assert!(
+        description.contains("refuses stdin_ref and files"),
+        "{description}"
+    );
+    assert!(!description.contains("which variable"), "{description}");
+    let properties = &run["inputSchema"]["properties"];
+    for refused in ["stdin_ref", "files"] {
+        assert!(
+            text(&properties[refused], "description").starts_with("Not available in this build"),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
 fn input_schemas_accept_references_not_values() {
     let run = Tool::RunWithCredentials.definition();
     let schema = run.get("inputSchema").expect("inputSchema");
@@ -271,7 +289,7 @@ fn input_schemas_accept_references_not_values() {
             .expect("additionalProperties");
         assert_eq!(
             text(additional, "pattern"),
-            "^pm://[0-9a-f]{32}(/[a-z0-9_-]{1,32})?$",
+            "^pm://[0-9a-f]{32}$",
             "{map} must map names to references, never to literal values"
         );
     }

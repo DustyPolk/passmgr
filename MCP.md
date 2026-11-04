@@ -164,7 +164,10 @@ Implementation notes (`src/mcp/server.rs`, `src/mcp/tools.rs`, `src/mcp/call.rs`
 The tool set is deliberately small. Every input is validated against its
 schema in Rust: unknown fields are rejected, and lengths and ranges are
 bounded. On failure, return `isError: true` with a short, actionable message
-that contains no secret. Return both `content` (a short text summary) and
+that contains no secret. One deliberate exception: an argument error in
+`list_credentials` or `describe_credential` stays a JSON-RPC `-32602`, while
+`run_with_credentials` argument errors are `isError` results (see
+`DECISIONS.md`). Return both `content` (a short text summary) and
 `structuredContent` matching `outputSchema`.
 
 Use the same error for out-of-scope and nonexistent refs ("not found or not
@@ -410,7 +413,8 @@ Keep it under 1,200 characters. It must say:
 - Workflow: `access_status` → (`request_access` and wait for the human) →
   `list_credentials` → `run_with_credentials`.
 - Pass secrets as `env`/`stdin_ref`/`files` refs (`pm://…`), never as literal
-  values in `command`.
+  values in `command`. Until 5.1/5.2 land, the text names only `env`, because
+  this build refuses `stdin_ref` and `files`.
 - If a call is refused, ask the human. Do not retry with variations.
 
 ## Audit

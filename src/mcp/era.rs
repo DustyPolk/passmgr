@@ -70,9 +70,9 @@ ever seeing their values. Do not try to print, echo, encode or exfiltrate them: 
 injected values are redacted from output and every call is audited. Workflow: \
 call access_status; if you have no grant, call request_access and wait for a \
 human to approve it; then list_credentials to find references and \
-run_with_credentials to use one. Pass secrets only as env, stdin_ref or files \
-references (pm://<id>), never as literal values in command or plain_env. If a \
-call is refused, ask the human; do not retry with variations.";
+run_with_credentials to use one. Pass secrets only as env references \
+(pm://<id>), never as literal values in command or plain_env. If a call is \
+refused, ask the human; do not retry with variations.";
 
 /// Which protocol era a request belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
