@@ -197,9 +197,10 @@ code does not implement yet.
   (`PASSMGR_AGENT`, `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_SANDBOX`; presence
   counts even when empty) and no `--agent`. Checked before unlocking, so a
   refusal never prompts. The decision lives in `src/agent.rs`.
-- `--agent` can only add refusal. `unlock` is human-only under the same rule;
-  `lock` and `run` need no TTY because neither reveals a value (`lock` only
-  stops the daemon, `run` only uses a reference).
+- `--agent` can only add refusal. `unlock`, `get --reveal` and a grant-less
+  `run` are human-only under the same rule; `lock` and a grant-backed `run`
+  need no TTY because neither reveals a value (`lock` only stops the daemon,
+  `run` only uses a reference).
 - `run` grammar: `passmgr run --env NAME=<ref> -- <command> [args...]`.
   Exactly one `--env` (the protocol injects one secret per run), required,
   with `NAME` and `<ref>` validated before connecting; `--` is required and
@@ -350,12 +351,20 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   the shell that ran `unlock`) and starts the child in the requested `cwd`.
   An unresolvable program is a CLI usage error (exit 2). This is why the
   protocol version is 3: a version-2 daemon would silently ignore `cwd`.
-- `run` does not accept an explicit vault: `--db` and a non-empty
-  `PASSMGR_DB` are a usage error (exit 2) before the CLI resolves the program
-  or connects. The daemon injects from the vault it was unlocked with, so
-  honouring the flag is impossible and ignoring it could inject a value from
-  a vault the human did not name (TODO R.4). Other commands still choose
-  their vault by flag > env > default.
+- A grant-backed `run` does not accept an explicit vault: `--db` and a
+  non-empty `PASSMGR_DB` are a usage error (exit 2) before the CLI resolves
+  the program or connects. The daemon injects from the vault it was unlocked
+  with, so honouring the flag is impossible and ignoring it could inject a
+  value from a vault the human did not name (TODO R.4). Other commands still
+  choose their vault by flag > env > default.
+- A grant-less `run` is the human-only local path (TODO 3.7). It uses the
+  reveal gate from `src/agent.rs` (stdin **and** stdout TTYs, no agent marker,
+  no `--agent`) before it prompts, parses the reference before unlocking, and
+  drops the decrypted vault before spawning. It then uses the same
+  `runner::execute` and redactor as `pmd`. It accepts `--db`/`PASSMGR_DB`. A
+  grant token in the flag or `PASSMGR_GRANT_FILE` always selects the daemon
+  path: a missing daemon is an error, never a fallback to local injection.
+  Local runs are not audited yet; TODO 3.8 must cover them.
 - Protocol code layout: `src/protocol/mod.rs` owns framing, requests and
   errors; `src/protocol/response.rs` owns one-shot responses and the `run`
   stream. `crate::protocol::*` re-exports the public API unchanged.

@@ -412,7 +412,7 @@ mod tests {
     fn grant_revoke_refuses_an_explicit_db_flag() {
         let command = parse_grant(os(&["revoke", "--all"])).expect("revoke parses");
         let error =
-            refuse_daemon_vault_selection(&command, Some(Path::new("/tmp/other.dat")), None)
+            refuse_daemon_vault_selection(&command, Some(Path::new("/tmp/other.dat")), None, true)
                 .expect_err("--db must be refused for grant revoke");
         assert!(error.contains("grant revoke"), "{error}");
         assert!(error.contains("--db"), "{error}");
@@ -420,7 +420,8 @@ mod tests {
         // `grant list` reads the vault locally, so it keeps `--db`.
         let list = parse_grant(os(&["list"])).expect("list parses");
         assert!(
-            refuse_daemon_vault_selection(&list, Some(Path::new("/tmp/other.dat")), None).is_ok()
+            refuse_daemon_vault_selection(&list, Some(Path::new("/tmp/other.dat")), None, true)
+                .is_ok()
         );
     }
 }

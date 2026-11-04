@@ -1,9 +1,17 @@
-//! `run`: use a credential through the unlock daemon.
+//! `run`: use a credential with the secret injected into a child.
 //!
-//! This is the agent-facing way to *use* a secret. The CLI sends a reference
-//! and an argv to `pmd`; the daemon decrypts, injects and redacts. No secret
-//! value is read, printed or stored by this process, and the isolated output
-//! that is relayed has already been redacted on the daemon side.
+//! With a grant token (`--grant-file` or `PASSMGR_GRANT_FILE`) this is the
+//! agent-facing way to *use* a secret: the CLI sends a reference and an argv
+//! to `pmd`, the daemon decrypts, injects and redacts. No secret value is read,
+//! printed or stored by this process.
+//!
+//! Without a grant token, a human at a terminal may run against a local vault
+//! (TODO 3.7). This process prompts for the master password, decrypts the one
+//! credential and calls the same [`runner::execute`] the daemon uses, so the
+//! child gets the same fixed environment and the same streaming redaction.
+//! The local path is human-only under [`agent::check_human`]: no agent marker,
+//! no `--agent`, and both standard streams are terminals. An agent uses a
+//! grant instead.
 
 use passmgr::Error;
 
@@ -19,7 +27,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::ExitCode;
+#[cfg(unix)]
+use std::sync::atomic::AtomicBool;
+#[cfg(unix)]
+use zeroize::Zeroizing;
 
+#[cfg(unix)]
+use passmgr::agent;
 #[cfg(unix)]
 use passmgr::client::{self, RunOutcome};
 #[cfg(unix)]
@@ -30,6 +44,8 @@ use passmgr::protocol::{ResponseError, RunExit, RunFrame, RunRequest};
 use passmgr::runner;
 #[cfg(unix)]
 use passmgr::socket::SocketError;
+#[cfg(unix)]
+use passmgr::store;
 
 #[cfg(not(unix))]
 pub(crate) const DAEMON_UNSUPPORTED: &str = "the unlock daemon is supported on Unix systems only";
@@ -40,7 +56,11 @@ pub(crate) const DAEMON_UNSUPPORTED: &str = "the unlock daemon is supported on U
 /// stable-code [`Error`]; the parsing path already rejected malformed specs
 /// with a usage error (exit 2) before this function was reached.
 #[cfg(unix)]
-pub(crate) fn command_run(options: super::RunOptions) -> Result<ExitCode, Error> {
+pub(crate) fn command_run(
+    options: super::RunOptions,
+    agent_mode: bool,
+    db_path: &Path,
+) -> Result<ExitCode, Error> {
     // The daemon checks this too (it must not trust a client), but refusing
     // here avoids a connection and gives the better message. Exit 5 is the
     // documented "refused for safety" code, like `get --reveal` without a TTY.
@@ -49,6 +69,24 @@ pub(crate) fn command_run(options: super::RunOptions) -> Result<ExitCode, Error>
             "refusing to inject into '{}': that variable could change how the child runs",
             options.env
         )));
+    }
+
+    let grant_file = options
+        .grant_file
+        .clone()
+        .or_else(|| std::env::var_os("PASSMGR_GRANT_FILE").map(PathBuf::from));
+
+    // No grant token means the local, human-only fallback. Check the human
+    // gate before resolving the program or prompting for the master password,
+    // so an agent context or a pipe is always the stable exit 5 the docs
+    // promise. This is the same gate as `unlock`: both standard streams must
+    // be terminals, because the human is about to hand a secret to an
+    // arbitrary command (the relayed output is redacted, but the command is
+    // still chosen at this terminal).
+    if grant_file.is_none() {
+        agent::check_human(agent_mode).map_err(|refusal| {
+            Error::Refused(refusal.message_for("run a command with a local vault"))
+        })?;
     }
 
     // Resolve the program and the working directory here, not in the daemon.
@@ -73,11 +111,34 @@ pub(crate) fn command_run(options: super::RunOptions) -> Result<ExitCode, Error>
     let mut command = options.command;
     command[0] = program_text;
 
-    let grant_file = options
-        .grant_file
-        .clone()
-        .or_else(|| std::env::var_os("PASSMGR_GRANT_FILE").map(PathBuf::from));
+    match grant_file {
+        Some(grant_file) => run_via_daemon(
+            options.env,
+            options.reference,
+            command,
+            cwd_text,
+            grant_file,
+        ),
+        None => run_locally(
+            options.env,
+            options.reference,
+            command,
+            &cwd,
+            &program,
+            db_path,
+        ),
+    }
+}
 
+/// Send the request to `pmd`, the only path that mints a secret from a grant.
+#[cfg(unix)]
+fn run_via_daemon(
+    env: String,
+    reference: String,
+    command: Vec<String>,
+    cwd_text: String,
+    grant_file: PathBuf,
+) -> Result<ExitCode, Error> {
     let paths = passmgr::socket::RuntimePaths::resolve();
     let token = match passmgr::session::load(&paths) {
         Ok(token) => token,
@@ -95,17 +156,6 @@ pub(crate) fn command_run(options: super::RunOptions) -> Result<ExitCode, Error>
         }
     };
 
-    // The session token gets the request to the daemon; the grant token is
-    // what authorizes the use. Refuse before connecting when there is no
-    // grant at all, so an agent never mistakes "the daemon is up" for
-    // permission to read a secret.
-    let Some(grant_file) = grant_file else {
-        return Err(Error::Refused(
-            "no grant token: pass --grant-file FILE or set PASSMGR_GRANT_FILE; \
-             ask the human who approved the grant for its token file"
-                .into(),
-        ));
-    };
     let grant = passmgr::grant::read_grant_token(&grant_file).map_err(|error| {
         Error::Refused(format!(
             "{error}; ask the human who approved the grant for its token file"
@@ -113,8 +163,8 @@ pub(crate) fn command_run(options: super::RunOptions) -> Result<ExitCode, Error>
     })?;
 
     let request = RunRequest {
-        env: options.env,
-        reference: options.reference.clone(),
+        env,
+        reference: reference.clone(),
         command,
         cwd: cwd_text,
         grant,
@@ -125,8 +175,8 @@ pub(crate) fn command_run(options: super::RunOptions) -> Result<ExitCode, Error>
     let mut err = stderr.lock();
     let output_closed = Cell::new(false);
     let outcome = match client::run(&paths, &token, &request, |frame| match frame {
-        RunFrame::Stdout(bytes) => relay(&mut out, bytes, &output_closed),
-        RunFrame::Stderr(bytes) => relay(&mut err, bytes, &output_closed),
+        RunFrame::Stdout(bytes) => relay(&mut out, bytes, &output_closed).map_err(Error::Io),
+        RunFrame::Stderr(bytes) => relay(&mut err, bytes, &output_closed).map_err(Error::Io),
         // `client::run` returns terminal frames instead of relaying them.
         other => Err(Error::Daemon(format!(
             "unexpected frame in a run stream: {other:?}"
@@ -155,13 +205,88 @@ pub(crate) fn command_run(options: super::RunOptions) -> Result<ExitCode, Error>
 
     match outcome {
         RunOutcome::Exited(exit) => Ok(ExitCode::from(status_code(exit))),
-        RunOutcome::Refused(error) => Err(refusal(error, &options.reference)),
+        RunOutcome::Refused(error) => Err(refusal(error, &reference)),
+    }
+}
+
+/// Run against a vault this process opened itself (no daemon, no grant).
+///
+/// The human gate already ran in [`command_run`]. The credential is copied
+/// into a [`Zeroizing`] buffer and the decrypted vault is dropped before the
+/// child starts, so the only plaintext this process keeps is the one value the
+/// child needs; [`runner::execute`] redacts both output streams exactly as the
+/// daemon does.
+#[cfg(unix)]
+fn run_locally(
+    env: String,
+    reference: String,
+    command: Vec<String>,
+    cwd: &Path,
+    program: &Path,
+    db_path: &Path,
+) -> Result<ExitCode, Error> {
+    // Parse before unlocking: a malformed reference is a usage error and must
+    // not cost the human a master-password prompt.
+    let id = store::EntryId::parse_ref(&reference)?;
+    let secret = {
+        let (vault, _master) = super::unlock(db_path)?;
+        let credential = vault
+            .get_by_ref(id)
+            .ok_or_else(|| Error::EntryNotFound(reference.clone()))?;
+        Zeroizing::new(credential.password().to_owned())
+    };
+
+    let inherited = runner::inherited_env(std::env::vars_os());
+    let cancel = AtomicBool::new(false);
+    let stop = runner::Stop::on_cancel(&cancel);
+    let stdout = std::io::stdout();
+    let stderr = std::io::stderr();
+    let mut out = stdout.lock();
+    let mut err = stderr.lock();
+    let output_closed = Cell::new(false);
+    let result = runner::execute(
+        program,
+        &command[1..],
+        &env,
+        secret.as_str(),
+        cwd,
+        &inherited,
+        &stop,
+        |frame| match frame {
+            RunFrame::Stdout(bytes) => relay(&mut out, &bytes, &output_closed),
+            RunFrame::Stderr(bytes) => relay(&mut err, &bytes, &output_closed),
+            // `runner::execute` only emits the two output variants; anything
+            // else is a bug, and its Debug never renders child bytes.
+            other => Err(io::Error::other(format!(
+                "unexpected frame from the local runner: {other:?}"
+            ))),
+        },
+    );
+
+    match result {
+        Ok(exit) => Ok(ExitCode::from(status_code(exit))),
+        Err(runner::RunError::Output(_)) if output_closed.get() => {
+            let _ = writeln!(
+                err,
+                "passmgr: output pipe closed; cancelled the run (exit {EXIT_OUTPUT_CLOSED})"
+            );
+            Ok(ExitCode::from(EXIT_OUTPUT_CLOSED))
+        }
+        Err(runner::RunError::Spawn(error)) => Err(Error::Daemon(format!(
+            "could not start the command: {error}"
+        ))),
+        Err(runner::RunError::Output(error)) => Err(Error::Io(error)),
+        Err(runner::RunError::Cancelled) => Err(Error::Daemon("the run was cancelled".into())),
     }
 }
 
 #[cfg(not(unix))]
-pub(crate) fn command_run(options: super::RunOptions) -> Result<std::process::ExitCode, Error> {
-    let _ = options;
+pub(crate) fn command_run(
+    options: super::RunOptions,
+    agent_mode: bool,
+    db_path: &std::path::Path,
+) -> Result<std::process::ExitCode, Error> {
+    let _ = (options, agent_mode, db_path);
     Err(Error::Daemon(DAEMON_UNSUPPORTED))
 }
 
@@ -254,12 +379,12 @@ fn status_code(exit: RunExit) -> u8 {
 /// stream going away, not a daemon failure. Only the relayed-output path may
 /// turn it into exit 141; every socket write failure is `Error::Daemon` from
 /// `client` and never reaches this function (TODO R.47, R.60).
-fn relay(sink: &mut impl Write, bytes: &[u8], closed: &Cell<bool>) -> Result<(), Error> {
+fn relay(sink: &mut impl Write, bytes: &[u8], closed: &Cell<bool>) -> io::Result<()> {
     if let Err(error) = sink.write_all(bytes).and_then(|()| sink.flush()) {
         if error.kind() == io::ErrorKind::BrokenPipe {
             closed.set(true);
         }
-        return Err(error.into());
+        return Err(error);
     }
     Ok(())
 }

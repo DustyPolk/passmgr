@@ -165,8 +165,8 @@ secret without reading it.
 ### Use a credential without reading it
 
 `run` lets a command use a secret while the value stays out of the caller's
-process. It needs an unlocked daemon, so it does not prompt for the master
-password:
+process. The agent-facing path uses a grant and needs an unlocked daemon, so it
+does not prompt for the master password:
 
 ```bash
 passmgr unlock
@@ -184,8 +184,23 @@ another program (an alias, a plugin), so `grant create` refuses it otherwise.
 See [Create a grant](#create-a-grant) before allowing a program that can start
 something else.
 
-`run` needs both the unlock session token and a grant token that covers the
-credential and command. The grant token is read from `--grant-file` or
+A human at a terminal can also `run` without a grant:
+
+```bash
+passmgr --db ~/.secrets/work.dat run \
+    --env GITHUB_TOKEN=pm://5f0c1d2e3a4b5c6d7e8f90a1b2c3d4e5 \
+    -- ./scripts/publish.sh
+```
+
+This prompts for the master password, opens that vault locally, and uses the
+same direct execution and redaction as the daemon path. It is refused (exit 5)
+when stdin or stdout is not a terminal or when an agent marker (or `--agent`)
+is present; the check happens before the password prompt, so a refusal never
+reads the vault. Local runs are not written to the audit log yet (audit is
+still TODO 3.8).
+
+On the grant path, `run` needs both the unlock session token and a grant token
+that covers the credential and command. The grant token is read from `--grant-file` or
 `PASSMGR_GRANT_FILE`, must be a regular file owned by you with no group or
 world permission bits (0600 or 0400 in practice), and never appears on the
 command line or in output. Without an active, in-scope grant, `run` exits 5
@@ -208,11 +223,12 @@ redaction is best-effort, not a sandbox (see `SECURITY.md`, limit 3).
 signal N. If the reader closes passmgr's output pipe (for example
 `passmgr run ... | head -1`), passmgr cancels the run and exits 141: it can no
 longer relay the child's status, so reporting success would hide a failure.
-The vault is always the one the running daemon was unlocked with, so
-`run` refuses `--db` and `PASSMGR_DB` with exit code 2 rather than inject from
-a different vault. Without a valid, active grant that covers this credential
-and command, `run` exits 5 without starting anything; an unknown reference
-exits 3. Loader and shell-hook
+The vault is always the one the running daemon was unlocked with, so a
+grant-backed `run` refuses `--db` and `PASSMGR_DB` with exit code 2 rather than
+inject from a different vault. A local human run chooses its vault with
+`--db`/`PASSMGR_DB` like any other vault command. Without a valid, active grant
+that covers this credential and command, a grant-backed `run` exits 5 without
+starting anything; an unknown reference exits 3. Loader and shell-hook
 names (`PATH`, `LD_*`, `BASH_ENV`, ...) are refused with exit code 5. The
 secret never crosses the socket to the CLI: only references and
 already-redacted output do.

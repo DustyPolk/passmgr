@@ -200,8 +200,9 @@ impl std::ops::Deref for Daemon {
 fn command_at(xdg_runtime_dir: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_passmgr"));
     command.env("XDG_RUNTIME_DIR", xdg_runtime_dir);
-    // `run` refuses an exported PASSMGR_DB (see below); tests must not inherit
-    // one from the developer's shell, and a grant comes only from a test.
+    // `run` refuses an exported PASSMGR_DB when a grant selects the daemon
+    // (see below); tests must not inherit one from the developer's shell, and
+    // a grant comes only from a test.
     command.env_remove("PASSMGR_DB");
     command.env_remove("PASSMGR_GRANT_FILE");
     for marker in passmgr::agent::AGENT_MARKERS {
@@ -365,10 +366,11 @@ fn run_executes_relative_programs_in_the_callers_working_directory() {
     );
 }
 
-/// `run` cannot choose a vault: the daemon injects from the vault it was
-/// unlocked with. Accepting `--db`/`PASSMGR_DB` and ignoring it would inject
-/// from a vault the human did not name, so both are usage errors (exit 2)
-/// before any connection or spawn.
+/// A grant-backed `run` cannot choose a vault: the daemon injects from the
+/// vault it was unlocked with. Accepting `--db`/`PASSMGR_DB` and ignoring it
+/// would inject from a vault the human did not name, so both are usage errors
+/// (exit 2) before any connection or spawn. A grant-less local run is a
+/// different path and does accept them (tests/run_local.rs).
 #[test]
 fn run_refuses_db_selection_before_connecting_or_running() {
     let daemon = Daemon::start();
@@ -400,6 +402,7 @@ fn run_refuses_db_selection_before_connecting_or_running() {
     let mut env_argv = vec!["run"];
     env_argv.extend_from_slice(&argv);
     let output = command_at(daemon.xdg_runtime_dir(), &env_argv)
+        .env("PASSMGR_GRANT_FILE", &daemon.grant_file)
         .env("PASSMGR_DB", &other_vault)
         .output()
         .expect("run passmgr");
@@ -552,14 +555,16 @@ fn run_requires_a_grant_and_refuses_a_readable_token_file() {
         "/bin/true",
     ];
 
-    // The session token alone reaches the daemon but does not authorize a
-    // use: no grant file is a refusal (exit 5), not a run.
+    // The session token alone does not authorize a daemon use. With no grant
+    // file this invocation is the human-only local path instead, and this
+    // test has no terminal, so it is refused (exit 5) before opening a vault.
     let output = command_at(daemon.xdg_runtime_dir(), &argv)
         .output()
         .expect("run passmgr");
     assert_eq!(output.status.code(), Some(5), "{output:?}");
     let stderr = stderr_text(&output);
-    assert!(stderr.contains("grant token"), "{stderr}");
+    assert!(stderr.contains("local vault"), "{stderr}");
+    assert!(stderr.contains("not a terminal"), "{stderr}");
     assert!(!stderr.contains(SECRET), "{stderr}");
 
     // The flag names the file explicitly.
@@ -590,10 +595,17 @@ fn run_requires_a_grant_and_refuses_a_readable_token_file() {
 #[test]
 fn run_without_a_daemon_is_a_clear_runtime_error() {
     let directory = tempfile::tempdir().expect("tempdir");
+    // A grant token selects the daemon path even when no daemon is running;
+    // without one this would be the local human path instead.
+    let grant_file = directory.path().join("grant.token");
+    fs::write(&grant_file, "00".repeat(32)).expect("write grant token");
+    fs::set_permissions(&grant_file, fs::Permissions::from_mode(0o600)).expect("chmod grant token");
     let output = command_at(
         directory.path(),
         &[
             "run",
+            "--grant-file",
+            grant_file.to_str().expect("UTF-8 path"),
             "--env",
             "API_KEY=pm://00112233445566778899aabbccddeeff",
             "--",

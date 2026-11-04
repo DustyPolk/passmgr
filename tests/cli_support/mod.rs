@@ -31,13 +31,18 @@ pub fn run(args: &[&str], input: &str) -> Output {
 }
 
 /// Build a command with every agent marker removed, so the environment of the
-/// test harness itself cannot change the outcome.
+/// test harness itself cannot change the outcome. Vault-selection variables
+/// are removed too: a developer shell that exported one must not make a test
+/// read (or refuse) a different vault. Tests that need them set them
+/// explicitly after this.
 pub fn base_command(args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_passmgr"));
     command.args(args);
     for marker in passmgr::agent::AGENT_MARKERS {
         command.env_remove(marker);
     }
+    command.env_remove("PASSMGR_DB");
+    command.env_remove("PASSMGR_GRANT_FILE");
     command
 }
 

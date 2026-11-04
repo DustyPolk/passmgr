@@ -75,15 +75,25 @@ Commands:
                              passmgr exits 141 instead: it cannot relay the
                              child's status, so reporting success would hide
                              a failure.
-                             Needs a running unlock daemon and a grant token,
-                             read from FILE or PASSMGR_GRANT_FILE (a 0600 file
-                             written by 'grant create --out'). The token never
-                             appears on the command line. Without a valid,
-                             active grant that covers this credential and
-                             command, passmgr exits 5 without running
-                             anything; an unknown reference exits 3. The
-                             master password is not prompted, so this is
-                             the agent-facing way to use a secret.
+                             With no grant token (neither --grant-file nor
+                             PASSMGR_GRANT_FILE), this is the human-only local
+                             path. At a terminal it prompts for the master
+                             password, opens the vault named by --db (or the
+                             default), and runs the command with the same
+                             redaction. It is refused (exit 5) when stdin or
+                             stdout is not a terminal or an agent marker is
+                             set; --agent also refuses it. That check happens
+                             before the master password is prompted.
+                             With a grant token, it needs a running unlock
+                             daemon; the token is read from FILE or
+                             PASSMGR_GRANT_FILE (a 0600 file written by
+                             'grant create --out') and never appears on the
+                             command line. Without a valid, active grant that
+                             covers this credential and command, passmgr exits
+                             5 without running anything; an unknown reference
+                             exits 3. The master password is not prompted on
+                             the grant path, so this is the agent-facing way
+                             to use a secret.
                              NAME must be a valid variable name and may not be
                              a loader or shell-hook variable (PATH, LD_*,
                              BASH_ENV, ...).
@@ -96,10 +106,12 @@ Commands:
                              daemon's (which belong to the shell that ran
                              'unlock'), and the child starts in the caller's
                              working directory. An unresolvable program is a
-                             usage error (exit 2). The vault is always the
-                             one the running daemon was unlocked with: 'run'
-                             refuses --db and PASSMGR_DB (exit 2) instead of
-                             injecting from a vault the caller did not name.
+                             usage error (exit 2). On the grant path the
+                             vault is always the one the running daemon was
+                             unlocked with: 'run' refuses --db and PASSMGR_DB
+                             (exit 2) rather than inject from a vault the
+                             caller did not name. A local human run uses
+                             --db/PASSMGR_DB like any other vault command.
   grant create [options]     Create a scoped, expiring grant at a human
                              terminal. The master password is prompted once
                              and a running daemon ('unlock') is required.
@@ -148,8 +160,8 @@ Commands:
 
 Global options:
   --db PATH                  Vault file (default: ./passwords.dat, or $PASSMGR_DB).
-                             'run' and 'grant revoke' do not accept it (see
-                             above).
+                             A grant-backed 'run' and 'grant revoke' do not
+                             accept it (see above).
   --agent                    Force agent mode. This can only make the tool more
                              restrictive: 'get --reveal' is refused even on a
                              terminal. It never reveals a secret by itself.
@@ -191,11 +203,12 @@ Examples:
 
 Notes:
   - The master password is prompted for every command that opens the vault:
-    add, edit, delete, get, list, show, unlock, 'grant list' and 'grant show'.
-    'grant create' prompts for it once, at a terminal, and needs a running
-    daemon; its token is written only to --out. generate, help, version, lock,
-    run and 'grant revoke' never prompt; lock, run and 'grant revoke' use the
-    running daemon instead.
+    add, edit, delete, get, list, show, unlock, 'grant list', 'grant show' and
+    a local (grant-less) run. 'grant create' prompts for it once, at a
+    terminal, and needs a running daemon; its token is written only to --out.
+    generate, help, version, lock, a grant-backed run and 'grant revoke' never
+    prompt; lock, a grant-backed run and 'grant revoke' use the running daemon
+    instead.
   - Prompts are written to stderr; command data is written to stdout.
   - 'add --generate' never prints the generated password; read it back with
     the TTY-gated 'get --reveal'.
@@ -239,10 +252,11 @@ Notes:
     'lock', on SIGTERM/SIGINT, or after the idle timeout (default 15 minutes,
     set with 'unlock --idle-timeout SECS'). The idle timeout is suspended
     while a command is running, so a long run is not killed mid-work.
-  - 'run' needs the unlock daemon ('run' refuses with exit code 1 when it is
-    not running). Its child receives only the fixed inherited environment
-    listed above, then NAME; it never inherits the rest of the caller's
-    environment. The secret is used, not read: output is redacted, and
-    nothing on this side of the daemon ever holds the value.
+  - A grant-backed 'run' needs the unlock daemon ('run' refuses with exit
+    code 1 when it is not running). A grant-less local run prompts for the
+    master password instead and needs no daemon. In both cases the child
+    receives only the fixed inherited environment listed above, then NAME; it
+    never inherits the rest of the caller's environment. The secret is used,
+    not read: output is redacted, and it never crosses a socket.
   - Vaults are encrypted with Argon2id and AES-256-GCM.
   - The legacy C vault format is not readable; this version uses a new format.

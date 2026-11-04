@@ -11,11 +11,15 @@ TTY gate or the redactor).
 
 ## Current status
 
-Grant-based authorization is implemented for `run` (TODO 3.1–3.6): every use
-needs a grant token that matches an active, in-scope grant in the vault, and
-the daemon records the use before it injects. The hash-chained audit log is
-still open (TODO 3.8–3.9), so no audit record is written today. Any process
-running as the same user can read the 0600 session file, so:
+Grant-based authorization is implemented for `run` (TODO 3.1–3.6): every
+agent-facing use needs a grant token that matches an active, in-scope grant in
+the vault, and the daemon records the use before it injects. The hash-chained
+audit log is still open (TODO 3.8–3.9), so no audit record is written today.
+`run` also has a human-only local path (TODO 3.7): without a grant token, at a
+terminal, the CLI prompts for the master password, opens the named vault, and
+injects under the same TTY/agent gate as reveal. It is not audited either
+until TODO 3.8. Any process running as the same user can read the 0600 session
+file, so:
 
 - `passmgr run` is the agent-facing way to use a secret, and it prevents
   *accidental* exposure: the value never crosses the socket, and relayed child
@@ -37,16 +41,19 @@ inherits every limit below.
   plaintext value, and never will. Every agent-facing surface returns
   references and metadata only: refs, names, usernames, tags, field names,
   URLs and timestamps.
-- **Use, not read.** Secrets reach a child through the daemon: environment
-  injection today; stdin and 0600 temp-file injection are planned (TODO 5.x).
+- **Use, not read.** Secrets reach a child through the daemon (environment
+  injection today; stdin and 0600 temp-file injection are planned, TODO 5.x),
+  except on the human-only local `run`, where the CLI injects after the same
+  TTY/agent gate and the value never crosses a socket.
 - **Reveal is human-only.** `get --reveal` requires stdin *and* stdout to be
   terminals, no agent marker environment variable (`PASSMGR_AGENT`,
   `CLAUDECODE`, `CURSOR_AGENT`, `CODEX_SANDBOX`), and no `--agent` flag. The
   master password is prompted on every invocation, and no flag bypasses the
   check. Refusal happens before the vault is opened or a password is prompted.
 - **Redaction.** Child stdout and stderr are passed through a streaming
-  redactor in `pmd` that replaces exact occurrences of the injected value,
-  including values split across read and frame boundaries.
+  redactor in `pmd`, or by the CLI for a human-only local `run`, that replaces
+  exact occurrences of the injected value, including values split across read
+  and frame boundaries.
 - **Terminal safety for untrusted text.** Text passmgr prints about a value
   from an argument or from the vault is rendered with hidden characters (C0/C1
   controls, bidi controls, zero-width and other format characters, line

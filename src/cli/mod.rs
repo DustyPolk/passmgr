@@ -86,7 +86,7 @@ fn run() -> Result<std::process::ExitCode, CliError> {
         Command::Show { reference, json } => command_show(&reference, json, &path)?,
         Command::Unlock { idle_timeout } => command_unlock(agent_mode, &path, idle_timeout)?,
         Command::Lock => command_lock()?,
-        Command::Run(options) => return Ok(command_run(options)?),
+        Command::Run(options) => return Ok(command_run(options, agent_mode, &path)?),
         Command::Grant(command) => command_grant(command, agent_mode, &path)?,
     }
     Ok(std::process::ExitCode::SUCCESS)

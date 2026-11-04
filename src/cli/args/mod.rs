@@ -145,7 +145,14 @@ pub(crate) fn parse_args(args: Vec<OsString>) -> Result<Parsed, String> {
     };
 
     let command = parse_command(command, rest)?;
-    refuse_daemon_vault_selection(&command, db_override.as_deref(), env_db.as_deref())?;
+    // `PASSMGR_GRANT_FILE` selects the daemon path just like `--grant-file`.
+    let grant_from_env = env::var_os("PASSMGR_GRANT_FILE").is_some();
+    refuse_daemon_vault_selection(
+        &command,
+        db_override.as_deref(),
+        env_db.as_deref(),
+        grant_from_env,
+    )?;
     Ok(finish_parsing(db_override, env_db, agent, command))
 }
 
@@ -167,18 +174,25 @@ pub(crate) fn finish_parsing(
 
 /// `run` and `grant revoke` talk to whichever daemon owns the runtime socket,
 /// and that daemon holds the key for the vault it was unlocked with.
-/// Honouring `--db` here would be a lie (the path is never sent) and ignoring
+/// Honouring `--db` there would be a lie (the path is never sent) and ignoring
 /// it could inject a value from, or revoke a grant in, a vault the human did
 /// not choose, so the combination is a usage error before any connection is
 /// made. `PASSMGR_DB` counts too: an exported variable would otherwise be
 /// silently ignored for these commands. `grant list` and `grant show` read the
 /// vault locally, so they do accept `--db`.
+///
+/// A `run` with no grant token at all is the other case: it runs locally as
+/// the human, against the vault named by `--db`/`PASSMGR_DB`, so the choice is
+/// honoured. A grant token in the environment (not just on the command line)
+/// selects the daemon path and restores the refusal.
 fn refuse_daemon_vault_selection(
     command: &Command,
     flag_db: Option<&Path>,
     env_db: Option<&Path>,
+    grant_from_env: bool,
 ) -> Result<(), String> {
     let name = match command {
+        Command::Run(options) if options.grant_file.is_none() && !grant_from_env => return Ok(()),
         Command::Run(_) => "run",
         Command::Grant(GrantCommand::Revoke(_)) => "grant revoke",
         _ => return Ok(()),
@@ -805,24 +819,75 @@ mod tests {
         })
     }
 
+    fn granted_run_command() -> Command {
+        Command::Run(RunOptions {
+            env: "API_KEY".into(),
+            reference: RUN_REF.into(),
+            command: vec!["/bin/true".into()],
+            grant_file: Some(PathBuf::from("/tmp/run.token")),
+        })
+    }
+
     #[test]
-    fn run_refuses_an_explicit_db_flag() {
-        let error =
-            refuse_daemon_vault_selection(&run_command(), Some(Path::new("/tmp/other.dat")), None)
-                .expect_err("--db must be refused for run");
+    fn run_refuses_an_explicit_db_flag_with_a_grant() {
+        let error = refuse_daemon_vault_selection(
+            &granted_run_command(),
+            Some(Path::new("/tmp/other.dat")),
+            None,
+            false,
+        )
+        .expect_err("--db must be refused for a daemon run");
         assert!(error.contains("--db"), "{error}");
         assert!(error.contains("does not accept"), "{error}");
     }
 
     #[test]
-    fn run_refuses_the_db_environment_variable() {
+    fn run_refuses_the_db_environment_variable_with_a_grant() {
         // `PASSMGR_DB` is checked here rather than through `parse_args`, so
         // the test does not mutate the process environment (which would race
         // with every other test in the binary).
-        let error =
-            refuse_daemon_vault_selection(&run_command(), None, Some(Path::new("/tmp/other.dat")))
-                .expect_err("PASSMGR_DB must be refused for run");
+        let error = refuse_daemon_vault_selection(
+            &granted_run_command(),
+            None,
+            Some(Path::new("/tmp/other.dat")),
+            false,
+        )
+        .expect_err("PASSMGR_DB must be refused for a daemon run");
         assert!(error.contains("PASSMGR_DB"), "{error}");
+    }
+
+    #[test]
+    fn run_without_a_grant_accepts_a_local_vault() {
+        assert!(
+            refuse_daemon_vault_selection(
+                &run_command(),
+                Some(Path::new("/tmp/other.dat")),
+                None,
+                false,
+            )
+            .is_ok()
+        );
+        assert!(
+            refuse_daemon_vault_selection(
+                &run_command(),
+                None,
+                Some(Path::new("/tmp/other.dat")),
+                false,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_grant_environment_variable_selects_the_daemon() {
+        let error = refuse_daemon_vault_selection(
+            &run_command(),
+            Some(Path::new("/tmp/other.dat")),
+            None,
+            true,
+        )
+        .expect_err("PASSMGR_GRANT_FILE must select the daemon path");
+        assert!(error.contains("--db"), "{error}");
     }
 
     #[test]
@@ -839,7 +904,8 @@ mod tests {
                 refuse_daemon_vault_selection(
                     &command,
                     Some(Path::new("/tmp/other.dat")),
-                    Some(Path::new("/tmp/other.dat"))
+                    Some(Path::new("/tmp/other.dat")),
+                    true,
                 )
                 .is_ok(),
                 "{command:?}"

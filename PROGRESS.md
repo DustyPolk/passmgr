@@ -1,3 +1,39 @@
+## 2026-11-04 — `run` for humans without a grant (TODO 3.7)
+
+- `src/cli/run.rs`: `command_run(options, agent_mode, db_path)` now has two
+  paths. A grant token (`--grant-file` or `PASSMGR_GRANT_FILE`) keeps the old
+  daemon path unchanged. With neither, the CLI first applies
+  `agent::check_human` (stdin **and** stdout TTYs, no marker/`--agent`), parses
+  the reference, prompts for the master password and opens `--db`/the default
+  vault, drops the decrypted vault before spawning, and calls the same
+  `runner::execute` + streaming redactor used by `pmd`. The grant path never
+  falls back to local injection when the daemon is missing.
+- `src/cli/args/mod.rs`: the `--db`/`PASSMGR_DB` usage error now applies only
+  when a grant selects the daemon; a grant-less local run accepts the vault
+  flag like other commands. `src/cli/mod.rs` passes agent mode and the parsed
+  vault path into `command_run`.
+- Chose the reveal gate (both streams TTY) rather than stdin-only: a local run
+  hands a secret to a command chosen at the terminal, so a piped stdout is
+  refused even though relayed output is redacted. Documented in help, README,
+  DECISIONS and SECURITY.
+- Tests: new `tests/run_local.rs` (7 tests, PTY-driven) proves injection plus
+  redaction of both streams and exit-status pass-through; refusal for every
+  agent marker, for `--agent`, for non-TTY stdin **and** stdout; unknown ref =
+  exit 3; and a grant token always selects the daemon path. `tests/run.rs`
+  tests that assumed no-grant meant "daemon without a token" now pass a grant
+  or assert the local refusal. `tests/cli_support` also clears
+  `PASSMGR_DB`/`PASSMGR_GRANT_FILE` for hermetic runs.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+  the full `cargo test` suite green; `cargo audit` skipped (not installed).
+- NEEDS HUMAN REVIEW: a grant-less local `run` is not audited yet because the
+  hash-chained audit log is still TODO 3.8. The TODO now explicitly requires
+  3.8 to cover local runs; until then only the vault's `last_used` field
+  records the use.
+- **Next iteration must know:** a grant token in the environment selects the
+  daemon path at parse time too, so `--db` is refused even if the daemon is
+  down; there is deliberately no local fallback. `tests/run.rs` is now 985
+  lines: put new run e2e coverage in `tests/run_local.rs` or split it first.
+
 ## 2026-11-04 — Measure grant growth headroom from the codec (TODO R.61)
 
 - `src/store/payload.rs`: deleted the public `GRANT_GROWTH_BYTES` (production
