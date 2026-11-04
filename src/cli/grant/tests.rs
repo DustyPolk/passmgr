@@ -116,14 +116,12 @@ fn the_approval_summary_names_every_value_being_approved() {
             service: "example.test".into(),
             username: "alice".into(),
         }],
-        tags: vec![(
-            "prod".into(),
-            vec![ScopeEntry {
-                reference: "pm://ffeeddccbbaa99887766554433221100".into(),
-                service: "prod.test".into(),
-                username: "bob".into(),
-            }],
-        )],
+        tags: vec!["prod".into()],
+        tagged: vec![ScopeEntry {
+            reference: "pm://ffeeddccbbaa99887766554433221100".into(),
+            service: "prod.test".into(),
+            username: "bob".into(),
+        }],
     };
     let summary = describe_request(&sample_request(now, &["/usr/bin/gh"]), now, &preview);
     assert!(summary.starts_with("Grant request:\n"), "{summary}");
@@ -132,9 +130,10 @@ fn the_approval_summary_names_every_value_being_approved() {
         summary.contains("      example.test (alice) [pm://00112233445566778899aabbccddeeff]"),
         "{summary}"
     );
-    assert!(summary.contains("    tags:\n      prod:\n"), "{summary}");
     assert!(
-        summary.contains("        prod.test (bob) [pm://ffeeddccbbaa99887766554433221100]"),
+        summary.contains(
+            "    tags: prod\n      prod.test (bob) [pm://ffeeddccbbaa99887766554433221100]"
+        ),
         "{summary}"
     );
     assert!(
@@ -185,10 +184,11 @@ fn a_ref_is_shown_with_its_service_and_username() {
     assert!(!text.contains("unit-test-canary-password"), "{text}");
 }
 
-/// A tag expands to every credential it currently matches, and a tag that
-/// matches nothing says so instead of looking approved.
+/// Several tags select only the credentials that carry every one of them,
+/// which is what the grant enforces. Listing each tag's matches separately
+/// would read as a union and show credentials the grant does not cover.
 #[test]
-fn a_tag_is_shown_with_every_credential_it_matches() {
+fn tags_show_only_the_credentials_the_grant_covers() {
     let directory = tempfile::tempdir().unwrap();
     let mut vault = empty_vault(&directory);
     vault
@@ -200,38 +200,44 @@ fn a_tag_is_shown_with_every_credential_it_matches() {
     vault
         .add(credential("three.test", "carol", &["work"]))
         .expect("add");
-    let scope =
-        Scope::new(vec![], vec!["prod".to_owned(), "missing".to_owned()], None).expect("scope");
-
-    let preview = preview_scope(&scope, &vault).expect("preview");
-    assert_eq!(preview.tags.len(), 2);
-    // `Scope` sorts its tags, so look them up by name, not position.
-    let matched = |tag: &str| -> Vec<&str> {
-        preview
-            .tags
-            .iter()
-            .find(|(name, _)| name == tag)
-            .map(|(_, entries)| entries.iter().map(|entry| entry.service.as_str()).collect())
-            .expect("tag present")
+    let render = |tags: &[&str]| -> (Scope, String) {
+        let tags = tags.iter().map(|tag| (*tag).to_owned()).collect();
+        let scope = Scope::new(vec![], tags, None).expect("scope");
+        let preview = preview_scope(&scope, &vault).expect("preview");
+        let mut text = String::new();
+        write_scope(&mut text, &preview, None);
+        (scope, text)
     };
-    assert_eq!(matched("prod"), ["one.test", "two.test"]);
-    assert!(
-        matched("missing").is_empty(),
-        "a missing tag matches nothing"
-    );
 
-    let mut text = String::new();
-    write_scope(&mut text, &preview, None);
+    for tags in [&["prod"][..], &["prod", "work"], &["prod", "missing"]] {
+        let (scope, text) = render(tags);
+        for entry in vault.list() {
+            let shown = text.contains(&format!("{} (", entry.service()));
+            let covered = scope.matches(&passmgr::grant::Target::from(entry));
+            assert_eq!(
+                shown,
+                covered,
+                "{} with tags {tags:?}:\n{text}",
+                entry.service()
+            );
+        }
+    }
+
+    let (_, text) = render(&["prod", "work"]);
     assert!(
-        text.contains("      prod:\n        one.test (alice) [pm://"),
+        text.contains("    tags: prod, work (a credential must carry all of them)\n      two.test (bob) [pm://"),
         "{text}"
     );
-    assert!(text.contains("        two.test (bob) [pm://"), "{text}");
+    let (_, text) = render(&["prod", "missing"]);
     assert!(
-        text.contains("      missing:\n        (no credential currently matches)"),
+        text.contains("(no credential currently matches)"),
+        "a tag set nothing carries must say so: {text}"
+    );
+    let (_, text) = render(&["prod"]);
+    assert!(
+        text.contains("    tags: prod\n      one.test (alice) [pm://"),
         "{text}"
     );
-    assert!(!text.contains("three.test"), "{text}");
 }
 
 /// A ref the vault does not hold is refused before the summary and before
@@ -267,7 +273,8 @@ fn credential_names_are_escaped_in_the_summary() {
     };
     let preview = ScopePreview {
         refs: vec![entry()],
-        tags: vec![("prod".into(), vec![entry()])],
+        tags: vec!["prod".into()],
+        tagged: vec![entry()],
     };
     let mut text = String::new();
     write_scope(&mut text, &preview, None);
@@ -276,7 +283,7 @@ fn credential_names_are_escaped_in_the_summary() {
         text.contains("bank\\u{202e}moc.test (al\\u{202e}ice)"),
         "{text}"
     );
-    assert!(text.contains("      prod:\n"), "{text}");
+    assert!(text.contains("    tags: prod\n"), "{text}");
 }
 
 #[test]

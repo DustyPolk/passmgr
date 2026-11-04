@@ -4,7 +4,7 @@
 //! already-decrypted vault so the human sees the service and username behind
 //! it (TODO R.41); values are never read. Untrusted or stored names are
 //! escaped, so no label, command path or credential name can drive a
-//! terminal, and a tag expands to the entries it currently matches.
+//! terminal, and the tags expand to the entries that carry all of them.
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -68,14 +68,16 @@ impl ScopeEntry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ScopePreview {
     pub(super) refs: Vec<ScopeEntry>,
-    pub(super) tags: Vec<(String, Vec<ScopeEntry>)>,
+    pub(super) tags: Vec<String>,
+    /// The credentials that carry every tag in `tags`.
+    pub(super) tagged: Vec<ScopeEntry>,
 }
 
 /// Resolve every ref and tag in `scope` against the vault.
 ///
 /// A ref the vault does not hold is an error: approving a grant that names
 /// nothing would be a lie to the human, and the missing entry cannot be
-/// described (TODO R.41). A tag that matches nothing is not an error (`--tag`
+/// described (TODO R.41). Tags that match nothing are not an error (`--tag`
 /// is a selector, not a promise), but the summary says so explicitly.
 pub(super) fn preview_scope(scope: &Scope, vault: &vault::Vault) -> Result<ScopePreview, Error> {
     let mut refs = Vec::with_capacity(scope.refs().len());
@@ -85,17 +87,17 @@ pub(super) fn preview_scope(scope: &Scope, vault: &vault::Vault) -> Result<Scope
             .ok_or_else(|| Error::EntryNotFound(id.to_ref()))?;
         refs.push(ScopeEntry::of(credential));
     }
-    let mut tags = Vec::with_capacity(scope.tags().len());
-    for tag in scope.tags() {
-        let matched = vault
-            .list()
-            .iter()
-            .filter(|credential| credential.has_tag(tag))
-            .map(ScopeEntry::of)
-            .collect();
-        tags.push((tag.clone(), matched));
-    }
-    Ok(ScopePreview { refs, tags })
+    let tagged = vault
+        .list()
+        .iter()
+        .filter(|credential| scope.matches_tags(credential.tags()))
+        .map(ScopeEntry::of)
+        .collect();
+    Ok(ScopePreview {
+        refs,
+        tags: scope.tags().to_vec(),
+        tagged,
+    })
 }
 
 /// Write the resolved scope as an indented block a human can check line by
@@ -112,18 +114,24 @@ pub(super) fn write_scope(output: &mut String, preview: &ScopePreview, fields: O
         }
     }
     if !preview.tags.is_empty() {
-        writeln!(output, "    tags:").expect("writing to a String cannot fail");
-        for (tag, matched) in &preview.tags {
-            writeln!(output, "      {}:", escape_hidden(tag))
+        let rule = if preview.tags.len() > 1 {
+            " (a credential must carry all of them)"
+        } else {
+            ""
+        };
+        writeln!(
+            output,
+            "    tags: {}{rule}",
+            escape_hidden(&preview.tags.join(", "))
+        )
+        .expect("writing to a String cannot fail");
+        if preview.tagged.is_empty() {
+            writeln!(output, "      (no credential currently matches)")
                 .expect("writing to a String cannot fail");
-            if matched.is_empty() {
-                writeln!(output, "        (no credential currently matches)")
-                    .expect("writing to a String cannot fail");
-            }
-            for entry in matched {
-                writeln!(output, "        {}", entry.describe())
-                    .expect("writing to a String cannot fail");
-            }
+        }
+        for entry in &preview.tagged {
+            writeln!(output, "      {}", entry.describe())
+                .expect("writing to a String cannot fail");
         }
     }
     if let Some(fields) = fields {

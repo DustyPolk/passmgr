@@ -72,8 +72,7 @@ fn grant_create_writes_a_scoped_grant_and_never_prints_the_token() {
     let expected = [
         "label: deploy prod".to_owned(),
         format!("example.test (alice) [{}]", fixture.reference),
-        "tags:".to_owned(),
-        "      prod:".to_owned(),
+        "    tags: prod\n".to_owned(),
         format!("    {canonical_printenv}"),
         "capabilities: run".to_owned(),
         "expires: ".to_owned(),

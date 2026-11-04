@@ -318,15 +318,13 @@ impl Scope {
     /// True when the target is inside the scope: its id is listed, or it
     /// carries every tag the grant lists.
     pub fn matches(&self, target: &Target<'_>) -> bool {
-        if self.refs.contains(&target.entry) {
-            return true;
-        }
-        if self.tags.is_empty() {
-            return false;
-        }
-        self.tags
-            .iter()
-            .all(|tag| target.tags.iter().any(|own| own == tag))
+        self.refs.contains(&target.entry) || self.matches_tags(target.tags)
+    }
+
+    /// True when the scope lists tags and `tags` carries every one of them.
+    /// The approval summary uses this too, so it shows what the grant covers.
+    pub fn matches_tags(&self, tags: &[String]) -> bool {
+        !self.tags.is_empty() && self.tags.iter().all(|tag| tags.contains(tag))
     }
 
     /// True when a field is covered. `field = None` means "the whole
