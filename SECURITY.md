@@ -52,12 +52,16 @@ Any process running as the same user can read the 0600 session file, so:
   username, tags, field names, URL and timestamps) and never a value.
 
 The MCP server (`pm mcp serve`, `MCP.md`) is partially implemented: it speaks
-the handshake, publishes the tool catalogue, and `list_credentials` calls the
-daemon's metadata-only `list` request (TODO 4.4d). Its filters only narrow; the
-daemon still authorizes every candidate, so an MCP session without a covering
-grant gets `isError`, never an empty list or a value. Calling any other tool is
-refused as unknown until its daemon path lands (TODO 4.4e–4.5). The server is a
-thin client of the same daemon and inherits every limit below.
+the handshake, publishes the tool catalogue, and `list_credentials` (TODO 4.4d)
+and `describe_credential` (4.4e) call the daemon's metadata-only `list` and
+`describe` requests. List filters only narrow; the daemon still authorizes
+every candidate, so an MCP session without a covering grant gets `isError`,
+never an empty list or a value. Describe accepts only the canonical
+`pm://<32 lowercase hex>` form, and a missing reference and one outside the
+grant get the same "not found or not granted" `isError`; errors never echo the
+supplied reference. Calling any other tool is refused as unknown until its
+daemon path lands (TODO 4.5). The server is a thin client of the same daemon and
+inherits every limit below.
 
 ## What passmgr protects
 

@@ -6,9 +6,9 @@
 //!
 //! - pull `name`/`arguments` out of `tools/call` params, rejecting anything
 //!   that is not the contract's shape;
-//! - validate `list_credentials` arguments against the same bounds as the
-//!   hand-written schema, so a request never reaches `pmd` with a filter the
-//!   daemon would refuse;
+//! - validate `list_credentials` and `describe_credential` arguments against
+//!   the same bounds as the hand-written schema, so a request never reaches
+//!   `pmd` with a filter or reference the daemon would refuse;
 //! - map a daemon answer to an MCP tool result (or an `isError` result).
 //!
 //! It can build a request, but it cannot decrypt anything: the daemon owns the
@@ -20,14 +20,22 @@ use serde_json::{Value, json};
 
 use crate::client;
 use crate::grant::GrantToken;
-use crate::protocol::{Entry, ListRequest, MAX_QUERY_BYTES, Request, Response, ResponseError};
+use crate::protocol::{
+    DescribeRequest, Entry, ListRequest, MAX_QUERY_BYTES, MAX_REFERENCE_BYTES, Request, Response,
+    ResponseError,
+};
 use crate::session;
 use crate::socket::RuntimePaths;
-use crate::store::{MAX_TAGS_PER_CREDENTIAL, validate_tag};
+use crate::store::{EntryId, MAX_TAGS_PER_CREDENTIAL, validate_tag};
 use crate::timestamp;
 
-/// The tool this module implements first (TODO 4.4d).
+/// The metadata tools this module implements (TODO 4.4d, 4.4e).
 pub const LIST_CREDENTIALS: &str = "list_credentials";
+pub const DESCRIBE_CREDENTIAL: &str = "describe_credential";
+
+/// The one refusal shared by every non-canonical reference, so a bad
+/// reference can never be echoed back and no parse detail reaches the agent.
+const INVALID_REF: &str = "'ref' must be a canonical pm:// reference from list_credentials";
 
 /// The exact message `MCP.md` requires when the session has no grant.
 pub const NO_GRANT: &str = "no active grant; call request_access";
@@ -162,6 +170,49 @@ pub fn list_request(grant: GrantToken, filters: ListFilters) -> Request {
     })
 }
 
+/// Validate the `describe_credential` argument object.
+///
+/// Exactly one member, `ref`, is required and must be a string. The value has
+/// to be the canonical `pm://<32 lowercase hex>` form the store emits: parsing
+/// it to an [`EntryId`] and re-rendering it rejects upper-case hex (which the
+/// parser would accept) and any field suffix, so the reference forwarded to
+/// `pmd` is exactly the one the tool schema promises. Nothing here decides
+/// authorization; the daemon still checks scope.
+///
+/// The error text never contains the supplied value: an agent-supplied
+/// reference is untrusted, and a parse error could otherwise echo it.
+pub fn describe_ref(arguments: Option<&Value>) -> Result<String, String> {
+    let Some(value) = arguments else {
+        return Err("describe_credential requires a 'ref'".to_owned());
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| "arguments must be an object".to_owned())?;
+    if let Some(unknown) = object.keys().find(|key| key.as_str() != "ref") {
+        return Err(format!(
+            "unknown describe_credential argument '{}'",
+            clipped(unknown)
+        ));
+    }
+    let reference = object
+        .get("ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "'ref' is required and must be a string".to_owned())?;
+    if reference.len() > MAX_REFERENCE_BYTES {
+        return Err(format!("'ref' exceeds {MAX_REFERENCE_BYTES} bytes"));
+    }
+    let id = EntryId::parse_ref(reference).map_err(|_| INVALID_REF.to_owned())?;
+    if id.to_ref() != reference {
+        return Err(INVALID_REF.to_owned());
+    }
+    Ok(reference.to_owned())
+}
+
+/// Build the daemon request for a validated describe call.
+pub fn describe_request(grant: GrantToken, reference: String) -> Request {
+    Request::Describe(DescribeRequest { reference, grant })
+}
+
 /// Ask `pmd` for the entries this grant covers.
 ///
 /// The session token comes from the runtime directory, never from the agent.
@@ -169,6 +220,20 @@ pub fn list_request(grant: GrantToken, filters: ListFilters) -> Request {
 /// not as an empty list: an agent must not mistake "no daemon" for "no
 /// credentials".
 pub fn request_list(grant: &GrantToken, filters: ListFilters) -> Result<Response, String> {
+    send(&list_request(grant.clone(), filters))
+}
+
+/// Ask `pmd` to describe one entry the grant covers.
+///
+/// Loads and checks the session token exactly as [`request_list`] does. The
+/// daemon owns every authorization decision and collapses an out-of-scope
+/// reference into the same `not_found` as a missing one.
+pub fn request_describe(grant: &GrantToken, reference: String) -> Result<Response, String> {
+    send(&describe_request(grant.clone(), reference))
+}
+
+/// Send one already-validated request to the session's daemon.
+fn send(request: &Request) -> Result<Response, String> {
     let paths = RuntimePaths::resolve();
     let token = match session::load(&paths) {
         Ok(token) => token,
@@ -186,7 +251,7 @@ pub fn request_list(grant: &GrantToken, filters: ListFilters) -> Result<Response
             });
         }
     };
-    client::request(&paths, &token, &list_request(grant.clone(), filters)).map_err(|error| {
+    client::request(&paths, &token, request).map_err(|error| {
         format!("cannot reach the passmgr daemon ({error}); ask the human to run `pm unlock`")
     })
 }
@@ -235,6 +300,29 @@ pub fn error_result(message: &str) -> Value {
     })
 }
 
+/// A successful describe result: the `Entry` object is the structured content
+/// itself, because that is what the tool's `outputSchema` declares.
+pub fn describe_output(entry: &Entry) -> Value {
+    json!({
+        "content": [{"type": "text", "text": format!("credential {}", entry.reference)}],
+        "structuredContent": entry_json(entry),
+        "isError": false,
+    })
+}
+
+/// Map a daemon describe answer to a tool result.
+///
+/// A `not_found` is rendered exactly like an out-of-scope reference, because
+/// the daemon already collapsed the two; this layer cannot and must not try to
+/// tell them apart.
+pub fn describe_response(response: Response) -> Value {
+    match response {
+        Response::Entry(entry) => describe_output(&entry),
+        Response::Error(error) => error_result(&daemon_error(error)),
+        _ => error_result("the passmgr daemon answered with an unexpected response"),
+    }
+}
+
 /// Map a daemon list answer to a tool result.
 ///
 /// The daemon decides every authorization question; this only chooses an
@@ -264,10 +352,10 @@ fn daemon_error(error: ResponseError) -> String {
         ResponseError::Internal => "the daemon could not read its vault; ask the human to check it",
         ResponseError::BadRequest => "the daemon rejected the request as malformed",
         ResponseError::Unsupported => {
-            "the daemon does not support listing credentials in this build"
+            "the daemon does not support this credential metadata request in this build"
         }
         ResponseError::SpawnFailed => {
-            "the daemon could not start a process; this should not happen for a list request"
+            "the daemon could not start a process; this should not happen for a metadata request"
         }
     };
     message.to_owned()

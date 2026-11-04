@@ -1,3 +1,35 @@
+## 2026-11-04 — MCP `describe_credential` wired to the daemon (TODO 4.4e)
+
+- `src/mcp/call.rs` gains `describe_ref` (exactly one `ref` member, string,
+  ≤128 bytes, parsed to an `EntryId` and re-rendered, so upper-case hex and a
+  field suffix are refused before `pmd` sees them), `describe_request`,
+  `request_describe` and `describe_response`/`describe_output`.
+  `request_list` and `request_describe` now share one `send` helper that loads
+  the session token and reports "daemon down" vs "cannot authenticate".
+- `src/mcp/server.rs` dispatches the new arm. `structuredContent` is the
+  `Entry` object itself (the tool's declared `outputSchema`), not a wrapper.
+  A daemon `not_found` maps to "not found or not granted" — the same text for
+  a missing ref and one outside the grant. `ResponseError` wording was
+  generalized from "list request" to "credential metadata request".
+- Never echo an agent-supplied ref: every bad-reference path uses one fixed
+  message (`INVALID_REF`), so `store::EntryId::parse_ref`'s quoted input never
+  reaches the error. Unit test with a canary reference pins it.
+- Tests: 4 new unit tests in `src/mcp/call/tests.rs` (canonical form and every
+  refusal, verbatim request, output shape, `Entry`/`not_found`/unexpected
+  mapping). `src/mcp/server/tests.rs` covers no-grant for both tools and a bad
+  describe ref. 3 e2e tests in `tests/mcp_serve.rs`: list+describe in one
+  stdio session, a missing reference, and a RUN-only grant denial; each
+  asserts the fixture secret is absent from stdout and stderr.
+- `MCP.md`, `SECURITY.md`, `README.md` and `DECISIONS.md` updated; TODO 4.4e
+  checked. No wire, vault or dependency change.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass (`cargo audit` skipped: not installed).
+- **Next iteration must know:** 4.5 is `run_with_credentials` through the
+  daemon (`Request::Run` already exists, `src/daemon/run.rs`); `call.rs` has
+  the `send` helper to reuse for a streaming run, but a run is not one
+  request/one response, so it needs its own client path. `src/daemon.rs` is
+  still 991 lines and must be split before it grows.
+
 ## 2026-11-04 — MCP `list_credentials` via the daemon (TODO 4.4d)
 
 - New `src/mcp/call.rs`: the `tools/call` boundary. `call_parts` validates the

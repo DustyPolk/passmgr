@@ -855,6 +855,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 - An out-of-scope ref answers exactly like a nonexistent one (no existence
   oracle). Agent-supplied text shown to a human is sanitized (control and
   bidi characters stripped) and labelled untrusted.
+- MCP `describe_credential` accepts only the canonical `pm://<32 lowercase
+  hex>` form and never echoes a supplied ref in an error. Upper-case hex is
+  refused rather than lowercased, so the reference the agent sends is exactly
+  what the tool schema promises (TODO 4.4e).
 - Grant tokens are minted by the MCP server itself (the claim secret) and
   sent to the daemon only as a SHA-256; the daemon never holds a token. They
   live in the MCP server's memory, are zeroized, and never appear in tool

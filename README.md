@@ -269,9 +269,10 @@ decision belongs to the daemon.
 It implements the dual-era handshake (legacy `initialize` and modern
 stateless `_meta`) and `tools/list`, which returns five tools:
 `access_status`, `list_credentials`, `describe_credential`,
-`run_with_credentials` and `request_access`. `list_credentials` is wired to the
-daemon and returns metadata covered by the session's grant; the remaining
-tools answer "unknown tool" until their daemon path lands (TODO 4.4e–4.5).
+`run_with_credentials` and `request_access`. `list_credentials` and
+`describe_credential` are wired to the daemon and return metadata covered by
+the session's grant; the remaining tools answer "unknown tool" until their
+daemon path lands (TODO 4.5).
 [MCP.md](MCP.md) is the contract for the rest. stdout carries only JSON-RPC
 lines and diagnostics go to stderr.
 

@@ -530,3 +530,156 @@ fn list_without_a_running_daemon_is_an_actionable_error() {
     let message = result["content"][0]["text"].as_str().expect("text");
     assert!(message.contains("pm unlock"), "{message}");
 }
+
+// ---------------------------------------------------------------------------
+// `tools/call` for `describe_credential` (TODO 4.4e)
+// ---------------------------------------------------------------------------
+
+/// A modern `tools/call` line for `describe_credential`.
+fn describe_line(id: u64, reference: &str) -> String {
+    format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\
+         \"name\":\"describe_credential\",\"arguments\":{{\"ref\":\"{reference}\"}},{MODERN_META}}}}}\n"
+    )
+}
+
+#[test]
+fn list_and_describe_share_one_metadata_session() {
+    let _guard = serial();
+    let fixture = Fixture::with_capabilities(Capabilities::LIST);
+    let mut daemon = fixture.start();
+    session::store(&RuntimePaths::at(&fixture.runtime), &fixture.token).expect("store session");
+
+    let input = format!(
+        "{}{}",
+        call_line(1, "{}"),
+        describe_line(2, &fixture.reference)
+    );
+    let output = run_with_env(
+        &[
+            "mcp",
+            "serve",
+            "--grant-file",
+            fixture.grant_file.to_str().expect("path"),
+        ],
+        &input,
+        &[
+            ("PASSMGR_AGENT", "1"),
+            (
+                "XDG_RUNTIME_DIR",
+                fixture._directory.path().to_str().expect("path"),
+            ),
+        ],
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+
+    assert_success(&output);
+    assert_eq!(stderr(&output), "", "{}", stderr(&output));
+    no_secret(&output);
+
+    let answers = lines(&output);
+    assert_eq!(answers.len(), 2);
+
+    let listed = &answers[0]["result"];
+    assert_eq!(listed["isError"], false, "{listed}");
+    assert_eq!(
+        listed["structuredContent"]["entries"][0]["ref"],
+        fixture.reference
+    );
+
+    // The describe answer's structured content *is* the Entry object, as its
+    // outputSchema declares; there is no value, no grant and no token.
+    let described = &answers[1]["result"];
+    assert_eq!(described["isError"], false, "{described}");
+    let entry = &described["structuredContent"];
+    assert_eq!(entry["ref"], fixture.reference);
+    assert_eq!(entry["service"], "example.test");
+    assert_eq!(entry["username"], "alice");
+    assert_eq!(entry["fields"], json!([]));
+    assert_eq!(entry["url"], Value::Null);
+    assert!(
+        entry["created"]
+            .as_str()
+            .is_some_and(|text| text.ends_with('Z')),
+        "timestamps must be RFC 3339: {}",
+        entry["created"]
+    );
+}
+
+#[test]
+fn describe_of_a_missing_reference_is_a_not_found_error() {
+    let _guard = serial();
+    let fixture = Fixture::with_capabilities(Capabilities::LIST);
+    let mut daemon = fixture.start();
+    session::store(&RuntimePaths::at(&fixture.runtime), &fixture.token).expect("store session");
+
+    // A well-formed reference that the vault does not hold. The daemon answers
+    // `not_found`, exactly as it would for a reference outside the grant.
+    let output = run_with_env(
+        &[
+            "mcp",
+            "serve",
+            "--grant-file",
+            fixture.grant_file.to_str().expect("path"),
+        ],
+        &describe_line(1, "pm://ffffffffffffffffffffffffffffffff"),
+        &[
+            ("PASSMGR_AGENT", "1"),
+            (
+                "XDG_RUNTIME_DIR",
+                fixture._directory.path().to_str().expect("path"),
+            ),
+        ],
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+
+    assert_success(&output);
+    no_secret(&output);
+    let answers = lines(&output);
+    assert_eq!(answers.len(), 1);
+    let result = &answers[0]["result"];
+    assert_eq!(result["isError"], true);
+    assert!(result.get("structuredContent").is_none());
+    assert_eq!(result["content"][0]["text"], "not found or not granted");
+}
+
+#[test]
+fn describe_is_denied_when_the_grant_lacks_the_list_capability() {
+    let _guard = serial();
+    let fixture = Fixture::new(); // RUN only
+    let mut daemon = fixture.start();
+    session::store(&RuntimePaths::at(&fixture.runtime), &fixture.token).expect("store session");
+
+    let output = run_with_env(
+        &[
+            "mcp",
+            "serve",
+            "--grant-file",
+            fixture.grant_file.to_str().expect("path"),
+        ],
+        &describe_line(1, &fixture.reference),
+        &[
+            ("PASSMGR_AGENT", "1"),
+            (
+                "XDG_RUNTIME_DIR",
+                fixture._directory.path().to_str().expect("path"),
+            ),
+        ],
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+
+    assert_success(&output);
+    no_secret(&output);
+    let answers = lines(&output);
+    let result = &answers[0]["result"];
+    assert_eq!(result["isError"], true);
+    assert!(result.get("structuredContent").is_none());
+    let message = result["content"][0]["text"].as_str().expect("text");
+    assert!(
+        message.contains("denied") && message.contains("grant"),
+        "{message}"
+    );
+}

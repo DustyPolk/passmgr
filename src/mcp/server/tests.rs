@@ -213,20 +213,32 @@ fn unknown_methods_are_method_not_found() {
 fn tools_call_without_a_grant_is_an_actionable_is_error_result() {
     let mut server = Server::new();
     initialize(&mut server);
-    let answer = server
-        .handle(Message::request(
-            Id::Number(2),
-            TOOLS_CALL_METHOD,
-            Some(json!({"name": "list_credentials", "arguments": {}})),
-        ))
-        .expect("a request");
-    let value = result(&answer);
-    assert_eq!(value["isError"], true);
-    assert_eq!(value["content"][0]["text"], call::NO_GRANT);
-    assert!(
-        value.get("structuredContent").is_none(),
-        "a refusal must not look like an empty list"
-    );
+    // Both metadata tools validate their arguments first, so a well-formed
+    // call reaches the grant check and gets the contract's refusal.
+    for (id, arguments) in [
+        (2, json!({})),
+        (3, json!({"ref": "pm://00112233445566778899aabbccddeeff"})),
+    ] {
+        let tool = if id == 2 {
+            "list_credentials"
+        } else {
+            "describe_credential"
+        };
+        let answer = server
+            .handle(Message::request(
+                Id::Number(id),
+                TOOLS_CALL_METHOD,
+                Some(json!({"name": tool, "arguments": arguments})),
+            ))
+            .expect("a request");
+        let value = result(&answer);
+        assert_eq!(value["isError"], true, "{tool}");
+        assert_eq!(value["content"][0]["text"], call::NO_GRANT, "{tool}");
+        assert!(
+            value.get("structuredContent").is_none(),
+            "a refusal must not look like an empty list"
+        );
+    }
 }
 
 #[test]
@@ -249,6 +261,16 @@ fn tools_call_refuses_unknown_tools_and_bad_arguments_without_a_grant() {
     let refused = server
         .handle(Message::request(
             Id::Number(3),
+            TOOLS_CALL_METHOD,
+            Some(json!({"name": "describe_credential", "arguments": {"ref": "pm://not-hex"}})),
+        ))
+        .expect("a request");
+    assert_eq!(error(&refused).code, ErrorCode::InvalidParams.code());
+    assert!(error(&refused).message.contains("canonical"));
+
+    let refused = server
+        .handle(Message::request(
+            Id::Number(4),
             TOOLS_CALL_METHOD,
             Some(json!({"name": "run_with_credentials", "arguments": {}})),
         ))

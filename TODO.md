@@ -74,12 +74,18 @@ keeps the dependency tree small and stdout hygiene under our control.
       map to `isError`, no secret in the response.
       Note: the dispatcher changed shape in `src/mcp/call.rs`; `truncated` is
       in the output schema, and MCP timestamps are RFC 3339.
-- [ ] **4.4e MCP `describe_credential`**: validate `ref` (exact `pm://` form),
+- [x] **4.4e MCP `describe_credential`**: validate `ref` (exact `pm://` form),
       call 4.4c, return `Entry`; missing/out-of-scope are the same `isError`
       text. The `tools/call` dispatcher and its unknown-tool refusal already
       exist (4.4d); add this arm and a real stdio test. Tests: both tools
       through the real stdio loop, and an MCP-session canary secret never
       appears in any answer.
+      Note: only the canonical `pm://<32 lowercase hex>` form is accepted
+      (upper-case hex and field suffixes are refused before the daemon); a
+      bad ref is never echoed. `list` and `describe` now share one `send`
+      helper; `structuredContent` is the `Entry` object itself. Out-of-scope
+      collapsing is proven at the daemon layer and by the shared
+      `not found or not granted` mapping.
 - [ ] **4.5 `run_with_credentials`: env injection via the daemon** (reuse
       2.6). Command resolution plus the allowlist check, the env-name
       denylist, a from-scratch child env, timeout with process-group kill,

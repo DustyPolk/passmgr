@@ -214,6 +214,121 @@ fn an_unexpected_daemon_answer_is_never_a_success() {
 }
 
 #[test]
+fn describe_ref_accepts_only_the_canonical_reference_form() {
+    let reference = "pm://00112233445566778899aabbccddeeff";
+    assert_eq!(
+        describe_ref(Some(&json!({"ref": reference}))).expect("valid"),
+        reference
+    );
+
+    for (arguments, needle) in [
+        (None, "requires a 'ref'"),
+        (Some(json!({})), "'ref' is required"),
+        (Some(json!({"ref": 1})), "must be a string"),
+        (
+            Some(json!({"ref": "pm://00112233445566778899AABBCCDDEEFF"})),
+            "canonical",
+        ),
+        (
+            Some(json!({"ref": "pm://00112233445566778899aabbccddeeff/token"})),
+            "canonical",
+        ),
+        (
+            Some(json!({"ref": "00112233445566778899aabbccddeeff"})),
+            "canonical",
+        ),
+        (Some(json!({"ref": ""})), "canonical"),
+        (
+            Some(json!({"ref": "pm://00112233445566778899aabbccddeefg"})),
+            "canonical",
+        ),
+        (
+            Some(json!({"ref": " pm://00112233445566778899aabbccddeeff"})),
+            "canonical",
+        ),
+        (
+            Some(json!({"extra": 1})),
+            "unknown describe_credential argument",
+        ),
+    ] {
+        let error = describe_ref(arguments.as_ref()).expect_err("must be refused");
+        assert!(
+            error.contains(needle),
+            "{error:?} does not contain {needle:?}"
+        );
+    }
+
+    // A non-canonical reference is agent-supplied text: it must never be
+    // quoted back, and the error must stay short.
+    let canary = "canary-ref-that-must-not-be-echoed";
+    let error = describe_ref(Some(&json!({"ref": canary}))).expect_err("refused");
+    assert!(!error.contains(canary), "the reference leaked: {error:?}");
+    assert!(error.len() < 120, "the error must stay short: {error}");
+
+    let long = format!("pm://{}", "a".repeat(MAX_REFERENCE_BYTES));
+    let error = describe_ref(Some(&json!({"ref": long}))).expect_err("too long");
+    assert!(error.contains("exceeds"), "{error}");
+}
+
+#[test]
+fn a_validated_reference_becomes_the_describe_request_verbatim() {
+    let token = GrantToken::generate().expect("token");
+    let expected = token.hash();
+    let reference = entry().reference;
+    let Request::Describe(describe) = describe_request(token, reference.clone()) else {
+        panic!("expected a describe request");
+    };
+    assert_eq!(describe.reference, reference);
+    assert!(describe.grant.hash().matches(&expected));
+}
+
+#[test]
+fn describe_output_is_the_entry_object_with_no_value() {
+    let output = describe_output(&entry());
+    assert_eq!(output["isError"], false);
+    assert_eq!(output["content"][0]["type"], "text");
+    assert!(
+        !output["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .is_empty()
+    );
+    let structured = output["structuredContent"].as_object().expect("object");
+    assert_eq!(structured.len(), 8, "exactly the Entry properties");
+    assert_eq!(structured["ref"], "pm://00112233445566778899aabbccddeeff");
+    assert_eq!(structured["service"], "example.test");
+    assert_eq!(structured["fields"], json!(["token"]));
+    assert_eq!(structured["created"], "2023-11-14T22:13:20Z");
+}
+
+#[test]
+fn describe_response_maps_one_entry_and_collapses_not_found() {
+    let result = describe_response(Response::Entry(entry()));
+    assert_eq!(result["isError"], false);
+    assert_eq!(
+        result["structuredContent"]["ref"],
+        "pm://00112233445566778899aabbccddeeff"
+    );
+
+    // The daemon uses one `NotFound` for a missing reference and for one its
+    // grant does not cover; this layer must keep them indistinguishable.
+    let missing = describe_response(Response::Error(ResponseError::NotFound));
+    assert_eq!(missing["isError"], true);
+    assert!(missing.get("structuredContent").is_none());
+    assert_eq!(missing["content"][0]["text"], "not found or not granted");
+
+    let unexpected = describe_response(Response::Pong);
+    assert_eq!(unexpected["isError"], true);
+    assert!(unexpected.get("structuredContent").is_none());
+    assert!(
+        unexpected["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .contains("unexpected")
+    );
+}
+
+#[test]
 fn the_no_grant_message_is_exactly_the_contract_message() {
     assert_eq!(NO_GRANT, "no active grant; call request_access");
     let result = error_result(NO_GRANT);

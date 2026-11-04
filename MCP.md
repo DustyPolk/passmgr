@@ -118,7 +118,7 @@ Implementation notes (`src/mcp/era.rs`, TODO 4.2):
   other result is passed through the same decorator, which adds
   `resultType`/`_meta` for modern and nothing for legacy.
 
-Implementation notes (`src/mcp/server.rs`, `src/mcp/tools.rs`, `src/mcp/call.rs`, TODO 4.3–4.4d):
+Implementation notes (`src/mcp/server.rs`, `src/mcp/tools.rs`, `src/mcp/call.rs`, TODO 4.3–4.4e):
 
 - The loop is sequential and synchronous: one input buffer at a time, eight
   KiB reads, each completed line offered to the era module before any method
@@ -132,11 +132,16 @@ Implementation notes (`src/mcp/server.rs`, `src/mcp/tools.rs`, `src/mcp/call.rs`
   catalogue is tested to fit in one JSON-RPC line, so `tools/list` can never
   be truncated by the 1 MiB line cap.
 - `tools/call` has a dispatcher that validates `name` and `arguments` before
-  anything reaches the daemon. `list_credentials` is implemented (TODO 4.4d);
-  other tool names answer `-32602` "unknown tool" until their daemon path
-  lands. An absent grant never produces an empty success: `list_credentials`
-  answers `isError` with "no active grant; call request_access". `ping`
-  answers `{}`.
+  anything reaches the daemon. `list_credentials` (4.4d) and
+  `describe_credential` (4.4e) are implemented; other tool names answer
+  `-32602` "unknown tool" until their daemon path lands. An absent grant never
+  produces an empty success: either metadata tool answers `isError` with "no
+  active grant; call request_access". `describe_credential` accepts only the
+  canonical `pm://<32 lowercase hex>` form (upper-case hex and a field suffix
+  are refused before the daemon sees them), and its `structuredContent` is the
+  `Entry` object itself. A daemon `not_found` is rendered as "not found or not
+  granted", the same text for a missing reference and one outside the grant.
+  Errors never echo a supplied reference. `ping` answers `{}`.
 - The loop does not write to stderr today. A future diagnostic must never
   include a secret, a token, a reference the caller did not supply, or
   agent-supplied text without escaping.
@@ -175,7 +180,11 @@ and forwarded only as narrowing filters: every authorization decision stays in
 integer seconds.
 
 ### `describe_credential`  (readOnlyHint, idempotentHint)
-Input: `{ "ref": "pm://…" }`. Output: `Entry`.
+Input: `{ "ref": "pm://…" }` (the canonical 32-lowercase-hex form; a field
+suffix is not accepted here). Output: the `Entry` object. A reference outside
+the grant's scope and a reference that does not exist both answer `isError`
+"not found or not granted", and no error echoes the supplied reference. No
+grant: `isError` with "no active grant; call request_access".
 
 ### `run_with_credentials`  (destructiveHint, openWorldHint)
 Run a program with secrets injected. The agent sees only the redacted output.

@@ -136,6 +136,17 @@ impl Server {
                     Err(message) => call::error_result(&message),
                 })
             }
+            call::DESCRIBE_CREDENTIAL => {
+                let reference = call::describe_ref(arguments)
+                    .map_err(|message| ErrorObject::new(ErrorCode::InvalidParams, message))?;
+                let Some(grant) = self.grant.as_ref() else {
+                    return Ok(call::error_result(call::NO_GRANT));
+                };
+                Ok(match call::request_describe(grant, reference) {
+                    Ok(response) => call::describe_response(response),
+                    Err(message) => call::error_result(&message),
+                })
+            }
             _ => Err(ErrorObject::new(
                 ErrorCode::InvalidParams,
                 "unknown tool: call tools/list for the tools this server provides",
