@@ -809,7 +809,13 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   complete message the peer obviously sent would be worse than accepting it.
 - Dual era: legacy `2025-11-25` handshake and modern stateless `2026-07-28`
   (`_meta` validation, `server/discover`, `resultType`, `serverInfo`); an
-  unknown modern version gets `-32022` with the supported list.
+  unknown modern version gets `-32022` with the supported list. Era handling
+  lives in one pure module (`src/mcp/era.rs`) that owns the `initialize` and
+  `server/discover` results and the result decorator, so handlers never
+  branch on the era. A malformed `params._meta` is an error, never a fallback
+  to the legacy era; a second legacy `initialize` is `-32600`; only
+  `2026-07-28` is served statelessly, so a `_meta` naming `2025-11-25` gets
+  `-32022` and must use `initialize` instead.
 - An out-of-scope ref answers exactly like a nonexistent one (no existence
   oracle). Agent-supplied text shown to a human is sanitized (control and
   bidi characters stripped) and labelled untrusted.

@@ -95,6 +95,28 @@ not supported; the client decides whether to continue):
 `initialize` arrives after modern requests, still honour it. Keep era handling
 in one small module, with table-driven tests for both eras.
 
+Implementation notes (`src/mcp/era.rs`, TODO 4.2):
+
+- A legacy `initialize` always answers `2025-11-25`, whatever version was
+  requested, and never answers `-32022`: the legacy spec leaves the decision
+  to the client. A second `initialize` on the same process is `-32600`, since
+  it would silently renegotiate state the first handshake already fixed.
+- `params._meta` must be an object; its presence (even a malformed one) means
+  modern traffic, never a fallback to the legacy era. `protocolVersion` is a
+  string of at most 64 bytes. `clientCapabilities` must be an object; its
+  contents are not read. `clientInfo` is optional, but when present must be an
+  object with a `name` string of 1..=128 bytes; the name is kept for the audit
+  record.
+- A `_meta` version other than `2026-07-28` is `-32022` with
+  `{"supported": ["2026-07-28", "2025-11-25"], "requested": "<v>"}`, even
+  when it names a legacy version: only `2026-07-28` can be served statelessly,
+  and a client that wants `2025-11-25` must use `initialize`. A version longer
+  than 64 bytes is `-32602` before anything is echoed.
+- The era module owns the `initialize` and `server/discover` results, so a
+  tool handler never has to remember which era it is answering in. Every
+  other result is passed through the same decorator, which adds
+  `resultType`/`_meta` for modern and nothing for legacy.
+
 ## Tools
 
 The tool set is deliberately small. Every input is validated against its

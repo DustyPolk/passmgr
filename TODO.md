@@ -23,11 +23,15 @@ keeps the dependency tree small and stdout hygiene under our control.
       Note: ids are bounded at 128 bytes and `i64` only (no floats, no
       `null` on a call); a peer's `error.code` is preserved as its raw `i32`;
       `LineReader` also returns an unterminated final line at EOF.
-- [ ] **4.2 Era handling** (`src/mcp/era.rs`). Legacy `initialize`/
+- [x] **4.2 Era handling** (`src/mcp/era.rs`). Legacy `initialize`/
       `notifications/initialized`/`ping`, modern `_meta` validation, `-32022`
       with the supported list, `server/discover`, `resultType` and
       `serverInfo` on modern results. Table-driven tests for both eras and
       for era switching.
+      Note: a malformed `_meta` is `-32602`, never a legacy fallback; a
+      second legacy `initialize` is `-32600`; `_meta` naming `2025-11-25`
+      gets `-32022` (only `2026-07-28` is served statelessly). The server
+      loop still has to wire `admit`/`decorate` in (TODO 4.3).
 - [ ] **4.3 `pm mcp serve` loop + `tools/list`.** A stdio loop where stdout
       carries only JSON and logs go to stderr. Tool definitions have
       hand-written JSON Schemas (`additionalProperties: false`), `title`,

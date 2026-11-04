@@ -6,9 +6,12 @@
 //! request to `pmd`, which holds the key and does the injecting. `MCP.md` is
 //! the contract this module implements.
 //!
-//! The only piece that exists today is the transport codec
-//! ([`jsonrpc`]): framing, parsing and serializing JSON-RPC 2.0 lines. It is
-//! deliberately separate from the tool implementations so both can be unit
-//! tested without a pipe or a daemon.
+//! Two pieces exist today. The transport codec ([`jsonrpc`]) frames, parses
+//! and serializes JSON-RPC 2.0 lines; the era module ([`era`]) decides which
+//! protocol era a request belongs to, validates its `_meta`, and owns the
+//! `initialize` and `server/discover` results. Both are deliberately separate
+//! from the tool implementations so all three can be unit tested without a
+//! pipe or a daemon.
 
+pub mod era;
 pub mod jsonrpc;

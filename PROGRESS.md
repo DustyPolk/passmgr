@@ -1,3 +1,37 @@
+## 2026-11-04 — MCP protocol era handling (TODO 4.2)
+
+- New `src/mcp/era.rs` (+ `src/mcp/era/tests.rs`, 20 tests). Pure, no I/O:
+  `Session::admit(&Request) -> Result<Admitted, Rejected>` picks the era, so
+  the loop in 4.3 only routes by `Admitted { era, reply }`. `_meta` present
+  means modern; it must be an object with a `protocolVersion` string (≤64
+  bytes) and an object `clientCapabilities` (contents unread); `clientInfo`
+  is optional but, when present, needs a 1..=128 byte `name`, kept for the
+  audit record. A malformed `_meta` is `-32602`, never a legacy fallback.
+- Legacy: `initialize` validates `protocolVersion`/`capabilities`/`clientInfo`,
+  always answers `2025-11-25` (never `-32022`, per `MCP.md` negotiation), and
+  a second `initialize` is `-32600`. Non-`ping` requests before the handshake
+  are `-32600`. `ping` is era-agnostic.
+- Modern: a `_meta` version other than `2026-07-28` is `-32022` with
+  `{"supported": [...], "requested": "<v>"}`; that includes `2025-11-25`,
+  because only the modern version can be served statelessly (a legacy client
+  must use `initialize`). `server/discover` is answered only in the modern
+  era; in legacy it stays -32601 from the dispatcher.
+- `initialize_result()`, `discover()` and `decorate(era, result)` own every
+  era-specific shape (`resultType`, `_meta.serverInfo`), so handlers and the
+  loop never duplicate them. The instructions text (≤1200 bytes) is pinned by
+  a test on the workflow phrases `MCP.md` promises.
+- `MCP.md` gained implementation notes under "Era selection"; `DECISIONS.md`
+  records the three choices above.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -D warnings` and
+  `cargo test` pass.
+- **Next iteration must know:** 4.3 must call `admit` before dispatch, send
+  `Rejected.id` with `Rejected.error` (`Message::error`), use
+  `Admitted.reply` instead of dispatching for `initialize`/`server/discover`,
+  and wrap every other result in `decorate(era, result)`. `notifications/
+  initialized` is a notification, so the codec never turns it into a
+  `Request`; if a client sends it with an id anyway, the dispatcher will
+  answer `-32601` — acceptable, but say so in `MCP.md` if a test pins it.
+
 ## 2026-11-04 — JSON-RPC 2.0 line codec (TODO 4.1)
 
 - New `src/mcp/mod.rs` (contract summary + `pub mod jsonrpc`) and
