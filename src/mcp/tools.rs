@@ -132,9 +132,13 @@ fn list_credentials() -> Value {
                     "type": "array",
                     "items": entry_schema(),
                     "description": "Entries your grant covers, in vault order."
+                },
+                "truncated": {
+                    "type": "boolean",
+                    "description": "True when the answer was capped; narrow it with tags or query."
                 }
             },
-            "required": ["entries"],
+            "required": ["entries", "truncated"],
             "additionalProperties": false
         },
         "annotations": annotations(true, false, true, false)

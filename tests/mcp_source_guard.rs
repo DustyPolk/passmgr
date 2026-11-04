@@ -262,6 +262,7 @@ fn no_mcp_source_reaches_reveal_or_clipboard_code() {
         })
         .collect();
     for expected in [
+        "src/mcp/call.rs",
         "src/mcp/era.rs",
         "src/mcp/jsonrpc.rs",
         "src/mcp/mod.rs",

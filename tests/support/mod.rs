@@ -63,19 +63,30 @@ impl Fixture {
 
     /// A fixture whose grant expires `seconds` after it is created.
     pub fn with_grant_expiring_in(seconds: u64) -> Self {
-        Self::build(SECRET, None, seconds)
+        Self::build(SECRET, None, seconds, Capabilities::RUN)
+    }
+
+    /// A fixture whose grant carries exactly `capabilities`.
+    pub fn with_capabilities(capabilities: Capabilities) -> Self {
+        Self::build(SECRET, None, 3600, capabilities)
     }
 
     fn with_secret_and_uses(secret: &str, max_uses: Option<u32>) -> Self {
-        Self::build(secret, max_uses, 3600)
+        Self::build(secret, max_uses, 3600, Capabilities::RUN)
     }
 
-    fn build(secret: &str, max_uses: Option<u32>, expires_in: u64) -> Self {
+    fn build(
+        secret: &str,
+        max_uses: Option<u32>,
+        expires_in: u64,
+        capabilities: Capabilities,
+    ) -> Self {
         let directory = tempfile::tempdir().expect("tempdir");
         // tempfile creates the directory 0700, which is exactly what the
         // runtime directory check requires.
         let vault = directory.path().join("vault.dat");
-        let runtime = directory.path().join("run");
+        // `RuntimePaths::resolve()` under XDG_RUNTIME_DIR appends "passmgr".
+        let runtime = directory.path().join("passmgr");
 
         let credential = Credential::new(
             "example.test".into(),
@@ -108,7 +119,7 @@ impl Fixture {
                 label: "daemon test run grant".into(),
                 scope,
                 commands: vec![sh, truth, spawn_fail_program.clone()],
-                capabilities: Capabilities::RUN,
+                capabilities,
                 expires_at: grant_expires_at,
                 max_uses,
             },

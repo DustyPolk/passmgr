@@ -118,7 +118,7 @@ Implementation notes (`src/mcp/era.rs`, TODO 4.2):
   other result is passed through the same decorator, which adds
   `resultType`/`_meta` for modern and nothing for legacy.
 
-Implementation notes (`src/mcp/server.rs`, `src/mcp/tools.rs`, TODO 4.3):
+Implementation notes (`src/mcp/server.rs`, `src/mcp/tools.rs`, `src/mcp/call.rs`, TODO 4.3–4.4d):
 
 - The loop is sequential and synchronous: one input buffer at a time, eight
   KiB reads, each completed line offered to the era module before any method
@@ -131,9 +131,12 @@ Implementation notes (`src/mcp/server.rs`, `src/mcp/tools.rs`, TODO 4.3):
   the entry/grant shapes carry references, names and timestamps only. The
   catalogue is tested to fit in one JSON-RPC line, so `tools/list` can never
   be truncated by the 1 MiB line cap.
-- `tools/call` answers `-32601` in this build, with a message saying so: no
-  tool reaches the daemon yet. TODO 4.4 replaces that branch with the
-  dispatcher and updates the test that pins it. `ping` answers `{}`.
+- `tools/call` has a dispatcher that validates `name` and `arguments` before
+  anything reaches the daemon. `list_credentials` is implemented (TODO 4.4d);
+  other tool names answer `-32602` "unknown tool" until their daemon path
+  lands. An absent grant never produces an empty success: `list_credentials`
+  answers `isError` with "no active grant; call request_access". `ping`
+  answers `{}`.
 - The loop does not write to stderr today. A future diagnostic must never
   include a secret, a token, a reference the caller did not supply, or
   agent-supplied text without escaping.
@@ -163,7 +166,13 @@ they can never add an entry the scope excludes.
 url|null, created|null, last_rotated|null }`. An answer must fit one 64 KiB
 frame, so `truncated: true` means more entries matched than were returned; the
 agent narrows with `tags`/`query` rather than assuming it saw everything.
-No grant: `isError` with "no active grant; call request_access".
+No grant: `isError` with "no active grant; call request_access". A daemon
+refusal (expired, revoked, exhausted or run-only grant) and an unreachable
+daemon map to `isError` with a short reason; neither is ever an empty list.
+Tags and query are validated against the schema before the request is built,
+and forwarded only as narrowing filters: every authorization decision stays in
+`pmd`. Timestamps in the MCP answer are RFC 3339, unlike the protocol's
+integer seconds.
 
 ### `describe_credential`  (readOnlyHint, idempotentHint)
 Input: `{ "ref": "pm://…" }`. Output: `Entry`.

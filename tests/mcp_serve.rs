@@ -357,3 +357,176 @@ fn a_missing_grant_file_is_refused_rather_than_starting_grantless() {
         stderr(&output)
     );
 }
+
+// ---------------------------------------------------------------------------
+// `tools/call` for `list_credentials` (TODO 4.4d)
+// ---------------------------------------------------------------------------
+
+mod support;
+
+use passmgr::grant::Capabilities;
+use passmgr::session;
+use passmgr::socket::RuntimePaths;
+use support::{Fixture, SECRET};
+
+/// A modern `tools/call` line, with the mandatory `_meta`.
+fn call_line(id: u64, arguments: &str) -> String {
+    format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"tools/call\",\"params\":{{\
+         \"name\":\"list_credentials\",\"arguments\":{arguments},{MODERN_META}}}}}\n"
+    )
+}
+
+fn no_secret(output: &std::process::Output) {
+    assert!(!stdout(output).contains(SECRET), "stdout leaked the secret");
+    assert!(!stderr(output).contains(SECRET), "stderr leaked the secret");
+}
+
+#[test]
+fn list_without_a_grant_says_to_call_request_access() {
+    let _guard = serial();
+    let output = run_with_env(
+        &["mcp", "serve"],
+        &call_line(1, "{}"),
+        &[("PASSMGR_AGENT", "1")],
+    );
+    assert_success(&output);
+    assert_eq!(stderr(&output), "");
+
+    let answers = lines(&output);
+    assert_eq!(answers.len(), 1);
+    let result = &answers[0]["result"];
+    assert_eq!(result["isError"], true);
+    assert_eq!(result["content"][0]["type"], "text");
+    assert_eq!(
+        result["content"][0]["text"],
+        "no active grant; call request_access"
+    );
+    assert!(
+        result.get("structuredContent").is_none(),
+        "a missing grant must not look like an empty list"
+    );
+}
+
+#[test]
+fn list_returns_only_metadata_covered_by_a_list_grant() {
+    let _guard = serial();
+    let fixture = Fixture::with_capabilities(Capabilities::LIST);
+    let mut daemon = fixture.start();
+    session::store(&RuntimePaths::at(&fixture.runtime), &fixture.token).expect("store session");
+
+    let output = run_with_env(
+        &[
+            "mcp",
+            "serve",
+            "--grant-file",
+            fixture.grant_file.to_str().expect("path"),
+        ],
+        &call_line(1, "{}"),
+        &[
+            ("PASSMGR_AGENT", "1"),
+            (
+                "XDG_RUNTIME_DIR",
+                fixture._directory.path().to_str().expect("path"),
+            ),
+        ],
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+
+    assert_success(&output);
+    assert_eq!(stderr(&output), "", "{}", stderr(&output));
+    no_secret(&output);
+
+    let answers = lines(&output);
+    assert_eq!(answers.len(), 1);
+    let result = &answers[0]["result"];
+    assert_eq!(result["isError"], false, "{result}");
+    let structured = &result["structuredContent"];
+    assert_eq!(structured["truncated"], false);
+    let entries = structured["entries"].as_array().expect("entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["ref"], fixture.reference);
+    assert_eq!(entries[0]["service"], "example.test");
+    assert_eq!(entries[0]["username"], "alice");
+    assert_eq!(entries[0]["fields"], json!([]));
+    assert_eq!(entries[0]["url"], Value::Null);
+    assert!(
+        entries[0]["created"]
+            .as_str()
+            .is_some_and(|text| text.ends_with('Z')),
+        "timestamps must be RFC 3339: {}",
+        entries[0]["created"]
+    );
+}
+
+#[test]
+fn list_is_denied_when_the_grant_lacks_the_list_capability() {
+    let _guard = serial();
+    let fixture = Fixture::new(); // RUN only
+    let mut daemon = fixture.start();
+    session::store(&RuntimePaths::at(&fixture.runtime), &fixture.token).expect("store session");
+
+    let output = run_with_env(
+        &[
+            "mcp",
+            "serve",
+            "--grant-file",
+            fixture.grant_file.to_str().expect("path"),
+        ],
+        &call_line(1, "{}"),
+        &[
+            ("PASSMGR_AGENT", "1"),
+            (
+                "XDG_RUNTIME_DIR",
+                fixture._directory.path().to_str().expect("path"),
+            ),
+        ],
+    );
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+
+    assert_success(&output);
+    no_secret(&output);
+    let answers = lines(&output);
+    let result = &answers[0]["result"];
+    assert_eq!(result["isError"], true);
+    assert!(result.get("structuredContent").is_none());
+    let message = result["content"][0]["text"].as_str().expect("text");
+    assert!(
+        message.contains("denied") && message.contains("grant"),
+        "{message}"
+    );
+}
+
+#[test]
+fn list_without_a_running_daemon_is_an_actionable_error() {
+    let _guard = serial();
+    let fixture = Fixture::with_capabilities(Capabilities::LIST);
+    // No `start()`: the runtime directory may not exist, and there is no
+    // session file. The server must say so instead of returning `[]`.
+    let output = run_with_env(
+        &[
+            "mcp",
+            "serve",
+            "--grant-file",
+            fixture.grant_file.to_str().expect("path"),
+        ],
+        &call_line(1, "{}"),
+        &[
+            ("PASSMGR_AGENT", "1"),
+            (
+                "XDG_RUNTIME_DIR",
+                fixture._directory.path().to_str().expect("path"),
+            ),
+        ],
+    );
+    assert_success(&output);
+    no_secret(&output);
+    let answers = lines(&output);
+    let result = &answers[0]["result"];
+    assert_eq!(result["isError"], true);
+    assert!(result.get("structuredContent").is_none());
+    let message = result["content"][0]["text"].as_str().expect("text");
+    assert!(message.contains("pm unlock"), "{message}");
+}

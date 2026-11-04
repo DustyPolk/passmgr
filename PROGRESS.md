@@ -1,3 +1,43 @@
+## 2026-11-04 — MCP `list_credentials` via the daemon (TODO 4.4d)
+
+- New `src/mcp/call.rs`: the `tools/call` boundary. `call_parts` validates the
+  envelope (`name`/`arguments`/`_meta` only, name ≤64 bytes), `list_filters`
+  applies the schema's bounds (≤32 tags through `store::validate_tag`, query
+  1..=256 bytes with no control characters), and `list_request` builds
+  `Request::List` with the session grant. `request_list` loads the session
+  token from `$XDG_RUNTIME_DIR/passmgr`, distinguishes "daemon not running"
+  from "cannot authenticate", and calls `client::request`.
+- `list_response` accepts only `Response::Entries`; `Entry` metadata is
+  projected with RFC 3339 timestamps (`timestamp::format_utc`), and the
+  output is `{content, structuredContent:{entries,truncated}, isError:false}`.
+  Every daemon refusal and every transport failure is `isError` with a short
+  message, so "no grant"/"daemon down" can never look like an empty list.
+  No grant is exactly `no active grant; call request_access`.
+- `Server::dispatch` now calls `tools_call`; `tools/call` no longer answers
+  `-32601`. Unknown tool names are `-32602` "unknown tool"; argument errors
+  are `-32602` before the grant check. `list_credentials` output schema now
+  requires `truncated`.
+- Decisions: keep validation/results in the pure-ish `call` module, not in
+  `server.rs`; never reuse the protocol's integer timestamps in MCP; never
+  echo an agent-supplied filter value in an error (only a 32-char,
+  control-stripped member name is quoted). Added to `DECISIONS.md`.
+- Tests: 8 unit tests in `src/mcp/call/tests.rs` (bounds, `_meta`, pass-through,
+  RFC 3339, truncation, every `ResponseError`, unexpected response, exact
+  no-grant text). `src/mcp/server/tests.rs` now proves the no-grant result and
+  unknown-tool/argument refusals. Four e2e tests in `tests/mcp_serve.rs`:
+  no grant, LIST-grant metadata (ref/service/username/no fields/no URL, no
+  canary secret on either stream), RUN-only denial, and no-daemon error.
+- Test-support change: `tests/support/mod.rs` now creates its runtime at
+  `<temp>/passmgr` (so `RuntimePaths::resolve()` under the test's
+  `XDG_RUNTIME_DIR` finds it) and has `Fixture::with_capabilities`.
+- Also updated `MCP.md`, `SECURITY.md`, `README.md` and the 4.4e note.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass (`cargo audit` skipped: not installed). No dependency.
+- **Next iteration must know:** 4.4e adds the `describe_credential` arm in
+  `tools_call` and can reuse `response`/`entry_json`; the dispatcher already
+  refuses unknown tools, so its TODO text was adjusted. `src/daemon.rs` is
+  still 991 lines and needs a split before it grows.
+
 ## 2026-11-04 — Daemon `describe` request: one entry, same collapsing as `list` (TODO 4.4c)
 
 - `Request::Describe(DescribeRequest { reference, grant })` and

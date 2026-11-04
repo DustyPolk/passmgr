@@ -834,10 +834,14 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   method dispatch, then the decorator. Tool definitions are a pure catalogue
   (`src/mcp/tools.rs`) so schema shape and catalogue size are unit-testable
   without a pipe; `tools/list` needs no daemon, which is why it landed
-  before any tool that does. `tools/call` is `-32601` until TODO 4.4e wires
-  the daemon, and its test pins that so a missing implementation cannot turn
-  into a fake success. `mcp serve` refuses `--db`/`PASSMGR_DB` even though it
-  opens no vault: accepting a path would suggest it had chosen one.
+  before any tool that does. `tools/call` now has a dispatcher in
+  `src/mcp/call.rs` (TODO 4.4d): `call_parts` validates the call envelope,
+  `list_filters` applies the schema's bounds, and `list_request` forwards only
+  narrowing filters. It builds results only from `Response::Entries`, converts
+  timestamps to RFC 3339, and maps every refusal to an `isError` result rather
+  than a fabricated empty success; unknown tools are `-32602`, never silently
+  ignored. `mcp serve` refuses `--db`/`PASSMGR_DB` even though it opens no
+  vault: accepting a path would suggest it had chosen one.
 - `mcp serve` binds its grant at startup (TODO 4.4a): `--grant-file FILE`
   overrides `PASSMGR_GRANT_FILE`, and the file is read through the same
   `grant::read_grant_token` used by `run` (regular file, owner, no group or

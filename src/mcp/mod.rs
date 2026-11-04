@@ -10,10 +10,12 @@
 //! and serializes JSON-RPC 2.0 lines; the era module ([`era`]) decides which
 //! protocol era a request belongs to, validates its `_meta`, and owns the
 //! `initialize` and `server/discover` results; [`server`] runs the sequential
-//! stdio loop; and [`tools`] holds the tool catalogue (`tools/list`). All are
-//! deliberately separate from the daemon so each can be unit tested without a
-//! pipe or a socket, and none of them can reach reveal code.
+//! stdio loop; [`tools`] holds the tool catalogue (`tools/list`); and [`call`]
+//! validates a `tools/call` argument object and maps the daemon's answer. All
+//! are deliberately separate from the daemon so each can be unit tested
+//! without a pipe or a socket, and none of them can reach reveal code.
 
+pub mod call;
 pub mod era;
 pub mod jsonrpc;
 pub mod server;

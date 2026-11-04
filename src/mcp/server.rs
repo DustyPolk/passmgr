@@ -20,6 +20,7 @@ use std::io::{self, Read, Write};
 
 use serde_json::{Value, json};
 
+use super::call;
 use super::era::{self, Admitted, Session};
 use super::jsonrpc::{
     ErrorCode, ErrorObject, LineEvent, LineReader, MAX_LINE_BYTES, Message, encode_line, parse_line,
@@ -107,19 +108,37 @@ impl Server {
         match request.method.as_str() {
             era::PING_METHOD => Ok(json!({})),
             TOOLS_LIST_METHOD => Ok(tools::list_result()),
-            // The catalogue is advertised now so `tools/list` can be tested
-            // and an agent host can be pointed at the server; the dispatcher
-            // that validates arguments and calls `pmd` lands with TODO 4.4.
-            // Until then the honest answer is that the method is not
-            // implemented, not a fabricated result.
-            TOOLS_CALL_METHOD => Err(ErrorObject::new(
-                ErrorCode::MethodNotFound,
-                "tools/call is not available in this build",
-            )),
+            TOOLS_CALL_METHOD => self.tools_call(request.params.as_ref()),
             _ => Err(ErrorObject::new(
                 ErrorCode::MethodNotFound,
                 "unknown method: this server supports ping, tools/list, tools/call, \
                  initialize (legacy) and server/discover (modern)",
+            )),
+        }
+    }
+
+    /// Dispatch one tool call. Only tools whose daemon path exists are
+    /// implemented; the rest stay unknown rather than returning a fabricated
+    /// success. A grant is required before any daemon request is built, and
+    /// the daemon still decides whether that grant covers the request.
+    fn tools_call(&self, params: Option<&Value>) -> Result<Value, ErrorObject> {
+        let (name, arguments) = call::call_parts(params)
+            .map_err(|message| ErrorObject::new(ErrorCode::InvalidParams, message))?;
+        match name {
+            call::LIST_CREDENTIALS => {
+                let filters = call::list_filters(arguments)
+                    .map_err(|message| ErrorObject::new(ErrorCode::InvalidParams, message))?;
+                let Some(grant) = self.grant.as_ref() else {
+                    return Ok(call::error_result(call::NO_GRANT));
+                };
+                Ok(match call::request_list(grant, filters) {
+                    Ok(response) => call::list_response(response),
+                    Err(message) => call::error_result(&message),
+                })
+            }
+            _ => Err(ErrorObject::new(
+                ErrorCode::InvalidParams,
+                "unknown tool: call tools/list for the tools this server provides",
             )),
         }
     }

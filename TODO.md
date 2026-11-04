@@ -66,19 +66,20 @@ keeps the dependency tree small and stdout hygiene under our control.
       out-of-scope == missing with identical error bytes, no value anywhere.
       (No wire-type or vault change; `field`-scoped grants do not cover
       `None`, so `describe` is out of scope for them — same as `list`.)
-- [ ] **4.4d MCP `list_credentials`**: validate `tags`/`query` against the
+- [x] **4.4d MCP `list_credentials`**: validate `tags`/`query` against the
       hand-written schema (bounded, advisory filters only), call 4.4b, map the
-      daemon's answer to `{"entries": [...]}`. No grant → `isError` with the
-      "no active grant" message, never an empty success. Tests: shape, filter
-      pass-through, daemon denial and unreachable daemon map to `isError`, no
-      secret in the response.
+      daemon's answer to `{"entries": [...], "truncated": bool}`. No grant →
+      `isError` with the "no active grant" message, never an empty success.
+      Tests: shape, filter pass-through, daemon denial and unreachable daemon
+      map to `isError`, no secret in the response.
+      Note: the dispatcher changed shape in `src/mcp/call.rs`; `truncated` is
+      in the output schema, and MCP timestamps are RFC 3339.
 - [ ] **4.4e MCP `describe_credential`**: validate `ref` (exact `pm://` form),
       call 4.4c, return `Entry`; missing/out-of-scope are the same `isError`
-      text. Replace the `tools/call` `-32601` branch and its
-      `tools_call_reports_that_it_is_not_available_yet` test with a dispatcher
-      that validates `name`/`arguments` and refuses unknown tools. Tests: both
-      tools through the real stdio loop, and an MCP-session canary secret
-      never appears in any answer.
+      text. The `tools/call` dispatcher and its unknown-tool refusal already
+      exist (4.4d); add this arm and a real stdio test. Tests: both tools
+      through the real stdio loop, and an MCP-session canary secret never
+      appears in any answer.
 - [ ] **4.5 `run_with_credentials`: env injection via the daemon** (reuse
       2.6). Command resolution plus the allowlist check, the env-name
       denylist, a from-scratch child env, timeout with process-group kill,

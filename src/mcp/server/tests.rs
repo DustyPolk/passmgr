@@ -210,25 +210,51 @@ fn unknown_methods_are_method_not_found() {
 }
 
 #[test]
-fn tools_call_reports_that_it_is_not_available_yet() {
-    // TODO 4.4 replaces this branch with the dispatcher. The test is here so
-    // the change cannot silently turn a missing implementation into a fake
-    // success: the answer must be an error, and the answer must change when
-    // the dispatcher lands.
+fn tools_call_without_a_grant_is_an_actionable_is_error_result() {
     let mut server = Server::new();
     initialize(&mut server);
-    let refused = server
+    let answer = server
         .handle(Message::request(
             Id::Number(2),
             TOOLS_CALL_METHOD,
             Some(json!({"name": "list_credentials", "arguments": {}})),
         ))
         .expect("a request");
-    assert_eq!(error(&refused).code, ErrorCode::MethodNotFound.code());
-    assert_eq!(
-        error(&refused).message,
-        "tools/call is not available in this build"
+    let value = result(&answer);
+    assert_eq!(value["isError"], true);
+    assert_eq!(value["content"][0]["text"], call::NO_GRANT);
+    assert!(
+        value.get("structuredContent").is_none(),
+        "a refusal must not look like an empty list"
     );
+}
+
+#[test]
+fn tools_call_refuses_unknown_tools_and_bad_arguments_without_a_grant() {
+    let mut server = Server::new();
+    initialize(&mut server);
+
+    // Argument validation comes before the grant check, so a malformed call is
+    // an invalid-params error even when no daemon request can be made.
+    let refused = server
+        .handle(Message::request(
+            Id::Number(2),
+            TOOLS_CALL_METHOD,
+            Some(json!({"name": "list_credentials", "arguments": {"query": ""}})),
+        ))
+        .expect("a request");
+    assert_eq!(error(&refused).code, ErrorCode::InvalidParams.code());
+    assert!(error(&refused).message.contains("must not be empty"));
+
+    let refused = server
+        .handle(Message::request(
+            Id::Number(3),
+            TOOLS_CALL_METHOD,
+            Some(json!({"name": "run_with_credentials", "arguments": {}})),
+        ))
+        .expect("a request");
+    assert_eq!(error(&refused).code, ErrorCode::InvalidParams.code());
+    assert!(error(&refused).message.contains("unknown tool"));
 }
 
 #[test]
@@ -347,9 +373,10 @@ fn the_server_never_answers_a_notification_even_in_the_modern_era() {
 }
 
 #[test]
-fn a_peer_request_cannot_reach_a_tool_yet() {
+fn a_peer_request_reaches_the_tool_dispatcher() {
     // A request *from* the peer (as opposed to an answer to one of ours) is
-    // dispatched like any other; it is the dispatcher's job to say no.
+    // dispatched like any other; an unimplemented tool is refused by the
+    // dispatcher, not by the transport.
     let mut server = Server::new();
     initialize(&mut server);
     let request = Request {
@@ -358,7 +385,8 @@ fn a_peer_request_cannot_reach_a_tool_yet() {
         params: Some(json!({"name": "run_with_credentials"})),
     };
     let answer = server.handle(Message::Request(request)).expect("a request");
-    assert_eq!(error(&answer).code, ErrorCode::MethodNotFound.code());
+    assert_eq!(error(&answer).code, ErrorCode::InvalidParams.code());
+    assert!(error(&answer).message.contains("unknown tool"));
 }
 
 #[test]
