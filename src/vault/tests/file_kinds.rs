@@ -48,14 +48,10 @@ fn a_dangling_symlink_is_not_replaced_by_a_new_vault() {
 
 #[test]
 fn a_fifo_vault_is_refused_without_waiting_for_a_writer() {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
     let directory = tempfile::tempdir().unwrap();
     let fifo = directory.path().join("vault.dat");
-    let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
-    // SAFETY: `name` is a valid NUL-terminated path.
-    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    assert!(made.unwrap().success(), "mkfifo");
 
     let (sender, receiver) = mpsc::channel();
     thread::spawn(move || {

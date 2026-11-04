@@ -89,7 +89,9 @@ impl std::error::Error for GrantFileError {
 pub fn read_grant_token(path: &Path) -> Result<GrantToken, GrantFileError> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
+        // O_NONBLOCK so that opening a FIFO returns at once; the regular-file
+        // check below then refuses it.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
         .map_err(|source| GrantFileError::Io {
             path: path.to_path_buf(),
@@ -235,6 +237,24 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
         let error = read_grant_token(&path).expect_err("must refuse oversized");
         assert!(error.to_string().contains("larger than"), "{error}");
+    }
+
+    #[test]
+    fn a_fifo_is_refused_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("grant.token");
+        let made = std::process::Command::new("mkfifo").arg(&path).status();
+        assert!(made.expect("run mkfifo").success(), "mkfifo");
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(read_grant_token(&path).map(drop));
+        });
+        let error = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading a FIFO must not block")
+            .expect_err("must refuse a FIFO");
+        assert!(error.to_string().contains("not a regular file"), "{error}");
     }
 
     #[test]

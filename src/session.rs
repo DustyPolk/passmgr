@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use crate::socket::{RuntimePaths, SocketError};
 use crate::token::{SessionToken, TokenError};
+use zeroize::Zeroizing;
 
 /// A session file larger than this is not one we wrote.
 const MAX_SESSION_FILE_BYTES: usize = 512;
@@ -75,16 +76,7 @@ pub fn store(paths: &RuntimePaths, token: &SessionToken) -> Result<(), SessionEr
 /// at 0600.
 pub fn load(paths: &RuntimePaths) -> Result<SessionToken, SessionError> {
     let path = paths.session();
-    let metadata = fs::symlink_metadata(&path).map_err(|source| SessionError::Io {
-        path: path.clone(),
-        source,
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(SessionError::Insecure {
-            path,
-            detail: "not a regular file".into(),
-        });
-    }
+    let (file, metadata) = open_regular(&path)?;
     let mode = metadata.mode() & 0o777;
     if mode != SESSION_FILE_MODE {
         return Err(SessionError::Insecure {
@@ -100,9 +92,7 @@ pub fn load(paths: &RuntimePaths) -> Result<SessionToken, SessionError> {
             detail: "not owned by the current user".into(),
         });
     }
-
-    let text = read_token_text(&path)?;
-    SessionToken::from_hex(text.trim_end()).map_err(SessionError::Token)
+    read_token(file, &path)
 }
 
 /// Remove the session file, if it exists.
@@ -127,29 +117,53 @@ pub fn remove(paths: &RuntimePaths) -> Result<bool, SessionError> {
 /// symlink and never removes a foreign file.
 pub fn remove_if_matches(paths: &RuntimePaths, token: &SessionToken) -> bool {
     let path = paths.session();
-    let Ok(text) = read_token_text(&path) else {
+    let Ok((file, _)) = open_regular(&path) else {
         return false;
     };
-    let Ok(found) = SessionToken::from_hex(text.trim_end()) else {
+    let Ok(found) = read_token(file, &path) else {
         return false;
     };
     found.matches(token) && fs::remove_file(&path).is_ok()
 }
 
-/// Read the bounded file content without following symlinks.
-fn read_token_text(path: &Path) -> Result<String, SessionError> {
+/// Open `path` and refuse anything but a regular file.
+///
+/// The checks use the descriptor that was opened, so the file cannot be
+/// swapped between the check and the read. A symlink planted at the path is an
+/// attack, not a convenience, and `O_NONBLOCK` keeps a FIFO from blocking the
+/// open until the regular-file check refuses it.
+fn open_regular(path: &Path) -> Result<(File, fs::Metadata), SessionError> {
+    let io_error = |source| SessionError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
     let file = OpenOptions::new()
         .read(true)
-        // A symlink planted at the path is an attack, not a convenience.
-        .custom_flags(libc::O_NOFOLLOW)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|source| SessionError::Io {
-            path: path.to_path_buf(),
-            source,
+        .map_err(|source| match source.raw_os_error() {
+            Some(libc::ELOOP) => SessionError::Insecure {
+                path: path.to_path_buf(),
+                detail: "not a regular file".into(),
+            },
+            _ => io_error(source),
         })?;
-    let mut text = String::new();
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.is_file() {
+        return Err(SessionError::Insecure {
+            path: path.to_path_buf(),
+            detail: "not a regular file".into(),
+        });
+    }
+    Ok((file, metadata))
+}
+
+/// Read the bounded token text and parse it. The hex is the bearer secret, so
+/// the buffer is wiped when it goes out of scope.
+fn read_token(file: File, path: &Path) -> Result<SessionToken, SessionError> {
+    let mut text = Zeroizing::new(Vec::with_capacity(MAX_SESSION_FILE_BYTES + 1));
     file.take(MAX_SESSION_FILE_BYTES as u64 + 1)
-        .read_to_string(&mut text)
+        .read_to_end(&mut text)
         .map_err(|source| SessionError::Io {
             path: path.to_path_buf(),
             source,
@@ -159,7 +173,9 @@ fn read_token_text(path: &Path) -> Result<String, SessionError> {
             "the session token file is larger than expected".into(),
         ));
     }
-    Ok(text)
+    // Invalid UTF-8 parses as empty text, which `from_hex` rejects.
+    let text = std::str::from_utf8(&text).unwrap_or_default();
+    SessionToken::from_hex(text.trim_end()).map_err(SessionError::Token)
 }
 
 /// Why the session file could not be written, read or removed.
@@ -321,6 +337,29 @@ mod tests {
 
         // Removing an absent file is not an error.
         assert!(!remove(&paths).expect("remove"));
+    }
+
+    #[test]
+    fn a_fifo_at_the_session_path_is_left_alone_without_blocking() {
+        let (_directory, paths) = runtime_paths();
+        let made = std::process::Command::new("mkfifo")
+            .arg(paths.session())
+            .status();
+        assert!(made.expect("run mkfifo").success(), "mkfifo");
+
+        let token = SessionToken::generate().expect("generate");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let shared = paths.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(remove_if_matches(&shared, &token));
+        });
+        let removed = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading a FIFO must not block");
+        assert!(!removed);
+        assert!(paths.session().exists(), "the FIFO is not removed");
+        let error = load(&paths).expect_err("a FIFO is not a session file");
+        assert!(matches!(error, SessionError::Insecure { .. }), "{error:?}");
     }
 
     #[test]
