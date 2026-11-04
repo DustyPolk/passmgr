@@ -28,7 +28,7 @@ set -uo pipefail
 
 PROMPT_FILE="${PROMPT_FILE:-PROMPT.md}"
 REVIEW_FILE="${REVIEW_FILE:-REVIEW.md}"
-REVIEW_EVERY="${REVIEW_EVERY:-6}"        # review after N productive work iterations; 0 = off
+REVIEW_EVERY="${REVIEW_EVERY:-12}"       # review after N productive work iterations; 0 = off
 MAX_ITERS="${MAX_ITERS:-0}"              # iterations for this run; 0 = unlimited
 UNTIL="${UNTIL:-}"                       # wall-clock time (e.g. 07:30) after which no new iteration starts
 ITER_TIMEOUT="${ITER_TIMEOUT:-45m}"      # hard cap per iteration

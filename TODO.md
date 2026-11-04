@@ -40,6 +40,7 @@ Rules that apply to every item:
       copying the request `Value` via `to_value`); `encode_body` now moves the
       request into the envelope and serializes through a wipe-and-swap
       `BodyWriter`, covered by a second test (2 hits old, 0 new).
+
 - [x] **R.65 `decode_body` skips `zeroize_json` on every error path after the
       JSON parse, so a rejected request's token hex is freed unwiped.**
       `src/protocol/codec.rs:306` parses the whole envelope, but
@@ -65,6 +66,7 @@ Rules that apply to every item:
       trailing call after the match is gone because the guard covers it. The
       test also decodes a `version` 3 envelope (the old-client path) and
       measured 3 freed copies of the token hex before the fix, 0 after.
+
 - [x] **R.66 `read_request` propagates `FrameDecoder::push` errors before
       zeroizing the 4 KiB stack chunk, leaving the raw request in stack
       memory.** `src/daemon/run.rs:397-401` calls
@@ -98,22 +100,6 @@ Rules that apply to every item:
       needle and one counter, and a free one of them made outside its own
       window could be scanned inside another's); they now hold `WIRE_SERIAL`
       for their whole bodies. See the PROGRESS entry.
-- [ ] **R.67 The reader-thread stack wipe is not covered by any test, so it
-      can be deleted silently.** `src/runner.rs:528` holds the raw child output
-      (which contains the injected value) in a stack array and
-      `src/runner.rs:542` wipes it; the allocator scan in
-      `tests/secret_copies.rs::a_run_leaves_no_more_copies_than_the_spawn_itself`
-      (`tests/secret_copies.rs:254`) only sees heap blocks, so removing the
-      wipe keeps the whole suite green. The test also compares against a
-      baseline with `hits <= baseline` (measured: both 3), so it has no margin
-      to catch a newly lost wipe of its own canary.
-      Fix: own the read buffer on the heap (`Box<[u8; READ_CHUNK]>` or
-      `Zeroizing<Vec<u8>>`) so `push`/`drain` and the wipe are observable, and
-      replace `<= baseline` with a differential assertion on the raw-output
-      canary: the measured release count must be lower when the wipe is
-      present than when it is removed (pin the count if it is deterministic).
-      Test: delete the wipe locally and confirm the new assertion fails; keep
-      the current baseline comparison only as a sanity check.
 
 - [x] **R.15a `prove` answered "approved" without recording what was
       approved.**
@@ -127,6 +113,7 @@ Rules that apply to every item:
       `handle_connection`; the misleading "cannot approve a different one"
       comment in `tests/daemon.rs` now says it is a MAC mismatch; `MCP.md`,
       `DECISIONS.md` and the protocol/client docs describe the approval.
+
 - [x] **R.15b The write must spend the approval exactly once.** Test:
       complete `prove` for digest A, submit a create whose canonical digest is
       B, and assert it is refused and writes nothing; then assert A-then-A
@@ -296,6 +283,7 @@ Rules that apply to every item:
       Test: the layout guard fails (`src/vault.rs` 1,271, `src/protocol/mod.rs`
       1,317, `tests/cli.rs` 1,463) when `PENDING_SPLITS` is emptied, passes
       with the post-split tree, and the lib suite (223) is unchanged.
+
 - [x] **R.20b Split `src/vault.rs` (1,271 lines) by concern.**
       Move the write-lock and atomic-write machinery (`acquire_write_lock`,
       `acquire_write_lock_with_timeout`, `write_container`, `with_path`) into
@@ -317,6 +305,7 @@ Rules that apply to every item:
       (`write_lock_is_exclusive_private_and_released_on_drop`,
       `write_lock_refuses_a_symlink`) moved into `lock.rs`'s own test module;
       the other 22 are unchanged apart from indentation and one import.
+
 - [x] **R.20c Split `src/protocol/mod.rs` (1,317 lines).**
       Move the frame and body codec (`encode`, `decode`, `FrameDecoder`,
       `read_length`, `check_length`, `encode_body`, `decode_body`) into
@@ -336,6 +325,7 @@ Rules that apply to every item:
       `HEAD:src/protocol/mod.rs` apart from the module wrapper; only
       indentation, the two relocated imports and rustfmt's re-wrapping
       differ. Lib test count unchanged at 223 (40 in `protocol::tests`).
+
 - [x] **R.20d Split `tests/cli.rs` (1,463 lines).**
       Move the PTY/reveal/agent-marker tests and their helpers (`run_on_pty`,
       `read_pty`, the serial guard where needed) into a second test binary
@@ -423,6 +413,7 @@ Rules that apply to every item:
       `check_grant_writable_accepts_a_grant_that_still_fits` (one slot left is
       accepted; a duplicate id is refused before the write). The
       `MAX_PLAINTEXT_BYTES` branch shares the same `store::encode` call.
+
 - [x] **R.22b `pm grant create` must refuse a full vault before the proof.**
       Blocked on TODO 3.4d, which owns the CLI and its vault access. 3.4d must
       open the vault with the derived key and call
@@ -1317,33 +1308,6 @@ Rules that apply to every item:
       or clear the markers in the test setup.
       Test: `CLAUDECODE=1 AI_AGENT=1 cargo test --lib agent` passes.
 
-- [ ] **R.53 `a_run_in_flight_is_not_killed_by_the_idle_timeout` has a 0.5 s
-      timing margin.**
-      `tests/daemon_shutdown.rs:142-149` (added in R.7) starts `pmd` with
-      `--idle-timeout 3`, sleeps a fixed 2.5 s, then must connect before the
-      next idle poll. A 0.5 s stall makes the connect fail, which says
-      nothing about the property. Not reproduced under CPU contention, but
-      this machine has already rolled back an iteration for a timing flake.
-      Fix: start the run first, then assert the daemon outlives
-      `idle + margin` while it is in flight; or use a larger timeout and
-      margin. No fixed sleeps for synchronization.
-      Test: the rewritten test passes with the suite pinned to 2 busy cores.
-
-- [ ] **R.54 Seven files sit just under the 1,000-line guard, and three test
-      fixtures duplicate vault+grant setup.**
-      `src/socket.rs` 987, `src/grant.rs` 985, `src/cli/grant.rs` 972,
-      `tests/cli.rs` 972, `src/runner.rs` 918, `src/protocol/response.rs`
-      912, `src/client.rs` 905. TODO 4.9 lands in `src/cli/grant.rs` and will
-      have to split it mid-item, as R.26 did. `tests/support/mod.rs`
-      `Fixture`, `tests/run.rs` `Daemon` and `tests/grant_support/mod.rs`
-      `Fixture` each build their own vault, grant and grant file with their
-      own constants.
-      Fix: split the files by concern before the next feature touches them
-      (start with `src/cli/grant.rs` and `src/grant.rs`); one shared
-      vault+grant builder used by all three fixtures.
-      Test: `tests/layout.rs` stays green with every file under ~800 lines;
-      test counts unchanged.
-
 - [ ] **R.55 `SECURITY.md`'s terminal-safety bullet claims more than the code
       does, and nothing pins it.**
       `SECURITY.md:50-56` says "Every value passmgr echoes that came from an
@@ -1377,63 +1341,6 @@ Rules that apply to every item:
       escaped; the per-site behavior stays proven by
       `tests/cli_args_escape.rs`.
 
-- [ ] **R.56 `Redactor::finish`'s doc states the invariant the fixed window
-      deliberately dropped.**
-      `src/redact.rs:94-97` says "A held-back suffix is by construction only a
-      proper prefix of the secret, so emitting it does not reveal the value."
-      Since R.36 the holdback is content-independent: for secret `abcdef`,
-      `push(b"xyz")` holds `xyz`, which is not a prefix, and `finish` returns
-      it. `consume`'s own doc (`src/redact.rs:109-117`) gives the real reason
-      ("shorter than the secret by construction"), so the file contradicts
-      itself; the "never contains a complete occurrence" contract holds only
-      because of the length bound.
-      Failure: the next change that trusts `:96` — e.g. holding only bytes that
-      are a prefix, to restore the sentence — reintroduces the
-      content-dependent holdback R.36 exists to remove, and an agent that
-      controls child output learns the secret's prefix byte-by-byte from the
-      relay timing; alternatively a reviewer auditing "only a proper prefix can
-      leave the redactor" concludes the code is broken and adds an assertion
-      that panics on real output.
-      Fix: say the held suffix is "at most `secret.len() - 1` bytes, so it
-      cannot contain a complete occurrence; its content is arbitrary".
-      Test: a `src/redact.rs` unit test `the_held_tail_is_arbitrary_bytes`:
-      `redact("abcdef", b"xyz") == b"xyz"`, mid-stream `push(b"xyz")` returns
-      nothing, and `push(b"abcdef")` returns only the marker. A prefix-only
-      holdback fails the first two.
-
-- [ ] **R.57 The grant-create race test can pass without the race happening, so
-      R.39's CLI half is untested.** `tests/grant_cli.rs:717`
-      (`grant_create_keeps_a_concurrent_vault_write_and_still_succeeds`) orders
-      its concurrent save with `std::thread::sleep(Duration::from_millis(300))`
-      (`tests/grant_cli.rs:777`) and never observes that the CLI is at the
-      lock; the comment above the sleep (`tests/grant_cli.rs:774-776`) admits
-      "If it is still earlier, it reads the new state and the race simply did
-      not happen".
-      Verified by experiment: with `src/cli/grant.rs:256` reverted to
-      `Vault::open_with_key` + `lock_for_update()` (the pre-R.39 read-then-lock
-      shape, i.e. exactly the bug the test is named for) the test passed 3/3 on
-      a scratch copy. The CLI's reads simply landed after the 300 ms save, so
-      `lock_for_update`'s byte compare saw no change. The daemon-side tests do
-      fail on that revert (`src/daemon/tests.rs:558` `Internal` vs `Ok(1)`,
-      `tests/daemon_concurrency.rs:293` `RunFrame::Error(Internal)`), so only
-      the CLI half is unproven.
-      Failure: a later refactor that reintroduces read-then-lock in
-      `command_grant_create` (or reverts R.39 for `grant create`) keeps the
-      suite green while a human's approval is spent and then refused with
-      `VaultChanged`; no test fails, and the token file is already gone.
-      Fix: order the save from the daemon side instead of by sleeping. Use the
-      stub-socket pattern already in this file
-      (`grant_create_refuses_an_unknown_reference_before_any_socket_contact`,
-      `tests/grant_cli.rs:217`, stub bound at `tests/grant_cli.rs:223`): accept,
-      read `challenge`, answer a challenge,
-      read `prove`, then run `grant_mut(seeded).mark_used(now)` +
-      `save_with_key` and `drop(writer)` in the test, and only then answer
-      `grant_approved`. The CLI's pre-approval read is provably before
-      `challenge`, and the save is provably before the CLI's post-approval
-      read, so read-then-lock fails deterministically.
-      Test: that rewritten test must fail on the reverted `src/cli/grant.rs` and
-      pass on HEAD, keeping the current assertions (exit ok, two grants, seeded
-      `uses() == 1`, token file written).
 - [ ] **R.58 R.39 is marked done with "retry loop gone", but the retry loop is
       still there.** `TODO.md:881` says `record_use` changed with "(retry loop
       gone)"; `src/daemon/run.rs:36` still declares
@@ -1456,25 +1363,6 @@ Rules that apply to every item:
       Test: a `#[cfg(test)]` attempt counter (or a seam over `save_with_key` in
       `record_use`) proving exactly one save attempt when the save fails once;
       keep `revocation_does_not_lose_to_a_concurrent_vault_write`.
-- [ ] **R.59 DECISIONS says no plaintext is held while the human reads the
-      summary, but the vault key is.** `DECISIONS.md:625-626`: "the vault is
-      dropped before the y/N so plaintext is not held while the human reads".
-      True of the decrypted credentials, false of the key that decrypts them:
-      `key` (`src/cli/grant.rs:179`) is live across `print_approval_prompt`
-      (`src/cli/grant.rs:202`) and `prompt_yes_no` (`src/cli/grant.rs:203`)
-      because `Proof::compute` (`src/cli/grant.rs:218`) and
-      `open_with_key_for_update` (`src/cli/grant.rs:256`) need it; only the
-      master password (`:180`) and the container (`:181`) are dropped.
-      Failure: a reader (or the next `SECURITY.md` edit) takes the sentence to
-      mean a memory disclosure while the prompt is on screen is harmless, when
-      a core dump at `:203` yields the 32-byte key that decrypts the whole
-      vault offline — the property `PROMPT.md`'s zeroize rule is about.
-      Fix: state what is actually held — "the decrypted vault is dropped before
-      the y/N; the derived key stays live until the grant is written and is
-      zeroized on drop".
-      Test: a `tests/docs.rs`-style assertion (that file already pins DECISIONS
-      sentences) that the grant-create bullet names the held key and does not
-      claim the window holds no plaintext-capable material.
 
 - [ ] **R.60 A `BrokenPipe` from the socket exits 0, so `run` and `grant
       revoke` can report success for a request that was never sent.**
@@ -1530,54 +1418,6 @@ Rules that apply to every item:
       Test: `MAX_GRANTS * measured_growth <= MAX_PLAINTEXT_GROWTH_BYTES` with
       `measured_growth` taken from the codec, using a grant with every optional
       field set so a future field cannot be forgotten.
-
-- [ ] **R.62 The R.45 clock test gives the whole startup three seconds, so a
-      slow machine fails the test instead of testing the daemon.**
-      `tests/daemon_run.rs:672-712`: `Fixture::with_grant_expiring_in(3)`
-      (`:677`) stamps `expires_at = now + 3` inside `Fixture::build`
-      (`tests/support/mod.rs:105`), and those same three seconds must also
-      cover `fixture.start()` (spawn `pmd`, ping until `pong`), the `run`
-      request, the daemon's `open_with_key_for_update` and
-      `wait_until_the_lock_is_open`. `:712` then asserts
-      `observed < fixture.grant_expires_at`, "the daemon read the clock after
-      the grant expired; the test proves nothing" — a loaded machine turns a
-      slow start into a hard failure of the test that guards R.45, and the
-      obvious repair (raise the number) re-arms the same race.
-      Failure: `cargo test` on a busy box (16 test threads, each building an
-      8 MiB-KDF fixture) takes over 3 s between `build()` and the lock chmod;
-      the suite goes red with a message that blames the daemon.
-      Fix: stop racing startup. Build the grant with a long expiry, and once
-      `wait_until_the_lock_is_open` has observed the daemon blocked *before* it
-      reads the vault, rewrite that grant's `expires_at` to `observed + 1`, then
-      sleep to `observed + 2`, release the lock and expect `Denied`. The rewrite
-      must keep the container header (salt/KDF) so the daemon's live key still
-      opens it, as `rewrite_vault` already does (`tests/daemon_run.rs:290-299`);
-      that needs the fixture to keep its credential and grant (or a
-      `Fixture::set_grant_expiry` helper).
-      Test: the same test, with the expiry derived from the clock the test
-      observed and no dependency on how fast `pmd` starts.
-
-- [ ] **R.63 The "every documented grant example" guard counts prose as an
-      example, so it survives deleting the examples it protects.**
-      `tests/docs.rs:607-638` counts *every* line containing the substring
-      "grant create", including prose: `README.md:182` ("…so `grant create`
-      refuses it otherwise.") and `README.md:257` ("…`grant create` prompts…").
-      `tests/docs.rs:643-660` then requires only `README.md >= 2` and
-      `--help >= 1` such lines. The parser also matches `--command` tokens
-      literally, so a quoted path (`--command '/usr/bin/git'`) reaches
-      `is_program_runner` with the quotes attached and is not recognised as a
-      runner.
-      Failure: someone rewrites the quickstart without `/usr/bin/gh` (or drops
-      both real examples); the prose lines keep the count at 2 and
-      `every_documented_grant_example_flags_a_program_runner` still passes while
-      the invariant it exists for (R.43: a copied example must not exit 5) is
-      unenforced. A quoted example is skipped for the same reason.
-      Fix: recognise command-shaped lines only (a line whose first tokens are
-      `passmgr`/`pm` `grant` `create`, not a backticked mention), and strip one
-      layer of matching quotes before `is_program_runner`.
-      Test: unit-test `check_grant_examples` directly — prose only must return
-      0; a quoted runner example without `--allow-interpreter` must fail
-      (`#[should_panic]`); the real README/`--help` must still be accepted.
 
 ## Phase 3 — grants and audit log
 
@@ -1919,6 +1759,183 @@ keeps the dependency tree small and stdout hygiene under our control.
 - [ ] **8.10 Vault permission refusal** (was 5.1). A group- or
       world-readable vault is **refused**, not warned about, with a fix hint
       (`chmod 600`). Tests: refusal on 0640/0604, ok on 0600.
+
+## Phase L — low-severity review findings
+
+Review findings judged low severity (see `REVIEW.md`): memory-residue
+defense against a same-user attacker, test hygiene and flakiness, comment
+and doc wording, and file layout. They wait until the feature phases above
+are done. Work them in order like any other item.
+
+- [ ] **R.67 The reader-thread stack wipe is not covered by any test, so it
+      can be deleted silently.** `src/runner.rs:528` holds the raw child output
+      (which contains the injected value) in a stack array and
+      `src/runner.rs:542` wipes it; the allocator scan in
+      `tests/secret_copies.rs::a_run_leaves_no_more_copies_than_the_spawn_itself`
+      (`tests/secret_copies.rs:254`) only sees heap blocks, so removing the
+      wipe keeps the whole suite green. The test also compares against a
+      baseline with `hits <= baseline` (measured: both 3), so it has no margin
+      to catch a newly lost wipe of its own canary.
+      Fix: own the read buffer on the heap (`Box<[u8; READ_CHUNK]>` or
+      `Zeroizing<Vec<u8>>`) so `push`/`drain` and the wipe are observable, and
+      replace `<= baseline` with a differential assertion on the raw-output
+      canary: the measured release count must be lower when the wipe is
+      present than when it is removed (pin the count if it is deterministic).
+      Test: delete the wipe locally and confirm the new assertion fails; keep
+      the current baseline comparison only as a sanity check.
+
+- [ ] **R.53 `a_run_in_flight_is_not_killed_by_the_idle_timeout` has a 0.5 s
+      timing margin.**
+      `tests/daemon_shutdown.rs:142-149` (added in R.7) starts `pmd` with
+      `--idle-timeout 3`, sleeps a fixed 2.5 s, then must connect before the
+      next idle poll. A 0.5 s stall makes the connect fail, which says
+      nothing about the property. Not reproduced under CPU contention, but
+      this machine has already rolled back an iteration for a timing flake.
+      Fix: start the run first, then assert the daemon outlives
+      `idle + margin` while it is in flight; or use a larger timeout and
+      margin. No fixed sleeps for synchronization.
+      Test: the rewritten test passes with the suite pinned to 2 busy cores.
+
+- [ ] **R.54 Seven files sit just under the 1,000-line guard, and three test
+      fixtures duplicate vault+grant setup.**
+      `src/socket.rs` 987, `src/grant.rs` 985, `src/cli/grant.rs` 972,
+      `tests/cli.rs` 972, `src/runner.rs` 918, `src/protocol/response.rs`
+      912, `src/client.rs` 905. TODO 4.9 lands in `src/cli/grant.rs` and will
+      have to split it mid-item, as R.26 did. `tests/support/mod.rs`
+      `Fixture`, `tests/run.rs` `Daemon` and `tests/grant_support/mod.rs`
+      `Fixture` each build their own vault, grant and grant file with their
+      own constants.
+      Fix: split the files by concern before the next feature touches them
+      (start with `src/cli/grant.rs` and `src/grant.rs`); one shared
+      vault+grant builder used by all three fixtures.
+      Test: `tests/layout.rs` stays green with every file under ~800 lines;
+      test counts unchanged.
+
+- [ ] **R.56 `Redactor::finish`'s doc states the invariant the fixed window
+      deliberately dropped.**
+      `src/redact.rs:94-97` says "A held-back suffix is by construction only a
+      proper prefix of the secret, so emitting it does not reveal the value."
+      Since R.36 the holdback is content-independent: for secret `abcdef`,
+      `push(b"xyz")` holds `xyz`, which is not a prefix, and `finish` returns
+      it. `consume`'s own doc (`src/redact.rs:109-117`) gives the real reason
+      ("shorter than the secret by construction"), so the file contradicts
+      itself; the "never contains a complete occurrence" contract holds only
+      because of the length bound.
+      Failure: the next change that trusts `:96` — e.g. holding only bytes that
+      are a prefix, to restore the sentence — reintroduces the
+      content-dependent holdback R.36 exists to remove, and an agent that
+      controls child output learns the secret's prefix byte-by-byte from the
+      relay timing; alternatively a reviewer auditing "only a proper prefix can
+      leave the redactor" concludes the code is broken and adds an assertion
+      that panics on real output.
+      Fix: say the held suffix is "at most `secret.len() - 1` bytes, so it
+      cannot contain a complete occurrence; its content is arbitrary".
+      Test: a `src/redact.rs` unit test `the_held_tail_is_arbitrary_bytes`:
+      `redact("abcdef", b"xyz") == b"xyz"`, mid-stream `push(b"xyz")` returns
+      nothing, and `push(b"abcdef")` returns only the marker. A prefix-only
+      holdback fails the first two.
+
+- [ ] **R.57 The grant-create race test can pass without the race happening, so
+      R.39's CLI half is untested.** `tests/grant_cli.rs:717`
+      (`grant_create_keeps_a_concurrent_vault_write_and_still_succeeds`) orders
+      its concurrent save with `std::thread::sleep(Duration::from_millis(300))`
+      (`tests/grant_cli.rs:777`) and never observes that the CLI is at the
+      lock; the comment above the sleep (`tests/grant_cli.rs:774-776`) admits
+      "If it is still earlier, it reads the new state and the race simply did
+      not happen".
+      Verified by experiment: with `src/cli/grant.rs:256` reverted to
+      `Vault::open_with_key` + `lock_for_update()` (the pre-R.39 read-then-lock
+      shape, i.e. exactly the bug the test is named for) the test passed 3/3 on
+      a scratch copy. The CLI's reads simply landed after the 300 ms save, so
+      `lock_for_update`'s byte compare saw no change. The daemon-side tests do
+      fail on that revert (`src/daemon/tests.rs:558` `Internal` vs `Ok(1)`,
+      `tests/daemon_concurrency.rs:293` `RunFrame::Error(Internal)`), so only
+      the CLI half is unproven.
+      Failure: a later refactor that reintroduces read-then-lock in
+      `command_grant_create` (or reverts R.39 for `grant create`) keeps the
+      suite green while a human's approval is spent and then refused with
+      `VaultChanged`; no test fails, and the token file is already gone.
+      Fix: order the save from the daemon side instead of by sleeping. Use the
+      stub-socket pattern already in this file
+      (`grant_create_refuses_an_unknown_reference_before_any_socket_contact`,
+      `tests/grant_cli.rs:217`, stub bound at `tests/grant_cli.rs:223`): accept,
+      read `challenge`, answer a challenge,
+      read `prove`, then run `grant_mut(seeded).mark_used(now)` +
+      `save_with_key` and `drop(writer)` in the test, and only then answer
+      `grant_approved`. The CLI's pre-approval read is provably before
+      `challenge`, and the save is provably before the CLI's post-approval
+      read, so read-then-lock fails deterministically.
+      Test: that rewritten test must fail on the reverted `src/cli/grant.rs` and
+      pass on HEAD, keeping the current assertions (exit ok, two grants, seeded
+      `uses() == 1`, token file written).
+
+- [ ] **R.59 DECISIONS says no plaintext is held while the human reads the
+      summary, but the vault key is.** `DECISIONS.md:625-626`: "the vault is
+      dropped before the y/N so plaintext is not held while the human reads".
+      True of the decrypted credentials, false of the key that decrypts them:
+      `key` (`src/cli/grant.rs:179`) is live across `print_approval_prompt`
+      (`src/cli/grant.rs:202`) and `prompt_yes_no` (`src/cli/grant.rs:203`)
+      because `Proof::compute` (`src/cli/grant.rs:218`) and
+      `open_with_key_for_update` (`src/cli/grant.rs:256`) need it; only the
+      master password (`:180`) and the container (`:181`) are dropped.
+      Failure: a reader (or the next `SECURITY.md` edit) takes the sentence to
+      mean a memory disclosure while the prompt is on screen is harmless, when
+      a core dump at `:203` yields the 32-byte key that decrypts the whole
+      vault offline — the property `PROMPT.md`'s zeroize rule is about.
+      Fix: state what is actually held — "the decrypted vault is dropped before
+      the y/N; the derived key stays live until the grant is written and is
+      zeroized on drop".
+      Test: a `tests/docs.rs`-style assertion (that file already pins DECISIONS
+      sentences) that the grant-create bullet names the held key and does not
+      claim the window holds no plaintext-capable material.
+
+- [ ] **R.62 The R.45 clock test gives the whole startup three seconds, so a
+      slow machine fails the test instead of testing the daemon.**
+      `tests/daemon_run.rs:672-712`: `Fixture::with_grant_expiring_in(3)`
+      (`:677`) stamps `expires_at = now + 3` inside `Fixture::build`
+      (`tests/support/mod.rs:105`), and those same three seconds must also
+      cover `fixture.start()` (spawn `pmd`, ping until `pong`), the `run`
+      request, the daemon's `open_with_key_for_update` and
+      `wait_until_the_lock_is_open`. `:712` then asserts
+      `observed < fixture.grant_expires_at`, "the daemon read the clock after
+      the grant expired; the test proves nothing" — a loaded machine turns a
+      slow start into a hard failure of the test that guards R.45, and the
+      obvious repair (raise the number) re-arms the same race.
+      Failure: `cargo test` on a busy box (16 test threads, each building an
+      8 MiB-KDF fixture) takes over 3 s between `build()` and the lock chmod;
+      the suite goes red with a message that blames the daemon.
+      Fix: stop racing startup. Build the grant with a long expiry, and once
+      `wait_until_the_lock_is_open` has observed the daemon blocked *before* it
+      reads the vault, rewrite that grant's `expires_at` to `observed + 1`, then
+      sleep to `observed + 2`, release the lock and expect `Denied`. The rewrite
+      must keep the container header (salt/KDF) so the daemon's live key still
+      opens it, as `rewrite_vault` already does (`tests/daemon_run.rs:290-299`);
+      that needs the fixture to keep its credential and grant (or a
+      `Fixture::set_grant_expiry` helper).
+      Test: the same test, with the expiry derived from the clock the test
+      observed and no dependency on how fast `pmd` starts.
+
+- [ ] **R.63 The "every documented grant example" guard counts prose as an
+      example, so it survives deleting the examples it protects.**
+      `tests/docs.rs:607-638` counts *every* line containing the substring
+      "grant create", including prose: `README.md:182` ("…so `grant create`
+      refuses it otherwise.") and `README.md:257` ("…`grant create` prompts…").
+      `tests/docs.rs:643-660` then requires only `README.md >= 2` and
+      `--help >= 1` such lines. The parser also matches `--command` tokens
+      literally, so a quoted path (`--command '/usr/bin/git'`) reaches
+      `is_program_runner` with the quotes attached and is not recognised as a
+      runner.
+      Failure: someone rewrites the quickstart without `/usr/bin/gh` (or drops
+      both real examples); the prose lines keep the count at 2 and
+      `every_documented_grant_example_flags_a_program_runner` still passes while
+      the invariant it exists for (R.43: a copied example must not exit 5) is
+      unenforced. A quoted example is skipped for the same reason.
+      Fix: recognise command-shaped lines only (a line whose first tokens are
+      `passmgr`/`pm` `grant` `create`, not a backticked mention), and strip one
+      layer of matching quotes before `is_program_runner`.
+      Test: unit-test `check_grant_examples` directly — prose only must return
+      0; a quoted runner example without `--allow-interpreter` must fail
+      (`#[should_panic]`); the real README/`--help` must still be accepted.
 
 ## Phase 9 — hardening
 

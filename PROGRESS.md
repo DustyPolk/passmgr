@@ -1,3 +1,18 @@
+## 2026-11-03 — Reprioritize: features before low-severity review findings (human)
+
+- 62 of ~90 work iterations had gone to review findings while Phase 4 (the MCP
+  server, the reason passmgr exists) had none started. Reviews now tag each
+  finding High/Medium/Low (`REVIEW.md` "Severity"); only High and Medium go to
+  the top Phase R. Low findings go to `## Phase L`, just above Phase 9.
+- Moved the open Low items there: R.53, R.54, R.56, R.57, R.59, R.62, R.63,
+  R.67 (memory-residue coverage, timing-flaky tests, comment/doc wording, file
+  layout). Kept at the top: R.52 (tests fail under Claude Code), R.55, R.58,
+  R.60, R.61.
+- `loop.sh` reviews every 12 productive iterations instead of 6.
+- **Next iteration must know:** order is Phase R, then Phase 3, then Phase 4.
+  Do not pull Phase L items forward. When a feature item would push a file
+  past the line limit, split that file as part of the item (R.54 stays in L).
+
 ## 2026-11-03 — Wipe the read chunk before a rejected push returns (TODO R.66)
 
 - `src/daemon/run.rs`: `read_request` is now a wrapper over
