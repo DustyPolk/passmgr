@@ -487,6 +487,42 @@ fn unlock_refuses_when_a_daemon_is_already_running() {
     );
 }
 
+/// Two unlocks can both pass the "already running" probe. The one whose `pmd`
+/// loses the instance lock must leave the winner's session file alone, or
+/// every later client loses the live session.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_unlock_that_loses_the_instance_lock_keeps_the_winners_session() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::DirBuilderExt;
+
+    let fixture = Fixture::new();
+    let paths = fixture.daemon_paths();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(paths.dir())
+        .expect("runtime dir");
+    let winner = SessionToken::generate().expect("token");
+    passmgr::session::store(&paths, &winner).expect("store the winner's token");
+    // Stand in for the winner's `pmd`: hold the instance lock with no socket,
+    // so the probe sees no daemon and the spawned one cannot start.
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(paths.dir().join(passmgr::socket::LOCK_FILE))
+        .expect("open the instance lock");
+    // SAFETY: a valid descriptor owned by `lock` for the whole test.
+    let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(locked, 0, "flock: {}", std::io::Error::last_os_error());
+
+    let output = fixture.unlock_on_pty();
+    assert!(!output.status.success(), "the losing unlock must fail");
+    let kept = passmgr::session::load(&paths).expect("the winner's session file survives");
+    assert!(kept.matches(&winner), "the session file was replaced");
+    drop(lock);
+}
+
 /// A wrong master password fails in the short-lived client: no daemon, no socket.
 #[cfg(target_os = "linux")]
 #[test]

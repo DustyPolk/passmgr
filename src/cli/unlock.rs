@@ -48,30 +48,21 @@ pub(crate) fn command_unlock(
     drop(master);
     drop(container);
 
-    // A stale file from a previous session would make clients send a token
-    // this daemon does not know; clear it before creating the new one.
-    if let Err(error) = passmgr::session::remove(&runtime) {
-        return Err(Error::Daemon(format!(
-            "could not clear the previous session token: {error}"
-        )));
-    }
     let token = SessionToken::generate()
         .map_err(|error| Error::Daemon(format!("could not create a session token: {error}")))?;
-    passmgr::session::store(&runtime, &token).map_err(|error| {
-        Error::Daemon(format!("could not write the session token file: {error}"))
-    })?;
-
     let spawned = passmgr::client::spawn_daemon(path, &runtime, &key, &token, idle_timeout);
     drop(key);
-    let pid = match spawned {
-        Ok(pid) => pid,
-        Err(error) => {
-            // No daemon means the token authorizes nothing; do not leave it
-            // behind for the next unlock to mistake for a live session.
-            let _ = passmgr::session::remove(&runtime);
-            return Err(error);
-        }
-    };
+    let pid = spawned?;
+    // Written only once our `pmd` holds the instance lock: a concurrent unlock
+    // whose daemon lost that race must not replace or delete the winner's
+    // file. The rename replaces any stale file from an earlier session.
+    if let Err(error) = passmgr::session::store(&runtime, &token) {
+        // Nobody could reach a daemon whose token is nowhere on disk.
+        let _ = passmgr::client::lock_with(&runtime, &token);
+        return Err(Error::Daemon(format!(
+            "could not write the session token file: {error}"
+        )));
+    }
     stdout_write(format_args!(
         "Vault unlocked. The unlock daemon is running (pid {pid}).\n\
          It stops after {idle_timeout:?} without activity.\n\

@@ -313,12 +313,18 @@ pub fn lock(paths: &RuntimePaths) -> Result<()> {
             )));
         }
     };
-    match request(paths, &token, &Request::Lock)? {
+    lock_with(paths, &token)
+}
+
+/// [`lock`] with a token the caller already holds.
+pub fn lock_with(paths: &RuntimePaths, token: &SessionToken) -> Result<()> {
+    match request(paths, token, &Request::Lock)? {
         Response::Locked => {
             // The daemon removes the file too, but only if it still matches;
             // this makes `lock` leave no stale token even if the daemon died
-            // between answering and cleaning up.
-            let _ = session::remove(paths);
+            // between answering and cleaning up, and never removes a newer
+            // session's file.
+            session::remove_if_matches(paths, token);
             Ok(())
         }
         Response::Error(error) => Err(Error::Daemon(format!(
