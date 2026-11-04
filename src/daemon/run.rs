@@ -26,16 +26,6 @@ use super::{LockedKey, unix_now};
 /// [`protocol::MAX_MESSAGE_BYTES`].
 const READ_CHUNK: usize = 4096;
 
-/// How many times a `run` retries recording its use when the vault write
-/// fails.
-///
-/// One attempt is the normal path now that the vault is opened under the write
-/// lock (TODO R.39), so a failed save is a real I/O or crypto failure and only
-/// a retry that re-reads the vault could help. It is bounded so a broken vault
-/// fails closed instead of spinning, and never runs a use the vault does not
-/// know about.
-const USE_RECORD_ATTEMPTS: usize = 3;
-
 /// Why a use could not be recorded. Every variant fails closed.
 enum RecordError {
     /// The grant is unknown, expired, revoked or used up, its command is not
@@ -290,9 +280,14 @@ fn client_closed(fd: RawFd) -> bool {
 /// save, so a failed write does not claim a use the vault never recorded.
 ///
 /// The clock is read **after** the write lock is acquired, never before: the
-/// wait can last up to the lock timeout (and is repeated on a failed save), so
-/// a time read earlier would authorize a grant that has since expired (TODO
-/// R.45).
+/// wait can last up to the lock timeout, so a time read earlier would
+/// authorize a grant that has since expired (TODO R.45).
+///
+/// The save is attempted exactly once. Since the vault is read under the write
+/// lock a failed save cannot be a lost update that a retry would merge, and a
+/// save that failed *after* its rename landed already holds the increment, so
+/// a retry would burn a second use of a `max_uses` grant (TODO R.58). Failing
+/// closed with `Internal` is the safe answer.
 fn record_use(
     vault_path: &Path,
     key: &LockedKey,
@@ -301,74 +296,86 @@ fn record_use(
     id: EntryId,
     program: &Path,
 ) -> Result<Zeroizing<String>, RecordError> {
-    let token_hash = request.grant.hash();
-    for _ in 0..USE_RECORD_ATTEMPTS {
-        let mut vault = Vault::open_with_key_for_update(vault_path, key.as_slice())
-            .map_err(|_| RecordError::Internal)?;
-        // Authorize with the time the vault was actually read, not with a
-        // time from before the lock wait.
-        let Some(now) = unix_now() else {
-            return Err(RecordError::Internal);
-        };
-        if watermarks.check(vault.grants()).is_err() {
-            // Fail closed without consuming anything: the file on disk has
-            // regressed, so the daemon cannot trust its grant state.
-            return Err(RecordError::Denied);
-        }
-        let Some(grant) = vault
-            .grants()
-            .iter()
-            .find(|grant| grant.matches_token(&token_hash))
-        else {
-            return Err(RecordError::Denied);
-        };
-        // Decide everything that does not need the credential first. If the
-        // lookup came first, a revoked, expired or exhausted grant would
-        // answer differently for an existing and a nonexistent reference,
-        // which is an existence oracle for a token that can never be used
-        // (R.31).
-        if grant.check_grant_for_run(program, now).is_err() {
-            return Err(RecordError::Denied);
-        }
-        let Some(credential) = vault.get_by_ref(id) else {
-            return Err(RecordError::NotFound);
-        };
-        let tags = credential.tags().to_vec();
-        let target = Target::new(credential.id(), &tags);
-        match grant.authorizes(&AccessRequest::run(target, None, program), now) {
-            Ok(()) => {}
-            // An existing reference outside the scope answers exactly like a
-            // nonexistent one, or the daemon becomes an existence oracle for
-            // every in-vault reference (DECISIONS.md).
-            Err(Denied::OutOfScope) => return Err(RecordError::NotFound),
-            Err(_) => return Err(RecordError::Denied),
-        }
-        let grant_id: GrantId = grant.id();
+    record_use_with_save(vault_path, key, watermarks, request, id, program, |vault| {
+        vault.save_with_key(key.as_slice())
+    })
+}
 
-        let marked = vault
-            .grant_mut(grant_id)
-            .ok_or(RecordError::Internal)?
-            .mark_used(now);
-        match marked {
-            Ok(()) => {}
-            Err(UpdateError::Denied(_)) => return Err(RecordError::Denied),
-            Err(UpdateError::TimestampOutOfRange) => return Err(RecordError::Internal),
-        }
-        if vault.save_with_key(key.as_slice()).is_err() {
-            // The write failed, so the use was not recorded. Never run on a
-            // use that the vault does not know about; re-read and re-authorize
-            // from scratch instead of merging.
-            continue;
-        }
-        watermarks.record(vault.grants());
-        // Copy only the one value, then drop the decrypted vault (which
-        // zeroizes the rest) before the child can run.
-        let Some(credential) = vault.get_by_ref(id) else {
-            return Err(RecordError::Internal);
-        };
-        return Ok(Zeroizing::new(credential.password().to_owned()));
+/// [`record_use`] with the vault write supplied by the caller, so a test can
+/// count attempts and prove that a failed save is never retried (TODO R.58).
+fn record_use_with_save<F>(
+    vault_path: &Path,
+    key: &LockedKey,
+    watermarks: &GrantWatermarks,
+    request: &protocol::RunRequest,
+    id: EntryId,
+    program: &Path,
+    mut save: F,
+) -> Result<Zeroizing<String>, RecordError>
+where
+    F: FnMut(&Vault) -> crate::Result<()>,
+{
+    let token_hash = request.grant.hash();
+    let mut vault = Vault::open_with_key_for_update(vault_path, key.as_slice())
+        .map_err(|_| RecordError::Internal)?;
+    // Authorize with the time the vault was actually read, not with a time
+    // from before the lock wait.
+    let Some(now) = unix_now() else {
+        return Err(RecordError::Internal);
+    };
+    if watermarks.check(vault.grants()).is_err() {
+        // Fail closed without consuming anything: the file on disk has
+        // regressed, so the daemon cannot trust its grant state.
+        return Err(RecordError::Denied);
     }
-    Err(RecordError::Internal)
+    let Some(grant) = vault
+        .grants()
+        .iter()
+        .find(|grant| grant.matches_token(&token_hash))
+    else {
+        return Err(RecordError::Denied);
+    };
+    // Decide everything that does not need the credential first. If the
+    // lookup came first, a revoked, expired or exhausted grant would answer
+    // differently for an existing and a nonexistent reference, which is an
+    // existence oracle for a token that can never be used (R.31).
+    if grant.check_grant_for_run(program, now).is_err() {
+        return Err(RecordError::Denied);
+    }
+    let Some(credential) = vault.get_by_ref(id) else {
+        return Err(RecordError::NotFound);
+    };
+    let tags = credential.tags().to_vec();
+    let target = Target::new(credential.id(), &tags);
+    match grant.authorizes(&AccessRequest::run(target, None, program), now) {
+        Ok(()) => {}
+        // An existing reference outside the scope answers exactly like a
+        // nonexistent one, or the daemon becomes an existence oracle for
+        // every in-vault reference (DECISIONS.md).
+        Err(Denied::OutOfScope) => return Err(RecordError::NotFound),
+        Err(_) => return Err(RecordError::Denied),
+    }
+    let grant_id: GrantId = grant.id();
+
+    let marked = vault
+        .grant_mut(grant_id)
+        .ok_or(RecordError::Internal)?
+        .mark_used(now);
+    match marked {
+        Ok(()) => {}
+        Err(UpdateError::Denied(_)) => return Err(RecordError::Denied),
+        Err(UpdateError::TimestampOutOfRange) => return Err(RecordError::Internal),
+    }
+    if save(&vault).is_err() {
+        return Err(RecordError::Internal);
+    }
+    watermarks.record(vault.grants());
+    // Copy only the one value, then drop the decrypted vault (which zeroizes
+    // the rest) before the child can run.
+    let Some(credential) = vault.get_by_ref(id) else {
+        return Err(RecordError::Internal);
+    };
+    Ok(Zeroizing::new(credential.password().to_owned()))
 }
 
 /// Read one framed request from a stream, without unbounded allocation.
@@ -442,8 +449,12 @@ mod tests {
     use std::net::Shutdown;
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixStream;
+    use std::path::Path;
 
-    use super::{READ_CHUNK, client_closed, push_chunk, read_request_with_chunk};
+    use super::{
+        GrantWatermarks, LockedKey, READ_CHUNK, RecordError, Vault, client_closed, push_chunk,
+        read_request_with_chunk, record_use_with_save, unix_now,
+    };
     use crate::protocol::{self, FrameDecoder, ProtocolError};
 
     #[test]
@@ -527,5 +538,98 @@ mod tests {
         let mut buf = [0u8; 4];
         assert_eq!(daemon.read(&mut buf).expect("read"), 4);
         assert_eq!(&buf, b"left");
+    }
+
+    #[test]
+    fn a_failed_use_save_is_attempted_exactly_once() {
+        // A save that fails *after* its rename landed leaves the increment on
+        // disk. Retrying re-reads that vault and marks a second use, so a
+        // `max_uses` grant would deny earlier than the human approved and the
+        // audit chain would show two uses from one run (TODO R.58).
+        use std::cell::Cell;
+
+        use crate::crypto::{KdfParams, encrypt, unlock_key};
+        use crate::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope, TokenHash};
+        use crate::store::Credential;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("vault.dat");
+        let master = "test master password";
+        let now = unix_now().expect("clock");
+        let credential = Credential::new(
+            "svc".to_owned(),
+            "user".to_owned(),
+            zeroize::Zeroizing::new("canary-value".to_owned()),
+        )
+        .expect("credential");
+        let id = credential.id();
+        let token = GrantToken::generate().expect("token");
+        let grant = Grant::create(
+            GrantSpec {
+                label: "once".to_owned(),
+                scope: Scope::new(vec![id], Vec::new(), None).expect("scope"),
+                commands: vec![Path::new("/usr/bin/true").to_path_buf()],
+                capabilities: Capabilities::RUN,
+                expires_at: now + 3_600,
+                max_uses: Some(2),
+            },
+            TokenHash::of(token.as_bytes()),
+            now,
+        )
+        .expect("grant");
+        let grant_id = grant.id();
+        let plaintext = crate::store::encode(
+            std::slice::from_ref(&credential),
+            std::slice::from_ref(&grant),
+        )
+        .expect("encode payload");
+        // Cheap KDF parameters: this test is about the write attempt, not the
+        // KDF.
+        let container =
+            encrypt(&plaintext, master, KdfParams::new(8 * 1024, 1, 1)).expect("encrypt vault");
+        std::fs::write(&path, &container).expect("write vault");
+        let key =
+            LockedKey::new(unlock_key(&container, master).expect("derive key")).expect("lock key");
+
+        let request = protocol::RunRequest {
+            env: "TOKEN".to_owned(),
+            reference: id.to_ref(),
+            command: vec!["/usr/bin/true".to_owned()],
+            cwd: "/".to_owned(),
+            grant: token,
+        };
+
+        let attempts = Cell::new(0u32);
+        let watermarks = GrantWatermarks::new();
+        let outcome = record_use_with_save(
+            &path,
+            &key,
+            &watermarks,
+            &request,
+            id,
+            Path::new("/usr/bin/true"),
+            |_vault| {
+                attempts.set(attempts.get() + 1);
+                Err(crate::Error::Io(std::io::Error::other(
+                    "injected save failure",
+                )))
+            },
+        );
+
+        assert!(
+            matches!(outcome, Err(RecordError::Internal)),
+            "a failed use save must fail closed"
+        );
+        assert_eq!(
+            attempts.get(),
+            1,
+            "a failed use save must be attempted exactly once, not retried"
+        );
+        let vault = Vault::open_with_key(&path, key.as_slice()).expect("reopen");
+        assert_eq!(
+            vault.grant(grant_id).expect("grant").uses(),
+            0,
+            "a failed save must not claim a use the vault never recorded"
+        );
     }
 }

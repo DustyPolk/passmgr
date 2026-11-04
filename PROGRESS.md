@@ -1,3 +1,28 @@
+## 2026-11-04 — Attempt a run's use save exactly once (TODO R.58)
+
+- `src/daemon/run.rs`: deleted `USE_RECORD_ATTEMPTS` and the retry loop.
+  `record_use` now delegates to a private
+  `record_use_with_save(..., save: impl FnMut(&Vault) -> crate::Result<()>)`
+  and answers `RecordError::Internal` after a single failed `save_with_key`;
+  the child never runs.
+- Chose delete over document: since R.39 every attempt reads under the write
+  lock, so a retry cannot merge a lost update, and a save that failed *after*
+  its rename landed already holds the increment — a retry charges a second
+  use of a `max_uses` grant. `DECISIONS.md` records the one-attempt rule and
+  drops "re-reads it on every retry"; R.39's "(retry loop gone)" is now true.
+- Test: `src/daemon/run.rs::tests::a_failed_use_save_is_attempted_exactly_once`
+  injects a failing save through the seam and asserts one attempt,
+  `Internal`, and `uses() == 0` after reopening the vault. Mutation-checked:
+  with a 3-attempt loop patched in it fails (attempts 3 vs 1).
+- Gate: fmt, clippy, full `cargo test` green (first full run hit a
+  non-reproducing `tests/cli_support/mod.rs:58` stdin BrokenPipe in
+  `tags_are_stored_filtered_and_metadata_only`; that test passed alone and
+  the second full run was green). `cargo audit` skipped.
+- **Next iteration must know:** next unchecked item is R.60 (a socket
+  `BrokenPipe` mapped to exit 0 in `src/cli/mod.rs:47`).
+  `record_use_with_save` is production code with a test seam; keep `save` as
+  `FnMut` so a future test can count attempts.
+
 ## 2026-11-04 — Widen and pin the terminal-safety claim now that R.48 landed (TODO R.55)
 
 - R.55's premise was stale: R.48 landed first. `store::validate_service`/

@@ -1359,7 +1359,7 @@ Rules that apply to every item:
       old wording and on deleting the backstop sentence. Per-site behavior is
       still `tests/cli_args_escape.rs`.
 
-- [ ] **R.58 R.39 is marked done with "retry loop gone", but the retry loop is
+- [x] **R.58 R.39 is marked done with "retry loop gone", but the retry loop is
       still there.** `TODO.md:881` says `record_use` changed with "(retry loop
       gone)"; `src/daemon/run.rs:36` still declares
       `const USE_RECORD_ATTEMPTS: usize = 3;` and `src/daemon/run.rs:193` still
@@ -1381,6 +1381,14 @@ Rules that apply to every item:
       Test: a `#[cfg(test)]` attempt counter (or a seam over `save_with_key` in
       `record_use`) proving exactly one save attempt when the save fails once;
       keep `revocation_does_not_lose_to_a_concurrent_vault_write`.
+      Done: took the delete branch. `USE_RECORD_ATTEMPTS` and the loop are
+      gone; `record_use` delegates to a private
+      `record_use_with_save(..., save: impl FnMut(&Vault) -> Result<()>)` and
+      answers `internal` after one failed write. `src/daemon/run.rs` tests
+      `a_failed_use_save_is_attempted_exactly_once` injects a failing save,
+      asserts one attempt, `RecordError::Internal` and `uses() == 0` on the
+      reopened vault; it fails with 3 attempts when the loop is put back.
+      R.39's "(retry loop gone)" and DECISIONS are now accurate.
 
 - [ ] **R.60 A `BrokenPipe` from the socket exits 0, so `run` and `grant
       revoke` can report success for a request that was never sent.**

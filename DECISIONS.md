@@ -378,10 +378,14 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   or the child is spawned; a spawn failure therefore still consumes a use.
   This favors never exceeding `max_uses` over not charging a failed exec.
 - `run` authorization reads the clock **after** the vault write lock is
-  acquired, and re-reads it on every retry (TODO R.45). The wait can last up
-  to the 30 s lock timeout per attempt, so a time read before it would
-  authorize a grant that expired while waiting. Expiry is always decided
-  against the vault the use is recorded in.
+  acquired (TODO R.45). The wait can last up to the 30 s lock timeout, so a
+  time read before it would authorize a grant that expired while waiting.
+  Expiry is always decided against the vault the use is recorded in.
+- Recording a use attempts the vault write exactly once (TODO R.58). Because
+  the vault is read under the write lock, a failed save is not a lost update
+  that a retry could merge; and a save that failed after its rename landed
+  already holds the increment, so a retry would charge a second use of a
+  `max_uses` grant. A failed save answers `internal` and no child runs.
 - Grant progress is monotonic while one `pmd` serves (TODO R.44). The vault
   is an ordinary file and a same-user process can put an older copy back;
   that copy still opens with the daemon's key. `pmd` keeps an in-memory,
