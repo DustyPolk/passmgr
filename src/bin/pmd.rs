@@ -2,9 +2,9 @@
 //!
 //! Started by `passmgr unlock` (TODO 2.4b). It reads the 32-byte vault key and
 //! the 32-byte session token from stdin, verifies the key against the vault,
-//! then serves `ping`/`lock` on a Unix socket until a signal arrives. Requests
-//! must carry the session token. It never prints key material and never
-//! returns a secret value.
+//! then serves the daemon protocol (`passmgr::protocol`) on a Unix socket until
+//! `lock`, a signal or the idle timeout. Requests must carry the session
+//! token. It never prints key material and never returns a secret value.
 
 #[cfg(not(unix))]
 fn main() {
@@ -51,7 +51,7 @@ fn run() -> Result<(), passmgr::daemon::DaemonError> {
                     "pmd: the passmgr unlock daemon\n\n\
                      Usage: pmd --vault PATH [--runtime-dir DIR] [--idle-timeout SECS]\n\n\
                      Reads a 32-byte vault key and a 32-byte session token from stdin,\n\
-                     verifies the key, then serves ping/lock requests on DIR/pmd.sock.\n\
+                     verifies the key, then serves daemon requests on DIR/pmd.sock.\n\
                      Every request must carry the session token. Started by\n\
                      `passmgr unlock`; stop it with `passmgr lock` or SIGTERM.\n\n\
                      --idle-timeout SECS  Stop and wipe the key after SECS without a\n\

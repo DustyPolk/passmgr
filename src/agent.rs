@@ -27,19 +27,9 @@ pub const AGENT_MARKERS: [&str; 4] = [
     "CODEX_SANDBOX",
 ];
 
-/// Returns the name of the first agent marker present in the environment.
-pub fn agent_marker() -> Option<&'static str> {
-    marker_from(|name| env::var_os(name).is_some())
-}
-
-/// Testable core of [`agent_marker`]: `is_set` decides whether a marker exists.
+/// The first agent marker `is_set` reports as present.
 fn marker_from(is_set: impl Fn(&str) -> bool) -> Option<&'static str> {
     AGENT_MARKERS.into_iter().find(|name| is_set(name))
-}
-
-/// Whether this process is running in an agent context.
-pub fn is_agent_context() -> bool {
-    agent_marker().is_some()
 }
 
 /// Where the "this is an agent context" signal came from.
@@ -161,11 +151,6 @@ pub fn check_human(agent_flag: bool) -> Result<(), RevealRefusal> {
         Some(refusal) => Err(refusal),
         None => Ok(()),
     }
-}
-
-/// Check the real process for a plaintext reveal.
-pub fn check_reveal(agent_flag: bool) -> Result<(), RevealRefusal> {
-    check_human(agent_flag)
 }
 
 #[cfg(test)]

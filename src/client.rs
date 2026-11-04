@@ -289,9 +289,7 @@ pub fn ping(paths: &RuntimePaths, token: &SessionToken) -> Result<()> {
             "the unlock daemon rejected a ping ({})",
             error.code()
         ))),
-        other => Err(Error::Daemon(format!(
-            "unexpected reply to a ping: {other:?}"
-        ))),
+        other => Err(unexpected_response("a ping", &other)),
     }
 }
 
@@ -331,9 +329,7 @@ pub fn lock_with(paths: &RuntimePaths, token: &SessionToken) -> Result<()> {
             "the unlock daemon rejected the lock request ({})",
             error.code()
         ))),
-        other => Err(Error::Daemon(format!(
-            "unexpected reply to a lock request: {other:?}"
-        ))),
+        other => Err(unexpected_response("a lock request", &other)),
     }
 }
 
@@ -697,6 +693,43 @@ mod tests {
         let server = serve_once(paths.clone(), Response::Pong);
         assert!(prove(&paths, &token, &request_proof).is_err());
         server.join().expect("server thread");
+    }
+
+    #[test]
+    fn ping_and_lock_name_an_unexpected_response_by_kind_only() {
+        let (_directory, paths) = runtime_paths();
+        let token = test_token();
+
+        let server = serve_once(paths.clone(), Response::Locked);
+        let error = ping(&paths, &token).expect_err("wrong answer");
+        server.join().expect("server thread");
+        assert_eq!(
+            error.to_string(),
+            "the unlock daemon answered a ping with an unexpected response (locked)."
+        );
+
+        session::store(&paths, &token).expect("store token");
+        let server = serve_once(paths.clone(), Response::Pong);
+        let error = lock(&paths).expect_err("wrong answer");
+        server.join().expect("server thread");
+        assert_eq!(
+            error.to_string(),
+            "the unlock daemon answered a lock request with an unexpected response (pong)."
+        );
+    }
+
+    /// A `lock` answered after another unlock replaced the session file must
+    /// not delete that newer session's token.
+    #[test]
+    fn lock_keeps_a_session_file_that_holds_another_token() {
+        let (_directory, paths) = runtime_paths();
+        let newer = SessionToken::from_bytes(&[0x33u8; crate::token::TOKEN_BYTES]).expect("token");
+        session::store(&paths, &newer).expect("store token");
+        let server = serve_once(paths.clone(), Response::Locked);
+        lock_with(&paths, &test_token()).expect("lock");
+        server.join().expect("server thread");
+        let kept = session::load(&paths).expect("the newer session file survives");
+        assert!(kept.matches(&newer));
     }
 
     #[test]

@@ -83,7 +83,7 @@ pub(crate) fn command_get(
         // Refuse before touching the vault or prompting for the master
         // password: a pipe or an agent context must never reach the plaintext.
         // `--agent` can only add refusal; it never removes the TTY rule.
-        agent::check_reveal(agent_mode).map_err(|refusal| Error::Refused(refusal.message()))?;
+        agent::check_human(agent_mode).map_err(|refusal| Error::Refused(refusal.message()))?;
     }
     let (vault, _) = unlock(path)?;
     let credential = vault
