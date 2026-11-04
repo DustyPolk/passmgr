@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{Error, Result};
 use crate::store::{EntryId, MAX_TIMESTAMP_UNIX, normalize_tags};
 
-use validate::{validate_commands, validate_label};
+use validate::validate_shape;
 
 /// Bytes in a grant id (rendered as 32 lowercase hex characters).
 pub const GRANT_ID_BYTES: usize = 16;
@@ -592,23 +592,8 @@ impl Grant {
             )));
         }
         validate_expiry(spec.expires_at, now)?;
-        validate_label(&spec.label)?;
-        if spec.capabilities.is_empty() {
-            return Err(Error::InvalidInput(
-                "a grant needs at least one capability".into(),
-            ));
-        }
-        let commands = validate_commands(spec.commands)?;
-        if spec.capabilities.contains(Capabilities::RUN) && commands.is_empty() {
-            return Err(Error::InvalidInput(
-                "a run grant needs at least one allowed command".into(),
-            ));
-        }
-        if spec.max_uses == Some(0) {
-            return Err(Error::InvalidInput(
-                "max_uses must be at least 1; omit it for no limit".into(),
-            ));
-        }
+        let commands =
+            validate_shape(&spec.label, spec.capabilities, spec.commands, spec.max_uses)?;
         Ok(Self {
             id: GrantId::generate()?,
             token_hash,
@@ -690,26 +675,16 @@ impl Grant {
                 MAX_GRANT_LIFETIME_SECS / 86_400
             )));
         }
-        validate_label(&stored.label)?;
-        if stored.capabilities.is_empty() {
-            return Err(Error::InvalidInput(
-                "a stored grant has no capabilities".into(),
-            ));
-        }
-        let specified = stored.commands.len();
-        let commands = validate_commands(stored.commands.clone())?;
-        if commands.len() != specified {
+        let commands = validate_shape(
+            &stored.label,
+            stored.capabilities,
+            stored.commands.clone(),
+            stored.max_uses,
+        )?;
+        if commands.len() != stored.commands.len() {
             return Err(Error::InvalidInput(
                 "a stored grant lists the same command twice".into(),
             ));
-        }
-        if stored.capabilities.contains(Capabilities::RUN) && commands.is_empty() {
-            return Err(Error::InvalidInput(
-                "a stored run grant has no allowed command".into(),
-            ));
-        }
-        if stored.max_uses == Some(0) {
-            return Err(Error::InvalidInput("a stored grant has max_uses 0".into()));
         }
         if let Some(max_uses) = stored.max_uses
             && stored.uses > max_uses

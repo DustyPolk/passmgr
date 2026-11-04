@@ -38,7 +38,7 @@ use crate::error::{Error, Result};
 use crate::presence::RequestDigest;
 use crate::store::MAX_TIMESTAMP_UNIX;
 
-use super::validate::{validate_commands, validate_label};
+use super::validate::validate_shape;
 use super::{Capabilities, Grant, GrantSpec, Scope, TokenHash, validate_expiry};
 
 /// Domain separator and digest version. A change to the encoding must change
@@ -70,23 +70,8 @@ impl GrantRequest {
     /// no moment could make valid, so the CLI and the daemon always normalize
     /// the same input to the same request.
     pub fn new(spec: GrantSpec, token_hash: TokenHash) -> Result<Self> {
-        validate_label(&spec.label)?;
-        if spec.capabilities.is_empty() {
-            return Err(Error::InvalidInput(
-                "a grant needs at least one capability".into(),
-            ));
-        }
-        let commands = validate_commands(spec.commands)?;
-        if spec.capabilities.contains(Capabilities::RUN) && commands.is_empty() {
-            return Err(Error::InvalidInput(
-                "a run grant needs at least one allowed command".into(),
-            ));
-        }
-        if spec.max_uses == Some(0) {
-            return Err(Error::InvalidInput(
-                "max_uses must be at least 1; omit it for no limit".into(),
-            ));
-        }
+        let commands =
+            validate_shape(&spec.label, spec.capabilities, spec.commands, spec.max_uses)?;
         if spec.expires_at > MAX_TIMESTAMP_UNIX {
             return Err(Error::InvalidInput(format!(
                 "grant expiry {} exceeds the maximum of {MAX_TIMESTAMP_UNIX} Unix seconds",

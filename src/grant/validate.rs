@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{MAX_COMMANDS, MAX_FIELD_NAME_BYTES, MAX_LABEL_BYTES};
+use super::{Capabilities, MAX_COMMANDS, MAX_FIELD_NAME_BYTES, MAX_LABEL_BYTES};
 use crate::error::{Error, Result};
 use crate::protocol::MAX_PATH_BYTES;
 use crate::text::{escape_quoted, is_hidden_or_reordering};
@@ -22,6 +22,36 @@ use crate::text::{escape_quoted, is_hidden_or_reordering};
 /// printed to a terminal. A bad command is echoed back, but escaped (see
 /// [`escape_quoted`]) so its own characters cannot forge the error line.
 pub const LABEL_FORBIDDEN_CLASSES: &str = crate::text::HIDDEN_FORBIDDEN_CLASSES;
+
+/// The shape rules every grant obeys, whether `Grant::create` or
+/// `GrantRequest::new` builds it or `Grant::check_stored` reads it back. One
+/// function, so the reader refuses exactly what the writers refuse. Returns
+/// the canonical command list.
+pub(super) fn validate_shape(
+    label: &str,
+    capabilities: Capabilities,
+    commands: Vec<PathBuf>,
+    max_uses: Option<u32>,
+) -> Result<Vec<PathBuf>> {
+    validate_label(label)?;
+    if capabilities.is_empty() {
+        return Err(Error::InvalidInput(
+            "a grant needs at least one capability".into(),
+        ));
+    }
+    let commands = validate_commands(commands)?;
+    if capabilities.contains(Capabilities::RUN) && commands.is_empty() {
+        return Err(Error::InvalidInput(
+            "a run grant needs at least one allowed command".into(),
+        ));
+    }
+    if max_uses == Some(0) {
+        return Err(Error::InvalidInput(
+            "max_uses must be at least 1; omit it for no limit".into(),
+        ));
+    }
+    Ok(commands)
+}
 
 pub(super) fn validate_label(label: &str) -> Result<()> {
     if label.trim().is_empty() {
