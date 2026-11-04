@@ -1310,6 +1310,109 @@ Rules that apply to every item:
       sentences) that the grant-create bullet names the held key and does not
       claim the window holds no plaintext-capable material.
 
+- [ ] **R.60 A `BrokenPipe` from the socket exits 0, so `run` and `grant
+      revoke` can report success for a request that was never sent.**
+      `src/cli/mod.rs:47-48` maps *any* `CliError::Runtime(Error::Io(e))` whose
+      kind is `BrokenPipe` to `EXIT_OK`. The caller-pipe case it was written
+      for is not the only source: `client::run` (`src/client.rs:148`) and
+      `client::request` (`src/client.rs:72`) `write_all` the request frame, and
+      `command_run` propagates that error at `src/cli/run.rs:150` —
+      `output_closed` is still false, so the 141 arm does not take it. The
+      comment added in this range (`src/cli/run.rs:255-256`) states the mapping
+      is intended: "a `BrokenPipe` from the socket still takes the generic
+      mapping".
+      Failure: a `run` (or `pm grant revoke --all`, `src/cli/grant.rs:436`)
+      connects to `pmd` and the daemon goes away before it reads the request —
+      `pm lock`, SIGTERM, a crash, the idle timeout closing the listener. The
+      kernel answers EPIPE, `main` prints nothing and exits 0. `README.md:549`
+      documents 0 as "Success" and the run section promises the child's status,
+      so an agent records `gh pr create` / `git push` as done although no child
+      was spawned, no grant was checked and no use was recorded; the human also
+      gets 0 from the kill switch.
+      Fix: keep the socket out of the caller-pipe mapping. Wrap the frame write
+      in `src/client.rs` as `Error::Daemon(...)` (or a dedicated variant) so a
+      dead daemon can never look like the CLI's own stdout closing, and leave
+      `EXIT_OK` for a failed write of the CLI's own diagnostics only.
+      Test: a stub `UnixListener` that accepts and then drops the connection
+      without reading, with a valid session and grant token, then
+      `passmgr run ... -- /usr/bin/true` must exit non-zero and name the dead
+      daemon; the same stub for `pm grant revoke --all` must also be non-zero.
+      Both exit 0 today.
+
+- [ ] **R.61 R.46's headroom test asserts a property of two constants, not of
+      the encoder, so the change it exists to catch cannot fail it.**
+      `src/store/tests.rs:804-812` asserts `GRANT_GROWTH_BYTES == 16` and
+      `16 * MAX_GRANTS <= MAX_PLAINTEXT_GROWTH_BYTES`. `GRANT_GROWTH_BYTES`
+      (`src/store/payload.rs:38`) is used by production code nowhere — only the
+      re-export at `src/store.rs:45` and that test. The size the writer really
+      uses is the private `grant_growth_bytes()` (`src/store/payload.rs:40-49`),
+      called from `byte_len` (`src/store/payload.rs:59-98`). The test comment
+      promises "a change to either bound fails the build instead of silently
+      making a vault written at the cap unrevocable".
+      Failure: add one more post-creation field (8 bytes, say `last_denied`) to
+      `grant_growth_bytes` and `grant_byte_len` and ship it; the test stays
+      green. A vault at the content cap (10 MiB, 1,024 grants) then encodes
+      10 MiB + 24 KiB, over `MAX_PAYLOAD_BYTES` (`src/crypto.rs:52`), so
+      `check_plaintext_len` (`src/crypto.rs:236`) refuses the save:
+      `record_use` answers `internal` and `revoke_grants` fails — the kill
+      switch stops working on exactly the vaults that need it. Today's
+      accounting is right (8 + 8, matching `grant_byte_len`); the proof is not.
+      Fix: measure instead of restating — encode one grant list twice, once
+      before `mark_used`/`revoke` and once after, and use the byte difference
+      as the growth (or make `grant_growth_bytes` visible to the test); then
+      delete the duplicate constant or define it in terms of that helper.
+      Test: `MAX_GRANTS * measured_growth <= MAX_PLAINTEXT_GROWTH_BYTES` with
+      `measured_growth` taken from the codec, using a grant with every optional
+      field set so a future field cannot be forgotten.
+
+- [ ] **R.62 The R.45 clock test gives the whole startup three seconds, so a
+      slow machine fails the test instead of testing the daemon.**
+      `tests/daemon_run.rs:672-712`: `Fixture::with_grant_expiring_in(3)`
+      (`:677`) stamps `expires_at = now + 3` inside `Fixture::build`
+      (`tests/support/mod.rs:105`), and those same three seconds must also
+      cover `fixture.start()` (spawn `pmd`, ping until `pong`), the `run`
+      request, the daemon's `open_with_key_for_update` and
+      `wait_until_the_lock_is_open`. `:712` then asserts
+      `observed < fixture.grant_expires_at`, "the daemon read the clock after
+      the grant expired; the test proves nothing" — a loaded machine turns a
+      slow start into a hard failure of the test that guards R.45, and the
+      obvious repair (raise the number) re-arms the same race.
+      Failure: `cargo test` on a busy box (16 test threads, each building an
+      8 MiB-KDF fixture) takes over 3 s between `build()` and the lock chmod;
+      the suite goes red with a message that blames the daemon.
+      Fix: stop racing startup. Build the grant with a long expiry, and once
+      `wait_until_the_lock_is_open` has observed the daemon blocked *before* it
+      reads the vault, rewrite that grant's `expires_at` to `observed + 1`, then
+      sleep to `observed + 2`, release the lock and expect `Denied`. The rewrite
+      must keep the container header (salt/KDF) so the daemon's live key still
+      opens it, as `rewrite_vault` already does (`tests/daemon_run.rs:290-299`);
+      that needs the fixture to keep its credential and grant (or a
+      `Fixture::set_grant_expiry` helper).
+      Test: the same test, with the expiry derived from the clock the test
+      observed and no dependency on how fast `pmd` starts.
+
+- [ ] **R.63 The "every documented grant example" guard counts prose as an
+      example, so it survives deleting the examples it protects.**
+      `tests/docs.rs:607-638` counts *every* line containing the substring
+      "grant create", including prose: `README.md:182` ("…so `grant create`
+      refuses it otherwise.") and `README.md:257` ("…`grant create` prompts…").
+      `tests/docs.rs:643-660` then requires only `README.md >= 2` and
+      `--help >= 1` such lines. The parser also matches `--command` tokens
+      literally, so a quoted path (`--command '/usr/bin/git'`) reaches
+      `is_program_runner` with the quotes attached and is not recognised as a
+      runner.
+      Failure: someone rewrites the quickstart without `/usr/bin/gh` (or drops
+      both real examples); the prose lines keep the count at 2 and
+      `every_documented_grant_example_flags_a_program_runner` still passes while
+      the invariant it exists for (R.43: a copied example must not exit 5) is
+      unenforced. A quoted example is skipped for the same reason.
+      Fix: recognise command-shaped lines only (a line whose first tokens are
+      `passmgr`/`pm` `grant` `create`, not a backticked mention), and strip one
+      layer of matching quotes before `is_program_runner`.
+      Test: unit-test `check_grant_examples` directly — prose only must return
+      0; a quoted runner example without `--allow-interpreter` must fail
+      (`#[should_panic]`); the real README/`--help` must still be accepted.
+
 ## Phase 3 — grants and audit log
 
 The design for grants, approval and audit lives in `MCP.md` ("Grants and the

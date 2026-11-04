@@ -1,3 +1,44 @@
+## 2026-11-03 — Review of f4c7796..c83c9b3 (4 findings: R.60–R.63)
+
+- Findings by category: secrets/exposure 0, authorization 0, unsafe input 0,
+  crypto 0, drift 0 standalone (R.61 also corrects an overclaim in the R.46
+  doc comment and progress entry) — but 1 agent-facing exit-contract hole
+  (R.60: a socket `BrokenPipe` exits 0, a false success for `run` and
+  `grant revoke`) and 3 tests that do not prove what they claim (R.61 headroom
+  test restates two constants, R.62 R.45 clock test has a 3-second startup
+  budget, R.63 the documented-example guard counts prose). 0 unconfirmed.
+- Scope: `git diff f4c7796..c83c9b3` in full, plus the surrounding code for
+  every touched function, `PROMPT.md`, `DECISIONS.md`, `MCP.md`, `FORMAT.md`,
+  `SECURITY.md`, `README.md`, `--help`, `TODO.md`/`TODO-done.md` (numbering
+  continues at R.60), and the five new/changed tests run individually.
+- Looked at and judged fine (do not redo): the R.44 watermark — checked before
+  authorize, recorded only after the save succeeds, revocation exempt so the
+  kill switch survives a rollback, marks kept for pruned grants, and no
+  non-constant-time compare; `Grant::status` ordering means only revoked or
+  expired grants are prunable (R.42), and the 7-day retention is applied at the
+  same instant as the create re-check; R.46's `byte_len` growth accounting
+  (8 + 8) matches `grant_byte_len` exactly today, and the daemon was already
+  the writer of both post-creation fields; R.45's clock read really is after
+  `open_with_key_for_update` on every retry; R.47's 141 diagnostic contains no
+  secret, `ResponseError` has no free-form variant, and dropping the run socket
+  makes the daemon SIGKILL the child's process group; R.43's `gh` example is a
+  genuine `PROGRAM_RUNNERS` entry and all three documented examples carry
+  `--allow-interpreter`; README/FORMAT/SECURITY/DECISIONS/`--help` agree with
+  the code on payload sizes, prune retention and exit 141; `pm grant revoke`
+  never writes the vault from the CLI, so every revocation raises the
+  watermark; every refusal goes through `reject()`
+  (`src/daemon.rs:810-813`), which can only send the fixed `ResponseError`
+  enum, so no diagnostic string reaches an agent; `Ping` carries no
+  credentials.
+- Gate at review time: `cargo test --test docs` (21 passed), `--lib
+  grant_growth_headroom`, `--test daemon_run
+  a_run_is_denied_when_its_grant_expires_during_the_lock_wait` (3.94 s),
+  `--test run a_closed_output_pipe_cancels_the_run_and_exits_nonzero` (0.76 s),
+  `--test grant_cli grant_create_prunes_dead_grants_from_a_full_vault` (1.36 s)
+  — all green.
+- Fix in that order: R.60 (agent-visible false success), then R.61–R.63. No
+  source files were changed by this review.
+
 ## 2026-11-03 — `run` reports a closed output pipe instead of success (TODO R.47)
 
 - `src/cli/run.rs`: the relay callback now records a `BrokenPipe` in a
