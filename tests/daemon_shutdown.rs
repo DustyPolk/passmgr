@@ -74,10 +74,6 @@ fn wait_for_process_exit_within(pid: libc::pid_t, timeout: Duration) {
     }
 }
 
-/// A signal must not wait for a client that never finishes its request. The
-/// accept loop serves one request at a time and only looks at the shutdown
-/// flag between connections, so a client trickling one byte at a time into a
-/// frame it never completes used to hold the key until it chose to hang up.
 #[test]
 fn sigterm_is_honoured_while_a_client_trickles_an_unfinished_request() {
     let fixture = Fixture::new();
@@ -88,8 +84,6 @@ fn sigterm_is_honoured_while_a_client_trickles_an_unfinished_request() {
         .expect("write frame prefix");
     let (hang_up, hung_up) = std::sync::mpsc::channel::<()>();
     let trickler = std::thread::spawn(move || {
-        // A byte every 250 ms stays well inside any per-read timeout. The cap
-        // is a safety net for a failing test; the daemon must not need it.
         let give_up = Instant::now() + Duration::from_secs(20);
         while hung_up.recv_timeout(Duration::from_millis(250)).is_err() {
             if Instant::now() >= give_up || stream.write_all(b"x").is_err() {
@@ -98,9 +92,6 @@ fn sigterm_is_honoured_while_a_client_trickles_an_unfinished_request() {
         }
     });
 
-    // The signal must arrive while the daemon is in the trickled read, not
-    // while the accept loop is still between connections. A ping that goes
-    // unanswered is the proof that the loop has taken the trickler.
     let probe_deadline = Instant::now() + WAIT;
     loop {
         let mut probe = UnixStream::connect(fixture.socket()).expect("connect");
@@ -125,7 +116,6 @@ fn sigterm_is_honoured_while_a_client_trickles_an_unfinished_request() {
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
         0
     );
-    // Within the per-connection request deadline (5 s) plus a margin.
     let status = wait_for_exit(&mut child, Duration::from_secs(8));
     let _ = hang_up.send(());
     trickler.join().expect("trickler");

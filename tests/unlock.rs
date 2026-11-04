@@ -487,9 +487,6 @@ fn unlock_refuses_when_a_daemon_is_already_running() {
     );
 }
 
-/// Two unlocks can both pass the "already running" probe. The one whose `pmd`
-/// loses the instance lock must leave the winner's session file alone, or
-/// every later client loses the live session.
 #[cfg(target_os = "linux")]
 #[test]
 fn an_unlock_that_loses_the_instance_lock_keeps_the_winners_session() {
@@ -504,8 +501,6 @@ fn an_unlock_that_loses_the_instance_lock_keeps_the_winners_session() {
         .expect("runtime dir");
     let winner = SessionToken::generate().expect("token");
     passmgr::session::store(&paths, &winner).expect("store the winner's token");
-    // Stand in for the winner's `pmd`: hold the instance lock with no socket,
-    // so the probe sees no daemon and the spawned one cannot start.
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)

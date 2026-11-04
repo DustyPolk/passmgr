@@ -211,7 +211,6 @@ pub(super) fn serve_run(
     let (grant_id, secrets) =
         match record_use(vault_path, key, watermarks, request, &ids, &program, &stop) {
             Ok(value) => value,
-            // Nobody is listening, or the key is being wiped: nothing to answer.
             Err(RecordError::Cancelled) => {
                 warn(record(
                     audit::Outcome::Cancelled,
@@ -357,8 +356,6 @@ pub(super) fn serve_run(
     }
 }
 
-/// A run's client connection, written one frame at a time while the run's
-/// stop conditions are observed.
 struct ClientStream<'a> {
     stream: UnixStream,
     stop: &'a runner::Stop<'a>,
@@ -369,8 +366,6 @@ struct ClientStream<'a> {
 }
 
 impl ClientStream<'_> {
-    /// Write one frame, or give up with an error once the run must stop.
-    ///
     /// The socket is non-blocking here, so a reader that stops reading never
     /// trips a write timeout: the bytes wait until it reads again, the bounded
     /// frame channel backs up, and the child blocks on its full output pipe
@@ -406,9 +401,6 @@ impl ClientStream<'_> {
             if self.pending.is_empty() {
                 break;
             }
-            // Wait for room in the socket buffer, or for a stop. A peer that
-            // is gone reports an error on the next write; `poll` only bounds
-            // the wait.
             let mut poll_fd = libc::pollfd {
                 fd: self.stream.as_raw_fd(),
                 events: libc::POLLOUT,
@@ -622,10 +614,9 @@ pub(super) fn read_request(
     read_request_with_chunk(stream, &mut chunk, Instant::now() + READ_TIMEOUT)
 }
 
-/// [`read_request`]'s loop, with the read chunk and the deadline supplied by
-/// the caller so a test can observe that the chunk is wiped on every exit, the
-/// rejected ones included (TODO R.66), and that the deadline cuts a slow
-/// client off. Nothing in production passes a different chunk or deadline.
+/// [`read_request`]'s loop, with the chunk and deadline supplied by the caller
+/// so a test can observe the chunk wiped on every exit (TODO R.66) and a slow
+/// client cut off. Nothing in production passes a different chunk or deadline.
 fn read_request_with_chunk(
     stream: &mut UnixStream,
     chunk: &mut [u8],
@@ -737,9 +728,6 @@ mod tests {
 
     #[test]
     fn a_client_that_trickles_its_request_is_cut_off_at_the_connection_deadline() {
-        // One byte at a time, each well inside a per-read timeout, into a frame
-        // that will never complete. Only a deadline for the whole connection
-        // ends this before the client chooses to hang up.
         let (mut daemon, mut client) = UnixStream::pair().expect("socketpair");
         let (hang_up, hung_up) = std::sync::mpsc::channel::<()>();
         let trickler = std::thread::spawn(move || {
@@ -827,8 +815,6 @@ mod tests {
         assert_eq!(&buf, b"left");
     }
 
-    /// A vault with one credential and a two-use grant for `/usr/bin/true`,
-    /// plus a `run` request that grant authorizes.
     struct UseFixture {
         _directory: tempfile::TempDir,
         path: std::path::PathBuf,
@@ -874,8 +860,6 @@ mod tests {
             std::slice::from_ref(&grant),
         )
         .expect("encode payload");
-        // Cheap KDF parameters: these tests are about the use record, not
-        // the KDF.
         let container =
             encrypt(&plaintext, master, KdfParams::new(8 * 1024, 1, 1)).expect("encrypt vault");
         std::fs::write(&path, &container).expect("write vault");
@@ -905,9 +889,6 @@ mod tests {
 
     #[test]
     fn a_client_that_left_during_the_lock_wait_spends_no_use() {
-        // The run was authorized and then waited for the vault write lock.
-        // When the lock is taken the client is gone: there is nobody to run
-        // for, so the use must not be charged and nothing must be saved.
         use std::cell::Cell;
         use std::sync::atomic::AtomicBool;
 

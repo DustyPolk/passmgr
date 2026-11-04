@@ -1,6 +1,3 @@
-//! Fixtures shared by the `run` end-to-end tests: a disposable vault, a real
-//! `pmd`, and the `passmgr` command pointed at it.
-
 #![allow(dead_code)] // each integration-test binary uses a different subset
 
 use std::fs;

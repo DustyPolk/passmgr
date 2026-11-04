@@ -184,9 +184,6 @@ fn a_ref_is_shown_with_its_service_and_username() {
     assert!(!text.contains("unit-test-canary-password"), "{text}");
 }
 
-/// Several tags select only the credentials that carry every one of them,
-/// which is what the grant enforces. Listing each tag's matches separately
-/// would read as a union and show credentials the grant does not cover.
 #[test]
 fn tags_show_only_the_credentials_the_grant_covers() {
     let directory = tempfile::tempdir().unwrap();

@@ -1,7 +1,3 @@
-//! End-to-end tests for how `passmgr run` relays the child's outcome: its exit
-//! status, a signal, the output-cap notice, and a caller that closes its
-//! output pipe. Split from `tests/run.rs` to keep both under the layout limit.
-
 #![cfg(unix)]
 
 mod run_support;
@@ -36,7 +32,6 @@ fn run_propagates_the_child_exit_status() {
 #[test]
 fn run_says_on_stderr_when_relayed_output_hit_its_cap() {
     let daemon = Daemon::start();
-    // 400000 bytes on each stream, well past the 256 KiB default cap.
     let output = run(
         &daemon,
         &[
@@ -50,7 +45,6 @@ fn run_says_on_stderr_when_relayed_output_hit_its_cap() {
         ],
     );
     let cap = passmgr::protocol::DEFAULT_RUN_OUTPUT_BYTES as usize;
-    // The child's status is kept: the notice must not mask it.
     assert_eq!(output.status.code(), Some(3), "{:?}", output.status);
     assert_eq!(output.stdout.len(), cap);
     let stderr = stderr_text(&output);

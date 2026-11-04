@@ -4,7 +4,7 @@
 //! already-decrypted vault so the human sees the service and username behind
 //! it (TODO R.41); values are never read. Untrusted or stored names are
 //! escaped, so no label, command path or credential name can drive a
-//! terminal, and the tags expand to the entries that carry all of them.
+//! terminal.
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -69,7 +69,6 @@ impl ScopeEntry {
 pub(super) struct ScopePreview {
     pub(super) refs: Vec<ScopeEntry>,
     pub(super) tags: Vec<String>,
-    /// The credentials that carry every tag in `tags`.
     pub(super) tagged: Vec<ScopeEntry>,
 }
 

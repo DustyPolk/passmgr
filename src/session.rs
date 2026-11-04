@@ -146,8 +146,6 @@ fn open_regular(path: &Path) -> Result<(File, fs::Metadata), SessionError> {
     Ok((file, metadata))
 }
 
-/// Read the bounded token text and parse it. The hex is the bearer secret, so
-/// the buffer is wiped when it goes out of scope.
 fn read_token(file: File, path: &Path) -> Result<SessionToken, SessionError> {
     let mut text = Zeroizing::new(Vec::with_capacity(MAX_SESSION_FILE_BYTES + 1));
     file.take(MAX_SESSION_FILE_BYTES as u64 + 1)
@@ -161,8 +159,8 @@ fn read_token(file: File, path: &Path) -> Result<SessionToken, SessionError> {
             "the session token file is larger than expected".into(),
         ));
     }
-    // Invalid UTF-8 parses as empty text, which `from_hex` rejects.
-    let text = std::str::from_utf8(&text).unwrap_or_default();
+    let text = std::str::from_utf8(&text)
+        .map_err(|_| SessionError::Invalid("the session token file is not valid text".into()))?;
     SessionToken::from_hex(text.trim_end()).map_err(SessionError::Token)
 }
 

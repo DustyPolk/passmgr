@@ -196,9 +196,6 @@ fn a_run_is_refused_when_the_audit_log_cannot_be_written() {
 
 #[test]
 fn a_run_against_a_torn_audit_log_is_refused_before_the_child_starts() {
-    // A crash mid-append leaves a last line without its newline. The append
-    // after the child would refuse it, so the preflight must refuse it first:
-    // otherwise the secret is used and never recorded.
     let fixture = Fixture::new();
     let audit = audit_file(&fixture);
     let state = audit.parent().expect("state directory");

@@ -1,5 +1,3 @@
-//! The vault path must name a regular file: links and FIFOs are refused.
-
 use super::*;
 
 fn saved_vault(path: &Path) -> Vec<u8> {

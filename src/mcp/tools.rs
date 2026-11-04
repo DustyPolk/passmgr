@@ -2,9 +2,7 @@
 //!
 //! `MCP.md` defines five tools. This module owns their public face — the
 //! `title`, the model-facing `description`, the `inputSchema`, the
-//! `outputSchema` and the MCP `annotations` — and nothing else. Input
-//! validation and execution live in [`super::call`], so `tools/list` can be
-//! built and tested without a daemon.
+//! `outputSchema` and the MCP `annotations` — and nothing else.
 //!
 //! The schemas are hand-written JSON on purpose: the repository has no MCP SDK
 //! and no schema-derive dependency, and a schema is part of the contract an
@@ -482,9 +480,6 @@ fn entry_schema() -> Value {
     })
 }
 
-/// A canonical `pm://` reference, accepted wherever a value is used. A
-/// `/field` suffix is refused by the call boundary until fields can be
-/// injected, so the schema does not advertise one.
 fn reference_schema() -> Value {
     json!({
         "type": "string",

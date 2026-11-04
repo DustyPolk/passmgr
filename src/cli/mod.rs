@@ -500,7 +500,6 @@ mod tests {
         );
         assert!(parse(&["rm"]).is_err());
         assert!(parse(&["rm", "a", "b"]).is_err());
-        // `--` lets a service whose name looks like a flag be deleted.
         for name in ["--help", "-svc", "--"] {
             assert!(
                 matches!(parse(&["delete", "--", name]).unwrap(), Command::Delete(service) if service == name),

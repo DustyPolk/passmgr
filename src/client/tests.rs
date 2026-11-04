@@ -200,8 +200,6 @@ fn ping_and_lock_name_an_unexpected_response_by_kind_only() {
     );
 }
 
-/// A `lock` answered after another unlock replaced the session file must
-/// not delete that newer session's token.
 #[test]
 fn lock_keeps_a_session_file_that_holds_another_token() {
     let (_directory, paths) = runtime_paths();

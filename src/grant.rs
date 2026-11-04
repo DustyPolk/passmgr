@@ -272,7 +272,6 @@ impl Scope {
     }
 
     /// True when the scope lists tags and `tags` carries every one of them.
-    /// The approval summary uses this too, so it shows what the grant covers.
     pub fn matches_tags(&self, tags: &[String]) -> bool {
         !self.tags.is_empty() && self.tags.iter().all(|tag| tags.contains(tag))
     }
@@ -859,8 +858,6 @@ impl Grant {
     }
 
     fn check_active(&self, now: u64) -> std::result::Result<(), Denied> {
-        // `now` is not checked for storability here (only `mark_used` stores
-        // it); `status` only compares it, which is safe for any `u64`.
         match self.status(now) {
             GrantStatus::Active => Ok(()),
             GrantStatus::Revoked => Err(Denied::Revoked),

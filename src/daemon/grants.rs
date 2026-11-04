@@ -1,10 +1,3 @@
-//! Serving the grant-scoped reads and the revoke write: `list`, `describe`
-//! and `grant revoke`.
-//!
-//! This lives beside the accept loop so `src/daemon.rs` stays under the file
-//! limit. Each handler opens the vault itself with the daemon's hot key and
-//! records what it saw in the rollback watermarks before it answers.
-
 use std::path::Path;
 
 use crate::grant::{AccessRequest, Denied, Grant, GrantId, GrantToken, Target};

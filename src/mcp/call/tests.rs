@@ -444,8 +444,6 @@ fn run_args_refuses_the_unimplemented_injections() {
         assert!(args(extra).is_ok());
     }
 
-    // Any other type is a malformed argument, not "no files": running
-    // without the file the caller asked for would spend a grant use.
     for files in [json!("X=pm://x"), json!(["x"]), json!(true), json!(5)] {
         let message = args(json!({ "files": files })).expect_err("wrong type");
         assert_eq!(message, "'files' must be an object", "for {files}");
@@ -632,7 +630,6 @@ fn a_refused_run_is_an_error_result_with_a_run_specific_message() {
             .expect("text")
             .to_owned()
     };
-    // pmd also answers `denied` for a program outside the grant's allowlist.
     let denied = text(ResponseError::Denied);
     assert!(denied.contains("does not allow this program"), "{denied}");
     assert!(denied.contains("not active"), "{denied}");

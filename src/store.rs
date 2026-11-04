@@ -123,7 +123,6 @@ impl EntryId {
                 "entry id must be {ENTRY_ID_HEX_CHARS} hex characters"
             )));
         }
-        // Upper case is accepted on purpose: ids are typed on a command line.
         hex::decode_lower(&hex.to_ascii_lowercase())
             .map(Self)
             .ok_or_else(|| Error::InvalidInput("entry id contains a non-hex character".into()))

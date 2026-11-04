@@ -320,8 +320,7 @@ pub fn lock_with(paths: &RuntimePaths, token: &SessionToken) -> Result<()> {
         Response::Locked => {
             // The daemon removes the file too, but only if it still matches;
             // this makes `lock` leave no stale token even if the daemon died
-            // between answering and cleaning up, and never removes a newer
-            // session's file.
+            // between answering and cleaning up.
             session::remove_if_matches(paths, token);
             Ok(())
         }

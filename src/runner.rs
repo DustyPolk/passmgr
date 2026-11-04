@@ -123,9 +123,10 @@ impl Limits {
 /// True when the daemon must never set this variable to a secret.
 ///
 /// These names make a loader or shell execute or load something, so a value
-/// placed in them is not just data: `GCONV_PATH` and `LOCPATH` point glibc at
-/// loadable modules, and `GLIBC_TUNABLES` changes how it loads. The list
-/// follows `MCP.md` for `run_with_credentials`.
+/// placed in them is not just data: `GCONV_PATH` makes iconv load modules,
+/// `LOCPATH` points glibc at locale files it parses, and `GLIBC_TUNABLES`
+/// changes how the loader behaves. The list follows `MCP.md` for
+/// `run_with_credentials`.
 pub fn denied_env_name(name: &str) -> bool {
     matches!(
         name,
@@ -238,13 +239,10 @@ impl<'a> Stop<'a> {
         self.cancelled() || self.timed_out()
     }
 
-    /// The daemon is stopping or the client is gone: the run ends without a
-    /// result.
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst) || self.client_gone.is_some_and(|gone| gone())
     }
 
-    /// The deadline has passed: the run ends with a `timed_out` result.
     pub(crate) fn timed_out(&self) -> bool {
         self.deadline
             .get()
@@ -316,8 +314,7 @@ where
     F: FnMut(RunFrame) -> io::Result<()>,
 {
     // A client that left between sending the request and the spawn gets no
-    // child at all. The daemon checks the same condition before decrypting
-    // and again under the vault lock; this is the last look before the fork.
+    // child at all.
     if stop.cancelled() {
         return Err(RunError::Cancelled);
     }
@@ -604,9 +601,8 @@ where
         match receiver.recv_timeout(CANCEL_POLL) {
             Ok(Message::Frame(frame)) => {
                 if let Err(err) = emit(frame) {
-                    // The writer gives up on the same conditions; a deadline
-                    // that passed while it waited for the client is a
-                    // timeout, not a delivery failure.
+                    // A deadline that passed while the writer waited for the
+                    // client is a timeout, not a delivery failure.
                     return if stop.timed_out() {
                         Relay::TimedOut
                     } else {

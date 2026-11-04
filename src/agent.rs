@@ -27,7 +27,6 @@ pub const AGENT_MARKERS: [&str; 4] = [
     "CODEX_SANDBOX",
 ];
 
-/// The first agent marker `is_set` reports as present.
 fn marker_from(is_set: impl Fn(&str) -> bool) -> Option<&'static str> {
     AGENT_MARKERS.into_iter().find(|name| is_set(name))
 }

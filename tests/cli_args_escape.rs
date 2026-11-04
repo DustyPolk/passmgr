@@ -112,8 +112,6 @@ fn argument_errors_never_write_control_characters_to_the_terminal() {
     }
 }
 
-/// A mistaken `--env` value may be the secret itself (`GH_TOKEN=ghp_...`), so
-/// the refusal names the flag and never repeats the value, escaped or not.
 #[test]
 fn a_literal_env_value_is_never_echoed() {
     let _guard = cli_support::serial();

@@ -476,9 +476,8 @@ mod tests {
 
     static CANARY_RELEASES: AtomicUsize = AtomicUsize::new(0);
 
-    /// Argon2 memory cost used by the wipe test. Nothing else in the crate
-    /// allocates exactly `WATCHED_KDF_KIB * 1024` bytes, so a freed block of
-    /// that size is the KDF's working memory.
+    /// Nothing else in the crate allocates exactly this many KiB, so a freed
+    /// block of that size is the KDF's working memory.
     const WATCHED_KDF_KIB: u32 = 8200;
     const WATCHED_KDF_BYTES: usize = WATCHED_KDF_KIB as usize * 1024;
 

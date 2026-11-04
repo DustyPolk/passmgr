@@ -204,8 +204,6 @@ fn run_via_daemon(
 
     match outcome {
         RunOutcome::Exited(finished) => {
-            // Without these the caller cannot tell cut-short output from the
-            // child's own. The exit code stays the child's.
             let RunLimits {
                 timeout_secs,
                 max_output_bytes: cap,
@@ -225,7 +223,6 @@ fn run_via_daemon(
                 ),
             ];
             for (_, notice) in notices.iter().filter(|(set, _)| *set) {
-                // Best effort: the caller may have closed stderr.
                 let _ = writeln!(err, "passmgr: {notice}");
             }
             Ok(ExitCode::from(status_code(finished.exit)))

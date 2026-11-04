@@ -23,10 +23,6 @@ use crate::text::{escape_quoted, is_hidden_or_reordering};
 /// [`escape_quoted`]) so its own characters cannot forge the error line.
 pub const LABEL_FORBIDDEN_CLASSES: &str = crate::text::HIDDEN_FORBIDDEN_CLASSES;
 
-/// The shape rules every grant obeys, whether `Grant::create` or
-/// `GrantRequest::new` builds it or `Grant::check_stored` reads it back. One
-/// function, so the reader refuses exactly what the writers refuse. Returns
-/// the canonical command list.
 pub(super) fn validate_shape(
     label: &str,
     capabilities: Capabilities,

@@ -364,8 +364,7 @@ fn security_current_status_matches_the_implemented_grant_flow() {
 
 /// TODO 3.9: an attacker who can rewrite the log can also truncate its tail,
 /// and no in-file chain can notice. The limit must stay visible next to the
-/// verifier it qualifies. The chain is unkeyed, so the limit must also not
-/// promise tamper-evidence against a same-user process.
+/// verifier it qualifies.
 #[test]
 fn security_documents_the_audit_tail_limit() {
     let limit = security_limit(8);

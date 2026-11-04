@@ -119,9 +119,8 @@ pub fn run_args(arguments: Option<&Value>, default_cwd: Option<&Path>) -> Result
             return Err(STDIN_UNAVAILABLE.to_owned());
         }
     }
-    // Absent, `null` and `{}` mean "no files". Anything else is refused
-    // rather than ignored, which would run the command without the file the
-    // caller expected.
+    // Anything but absent, `null` or `{}` is refused rather than ignored,
+    // which would run the command without the file the caller expected.
     match object.get("files") {
         None | Some(Value::Null) => {}
         Some(Value::Object(map)) if map.is_empty() => {}
@@ -185,8 +184,6 @@ fn schema_env_name(name: &str) -> bool {
     valid_env_name(name) && !name.chars().any(|character| character.is_ascii_lowercase())
 }
 
-/// The schema check, then `pmd`'s loader/shell-hook denylist, so a name the
-/// daemon would refuse as malformed gets a message naming the variable.
 fn check_env_name(field: &str, name: &str) -> Result<(), String> {
     if !schema_env_name(name) {
         return Err(format!(
@@ -481,7 +478,6 @@ pub fn run_response(outcome: RunOutcome, sink: &RunSink) -> Value {
     }
 }
 
-/// The run refusals whose metadata-tool wording would mislead.
 fn run_error(error: ResponseError) -> String {
     match error {
         ResponseError::Denied => "the daemon denied this run: the grant is not active (it may be \

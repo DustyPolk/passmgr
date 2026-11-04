@@ -169,9 +169,6 @@ fn every_secret_is_injected_and_plain_env_is_not_redacted() {
 
 #[test]
 fn the_injected_variable_is_the_only_secret_and_the_env_is_not_inherited() {
-    // PASSMGR_RUNNER_TEST_ONLY is in the daemon-side environment `inherited()`
-    // filters, but not on the allowlist, so it must not reach the child; only
-    // the allowlist and the injected name do.
     let (frames, result) = collect(
         &[
             "/bin/sh",

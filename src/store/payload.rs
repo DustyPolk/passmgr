@@ -293,8 +293,6 @@ fn encode_grant(out: &mut Vec<u8>, grant: &StoredGrant) {
     }
 }
 
-/// `error` picks the variant: a value being written is invalid input, one
-/// read back from the vault is a malformed vault.
 fn validate_timestamps(timestamps: Timestamps, error: fn(String) -> Error) -> Result<()> {
     for (name, value) in [
         ("created", timestamps.created),
@@ -632,7 +630,6 @@ fn decode_grant(cursor: &mut Cursor<'_>) -> Result<Grant> {
     .map_err(|err| Error::MalformedVault(err.to_string()))
 }
 
-/// Read a count-prefixed list of at most `max` items, refusing a duplicate.
 fn read_distinct<'a, T: Clone + Eq + Hash>(
     cursor: &mut Cursor<'a>,
     what: &str,

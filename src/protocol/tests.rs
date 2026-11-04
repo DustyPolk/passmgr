@@ -774,8 +774,6 @@ fn run_fields_are_validated() {
             command: vec!["/bin/true".into(), "x".repeat(MAX_ARG_BYTES + 1)],
             ..base.clone()
         },
-        // `execve` takes C strings: an argument with a NUL would fail the
-        // spawn after the grant use is already spent.
         RunRequest {
             limits: Default::default(),
             command: vec!["/bin/echo".into(), "a\0b".into()],

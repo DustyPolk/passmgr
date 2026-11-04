@@ -148,7 +148,6 @@ fn is_unreserved(byte: u8) -> bool {
 mod tests {
     use super::*;
 
-    /// The variants as plain slices, for comparison against literals.
     fn plain(variants: &[Zeroizing<Vec<u8>>]) -> Vec<&[u8]> {
         variants.iter().map(|variant| variant.as_slice()).collect()
     }

@@ -784,8 +784,6 @@ pub(crate) fn parse_generate(args: Vec<OsString>) -> Result<Command, String> {
     Ok(Command::Generate(GenerateOptions { preset, length }))
 }
 
-/// `--strong`, `--simple`, `--pin` and `--length`, shared by every command
-/// that generates a password. The last preset given wins.
 #[derive(Default)]
 struct PasswordFlags {
     preset: Option<Preset>,
@@ -793,8 +791,6 @@ struct PasswordFlags {
 }
 
 impl PasswordFlags {
-    /// Consume `text` when it is one of these flags and return how many
-    /// arguments it used, or `None` when it is some other argument.
     fn take(
         &mut self,
         args: &[OsString],
@@ -817,8 +813,6 @@ impl PasswordFlags {
         Ok(Some(1))
     }
 
-    /// The preset and length to generate with. Given without `--generate`
-    /// they would be ignored while a password is prompted for instead.
     fn resolve(self, generate: bool) -> Result<(Preset, usize), String> {
         if !generate && (self.preset.is_some() || self.length.is_some()) {
             return Err(

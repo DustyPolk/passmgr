@@ -57,7 +57,6 @@ pub(crate) fn command_unlock(
     // whose daemon lost that race must not replace or delete the winner's
     // file. The rename replaces any stale file from an earlier session.
     if let Err(error) = passmgr::session::store(&runtime, &token) {
-        // Nobody could reach a daemon whose token is nowhere on disk.
         let _ = passmgr::client::lock_with(&runtime, &token);
         return Err(Error::Daemon(format!(
             "could not write the session token file: {error}"
