@@ -1315,7 +1315,7 @@ Rules that apply to every item:
       a set marker still wins over `--agent`. Ran with all five markers set:
       9/9 lib tests pass (both old tests failed before the change).
 
-- [ ] **R.55 `SECURITY.md`'s terminal-safety bullet claims more than the code
+- [x] **R.55 `SECURITY.md`'s terminal-safety bullet claims more than the code
       does, and nothing pins it.**
       `SECURITY.md:50-56` says "Every value passmgr echoes that came from an
       argument ... is rendered with hidden characters (C0/C1 controls, bidi
@@ -1347,6 +1347,17 @@ Rules that apply to every item:
       R.48 is open, that the doc does not claim every echoed argv value is
       escaped; the per-site behavior stays proven by
       `tests/cli_args_escape.rs`.
+      Done: R.48 landed before this item (validate_service/validate_username
+      refuse the whole hidden table; stored names are escaped where printed),
+      so the finding's premise was stale and the narrowing was not needed.
+      Instead the bullet now states the universal rule, names the validation
+      half (new names, usernames, grant labels, commands, tags and field names
+      are refused) and the legacy half (an older vault may hold one and it is
+      escaped), keeps the double-escape backstop, says `--json` is a data
+      channel, and adds `--out` to the echoed argv values. The new
+      `tests/docs.rs` test pins those clauses in that section; it fails on the
+      old wording and on deleting the backstop sentence. Per-site behavior is
+      still `tests/cli_args_escape.rs`.
 
 - [ ] **R.58 R.39 is marked done with "retry loop gone", but the retry loop is
       still there.** `TODO.md:881` says `record_use` changed with "(retry loop

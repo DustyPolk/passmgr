@@ -1,3 +1,31 @@
+## 2026-11-04 — Widen and pin the terminal-safety claim now that R.48 landed (TODO R.55)
+
+- R.55's premise was stale: R.48 landed first. `store::validate_service`/
+  `validate_username` refuse the whole hidden table (`src/text.rs`) and every
+  human-facing line escapes a stored name, so the universal claim in
+  `SECURITY.md` is true again. Confirmed on the built binary: `add` with
+  U+202E exits 2 before any prompt; the old "narrow it" fix was not applied.
+- `SECURITY.md` "What passmgr protects" terminal-safety bullet now says: what
+  is escaped (every error line and every argv value the CLI echoes, now
+  including `--out`; plus stored names in `list`/`get`/`show`/approval
+  summary), that new names/usernames/labels/commands/tags/field names are
+  refused at validation, that a legacy vault may hold one and it is escaped
+  where printed, that the CLI printer escapes an error line twice, and that
+  `--json` is a data channel that keeps stored bytes.
+- `tests/docs.rs::security_documents_terminal_safety_for_its_own_output` pins
+  those clauses inside `## What passmgr protects` only (R.5's lesson), so an
+  unrelated sentence cannot satisfy it. Mutation-checked: replacing the
+  backstop sentence with "escapes errors" fails it; the old bullet fails it.
+  Per-site behavior still lives in `tests/cli_args_escape.rs`.
+- `DECISIONS.md` records that the bullet is doc-test-pinned (not a new policy:
+  the existing escaping rules are unchanged).
+- Gate: fmt, clippy, full `cargo test` green; `cargo audit` skipped.
+- **Next iteration must know:** next unchecked item is R.58 (`record_use`'s
+  three-attempt loop vs R.39's "retry loop gone" claim). The loop is real and
+  every attempt reads under the lock, so the failure it describes (double
+  increment after a post-rename save error) is live; decide delete vs
+  document before touching `src/daemon/run.rs`.
+
 ## 2026-11-03 — Make the agent-source unit tests independent of inherited markers (TODO R.52)
 
 - `src/agent.rs`: `agent_source(agent_flag)` now delegates to a private

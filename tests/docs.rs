@@ -119,6 +119,34 @@ fn security_documents_the_proc_environ_limit() {
     );
 }
 
+/// TODO R.55: the terminal-safety bullet is the claim a reviewer trusts before
+/// pasting a `pm://` reference out of a `list` line. R.48 landed (new names are
+/// refused, stored ones escaped), so the universal form is allowed again -- but
+/// only if the bullet keeps both halves and the backstop, and only inside the
+/// section that makes the promise, so an unrelated sentence elsewhere cannot
+/// satisfy it (the failure recorded as TODO R.5). The per-site behavior is
+/// proven by `tests/cli_args_escape.rs`; this pins the claim itself.
+#[test]
+fn security_documents_terminal_safety_for_its_own_output() {
+    let protections = markdown_section(SECURITY, "## What passmgr protects")
+        .expect("SECURITY.md must keep a What passmgr protects section");
+    for phrase in [
+        "written as visible \\u{..} escapes",
+        "every error line and every argv value the CLI echoes",
+        "stored names printed by list, get, show and the grant approval summary",
+        "refused at validation",
+        "a vault written by an earlier build may hold one",
+        "escapes every error line again as a backstop",
+        "cannot emit an OSC 52 clipboard write or erase the line it is printed on",
+        "--json is a data channel, not a terminal",
+    ] {
+        assert!(
+            protections.contains(phrase),
+            "SECURITY.md What passmgr protects must keep the terminal-safety claim: {phrase}"
+        );
+    }
+}
+
 /// TODO R.38: the run's process group is killed when the run ends, but a
 /// descendant that starts a new session escapes that cleanup. Both the
 /// mitigation and the accepted gap belong in limit 1, next to the

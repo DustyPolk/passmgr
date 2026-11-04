@@ -730,6 +730,11 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   terminal. `tests/cli_args_escape.rs` drives the real binary with an OSC 52
   payload in `--env` name/reference, `--ref`, `--expires`, `--length`, an
   unknown flag and `--db`, and fails on any raw ESC/BEL in either stream.
+  `SECURITY.md`'s terminal-safety bullet itself is pinned by a `tests/docs.rs`
+  test scoped to `## What passmgr protects` (TODO R.55): it must say what is
+  escaped, that new names are refused at validation (R.48), that a legacy
+  stored name is escaped where printed, and that an error line is escaped
+  twice.
 - The strict identity rule lives at the boundary, the tolerant one at the
   reader (TODO R.48). `store::validate_service`/`validate_username` refuse the
   whole hidden table and the value they reject is not echoed (the error names
