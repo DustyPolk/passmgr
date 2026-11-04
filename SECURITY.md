@@ -298,12 +298,21 @@ file, leaves a chain that verifies. An attacker running as the same user can
 do either; so can a crash before `fsync`, which is why a write failure is
 reported rather than hidden.
 
-Detecting this needs an anchor outside the file the attacker can rewrite --
+The chain is also unkeyed: `prev` is a plain SHA-256 of the line before it, so
+anyone who can write the file can compute it. A same-user process can edit,
+insert or delete a record anywhere in the log and recompute every later
+`prev`, and the result verifies. The chain detects accidental damage and naive
+edits (a record changed by hand, a line lost or reordered), not a writer that
+rewrites the chain from its edit onward. A key would not change this: it would
+have to live where the same user can read it.
+
+Detecting either needs an anchor outside the file the attacker can rewrite --
 a remote log, a monotonic counter in protected storage, or a hardware root of
 trust. passmgr has no network and no such storage, so this is accepted. Treat
-`pm audit verify` as tamper-evidence for the records that remain, not proof
-that nothing was removed. Keep the log on a filesystem the attacker cannot
-roll back (limit 7 is the same class of problem).
+`pm audit verify` as a check against accidental damage and naive edits, not as
+tamper-evidence against a same-user process and not as proof that nothing was
+removed. Keep the log on a filesystem the attacker cannot roll back (limit 7
+is the same class of problem).
 
 ### 9. Out of scope
 
