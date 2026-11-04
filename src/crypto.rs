@@ -21,7 +21,7 @@
 
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use getrandom::fill;
 use zeroize::Zeroizing;
 
@@ -225,9 +225,10 @@ fn derive_key(
         Some(KEY_LEN),
     )
     .map_err(|err| Error::Crypto(format!("invalid Argon2 parameters: {err}")))?;
+    let mut blocks = Zeroizing::new(vec![Block::default(); argon_params.block_count()]);
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon_params);
     argon
-        .hash_password_into(password.as_bytes(), salt, out)
+        .hash_password_into_with_memory(password.as_bytes(), salt, out, blocks.as_mut_slice())
         .map_err(|err| Error::Crypto(format!("key derivation failed: {err}")))?;
     Ok(())
 }
@@ -475,10 +476,19 @@ mod tests {
 
     static CANARY_RELEASES: AtomicUsize = AtomicUsize::new(0);
 
+    /// Argon2 memory cost used by the wipe test. Nothing else in the crate
+    /// allocates exactly `WATCHED_KDF_KIB * 1024` bytes, so a freed block of
+    /// that size is the KDF's working memory.
+    const WATCHED_KDF_KIB: u32 = 8200;
+    const WATCHED_KDF_BYTES: usize = WATCHED_KDF_KIB as usize * 1024;
+
+    static UNWIPED_KDF_RELEASES: AtomicUsize = AtomicUsize::new(0);
+
     /// A pass-through allocator that records when a freed block still starts
-    /// with [`OVERSIZED_CANARY`]. A buffer dropped without being wiped is the
-    /// only way those bytes reach `dealloc`, so this observes the property
-    /// that no test can see through the public API.
+    /// with [`OVERSIZED_CANARY`], or is Argon2 working memory that still holds
+    /// nonzero bytes. A buffer dropped without being wiped is the only way
+    /// those bytes reach `dealloc`, so this observes the property that no test
+    /// can see through the public API.
     struct CanaryWatcher;
 
     // SAFETY: every method forwards to `System` with the caller's layout; the
@@ -496,6 +506,13 @@ mod tests {
             let start = unsafe { std::slice::from_raw_parts(ptr, len) };
             if start.iter().eq(OVERSIZED_CANARY.iter()) {
                 CANARY_RELEASES.fetch_add(1, Ordering::SeqCst);
+            }
+            if layout.size() == WATCHED_KDF_BYTES {
+                // SAFETY: as above, for the whole block.
+                let block = unsafe { std::slice::from_raw_parts(ptr, layout.size()) };
+                if block.iter().any(|&byte| byte != 0) {
+                    UNWIPED_KDF_RELEASES.fetch_add(1, Ordering::SeqCst);
+                }
             }
             // SAFETY: `ptr` and `layout` are the caller's deallocation.
             unsafe { System.dealloc(ptr, layout) }
@@ -588,6 +605,26 @@ mod tests {
             "the oversized decrypted plaintext was freed without being wiped"
         );
     }
+
+    #[test]
+    fn argon2_working_memory_is_wiped_before_it_is_freed() {
+        let params = KdfParams::new(WATCHED_KDF_KIB, 1, 1);
+        let mut key = [0u8; KEY_LEN];
+        derive_key("correct horse", &[3u8; SALT_LEN], params, &mut key).unwrap();
+        assert_ne!(key, [0u8; KEY_LEN], "the KDF ran");
+        assert_eq!(
+            UNWIPED_KDF_RELEASES.load(Ordering::SeqCst),
+            0,
+            "Argon2 working memory was freed without being wiped"
+        );
+    }
+
+    // The `aes` dependency exists only to turn on this feature; `Aes256Gcm`
+    // holds an `aes::Aes256` key schedule that is wiped on drop only with it.
+    const _: fn() = || {
+        fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+        wiped_on_drop::<aes::Aes256>();
+    };
 
     #[test]
     fn reencrypting_with_the_key_keeps_salt_and_params_but_not_the_nonce() {
