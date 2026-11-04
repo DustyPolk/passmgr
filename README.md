@@ -227,7 +227,10 @@ Daemon-backed runs are bounded: the request carries `timeout_secs` (default
 past its deadline has its whole process group killed (SIGTERM, then SIGKILL
 after 2 s), and output past the cap is dropped after redaction with
 `stdout_truncated`/`stderr_truncated` set in the terminal frame; the daemon
-keeps draining both pipes so the child cannot block. The local human run above
+keeps draining both pipes so the child cannot block. `passmgr run` reports each
+limit it hit with one `passmgr:` line on stderr (for example `passmgr: standard
+output hit the 262144-byte cap and was truncated`) and still exits with the
+child's status. The local human run above
 is not bounded: it relays exactly what the terminal would.
 
 `passmgr` exits with the child's status, or 128+N when the child was killed by

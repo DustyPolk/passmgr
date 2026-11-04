@@ -201,12 +201,35 @@ fn run_via_daemon(
         }
         Err(error) => return Err(error),
     };
-    // Release the locks before returning to the dispatch loop.
-    drop(out);
-    drop(err);
 
     match outcome {
-        RunOutcome::Exited(finished) => Ok(ExitCode::from(status_code(finished.exit))),
+        RunOutcome::Exited(finished) => {
+            // Without these the caller cannot tell cut-short output from the
+            // child's own. The exit code stays the child's.
+            let RunLimits {
+                timeout_secs,
+                max_output_bytes: cap,
+            } = request.limits;
+            let notices = [
+                (
+                    finished.timed_out,
+                    format!("the command hit the {timeout_secs} s time limit and was killed"),
+                ),
+                (
+                    finished.stdout_truncated,
+                    format!("standard output hit the {cap}-byte cap and was truncated"),
+                ),
+                (
+                    finished.stderr_truncated,
+                    format!("standard error hit the {cap}-byte cap and was truncated"),
+                ),
+            ];
+            for (_, notice) in notices.iter().filter(|(set, _)| *set) {
+                // Best effort: the caller may have closed stderr.
+                let _ = writeln!(err, "passmgr: {notice}");
+            }
+            Ok(ExitCode::from(status_code(finished.exit)))
+        }
         RunOutcome::Refused(error) => Err(refusal(error, &reference)),
     }
 }

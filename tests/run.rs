@@ -500,6 +500,33 @@ fn run_propagates_the_child_exit_status() {
 }
 
 #[test]
+fn run_says_on_stderr_when_relayed_output_hit_its_cap() {
+    let daemon = Daemon::start();
+    // 400000 bytes on each stream, well past the 256 KiB default cap.
+    let output = run(
+        &daemon,
+        &[
+            "run",
+            "--env",
+            &env_argument(&daemon, "API_KEY"),
+            "--",
+            "/bin/sh",
+            "-c",
+            "head -c 400000 /dev/zero; head -c 400000 /dev/zero >&2; exit 3",
+        ],
+    );
+    let cap = passmgr::protocol::DEFAULT_RUN_OUTPUT_BYTES as usize;
+    // The child's status is kept: the notice must not mask it.
+    assert_eq!(output.status.code(), Some(3), "{:?}", output.status);
+    assert_eq!(output.stdout.len(), cap);
+    let stderr = stderr_text(&output);
+    for stream in ["standard output", "standard error"] {
+        let notice = format!("passmgr: {stream} hit the {cap}-byte cap and was truncated");
+        assert!(stderr.contains(&notice), "missing {notice:?}");
+    }
+}
+
+#[test]
 fn run_reports_a_signal_as_128_plus_the_signal() {
     let daemon = Daemon::start();
     let output = run(
