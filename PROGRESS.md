@@ -1,3 +1,43 @@
+## 2026-11-04 — Review of `47c64ac..7fd2997`
+
+- 7 findings: **2 Medium, 0 High, 5 Low**. Categories: audit
+  fail-closed/record integrity (R.68, R.73), missing security test (R.69),
+  MCP audit input (R.70), grant-file doc drift (R.71), doc wording (R.72),
+  terminal escaping (R.74).
+- Medium R.68: a `run` whose audit append fails *after* the startup
+  preflight still injects the secret, consumes the grant use and reports
+  `Exit(0)` (pmd and local `pm run`); confirmed in a scratch copy with a
+  child that `chmod 0400`s the audit file. Contradicts `SECURITY.md` and
+  `DECISIONS.md`. The only existing test covers the preflight failure.
+- Medium R.69: `MCP.md:33-35` requires a source-grep test proving `mcp`
+  cannot reach reveal/clipboard; it was never written (TODO 4.3 is checked
+  off), so a High-class property rests on prose. No current leak:
+  `tools/call` is `-32601`.
+- Low: R.70 audited client name is unsanitized and replaceable mid-session;
+  R.71 grant-file code accepts modes `MCP.md` says are refused and
+  `trim_end()` whitespace; R.72 `DECISIONS.md` says the audit reader rejects
+  control characters when only `ref` is checked; R.73 the audit canary
+  test's "no secret" assertion (`!text.contains("grant_token")`) cannot
+  fail; R.74 `pmd` prints an `AuditError` path derived from `XDG_STATE_HOME`
+  without `escape_hidden`.
+- Looked at and judged fine (do not redo): grant-file reading
+  (`O_NOFOLLOW`, fstat-on-fd, owner/regular-file checks, no content in
+  errors, zeroized token read); `mcp serve` refusing `--db`/`PASSMGR_DB`
+  before reading a line and never falling back to the local vault path;
+  local `run`'s TTY gate (stdin+stdout terminal, agent flag/markers) and
+  its master-password prompt; `GrantToken`/`Server` `Debug` redaction and
+  zeroizing; JSON-RPC line reader over-long-line accounting/resync and
+  empty-line handling; no request-smuggling via `\r\n` or multiple objects
+  per line; `tools/call` still `-32601` so no tool argument is dereferenced;
+  audit reader schema/chain/torn/64 MiB handling and `select` tail
+  filtering; `pm audit`/`audit verify` escaping and the one-record-per-run
+  chaining tests; `src/timestamp.rs` panic-free parsing; R.58/R.60/R.61 and
+  R.64–R.66 tests are genuine. `serve_run`'s invalid-`ref` branch is
+  unreachable because `src/protocol/mod.rs:552` validates references during
+  decode (scratch test confirmed), so it is defensive only.
+- No code, test or doc files were changed; the scratch experiment ran in a
+  `/tmp` copy with its own target dir.
+
 ## 2026-11-04 — `pm mcp serve` binds the agent's grant file (TODO 4.4a)
 
 - Split TODO 4.4 into 4.4a–4.4e (binding, daemon list, daemon describe, MCP

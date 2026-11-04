@@ -9,6 +9,57 @@ Rules that apply to every item:
   absent from stdout, stderr and logs).
 - No new network-capable dependency. Justify any new dependency in `PROGRESS.md`.
 
+## Phase R — review findings (fix first)
+
+Confirmed defects from the review of `47c64ac..7fd2997` (see `PROGRESS.md`).
+Fix these before the feature phases below; most severe first.
+
+- [ ] **R.68 (Medium) A run whose audit record cannot be written still
+      succeeds, injects the secret and consumes the use.**
+      `src/daemon/run.rs:93` refuses the run when `audit::check_writable`
+      fails, but the `record` closure at `src/daemon/run.rs:105-120` only
+      `eprintln!`s an `append` failure and every branch continues; the allowed
+      branch records and then sends `RunFrame::Exit(exit)`
+      (`src/daemon/run.rs:248-255`). `src/cli/run.rs:254` has the same shape
+      for the local path (the human sees a warning, the exit status is still
+      0).
+      Failure: the log or its directory becomes unwritable between the
+      preflight and the append (a chmod from the child, a full disk, an fsync
+      error, or the file replaced by a directory). The secret is injected, the
+      grant use is consumed, the client is told `Exit(0)`, and no record
+      exists. `pmd`'s stderr is not relayed to the MCP client, so an agent sees
+      a normal success. This contradicts `SECURITY.md` ("Every `run` that
+      reaches `pmd` appends one metadata-only record") and `DECISIONS.md`'s
+      "a run whose audit record cannot be written is refused before
+      decryption or spawn". Confirmed in a scratch copy: a child that
+      `chmod 0400`ed the audit file produced `[RunFrame::Exit(Code(0))]` and an
+      empty log. The existing test
+      `tests/audit.rs::a_run_is_refused_when_the_audit_log_cannot_be_written`
+      only exercises the preflight.
+      Fix: make the append's error a failure of the run (error frame instead of
+      `Exit`, non-zero exit for the local path) instead of a warning.
+      Test: fail the append *after* the preflight (a test seam, or a
+      chmod/removal race driven by the child) and assert the client never
+      receives `Exit(0)`, the local command exits non-zero, and stderr names
+      the audit log.
+
+- [ ] **R.69 (Medium) The "reveal/clipboard cannot be reached from `mcp`"
+      guard has no test.** `MCP.md:33-35` requires a test that greps the `mcp`
+      module sources for `reveal`/`clipboard` calls, so a future change cannot
+      quietly add one. No such test exists: `grep -rn "reveal\|clipboard"
+      src/mcp/` finds only prose in `src/mcp/mod.rs:15`, a tool description in
+      `src/mcp/tools.rs:348`, and name-based checks in
+      `src/mcp/tools/tests.rs:60` and `src/mcp/server/tests.rs:206`. TODO 4.3 is
+      checked off and its `PROGRESS.md` entry admits the grep test is missing,
+      so the only protection for a High-class property is a comment. Every
+      later MCP item (4.4+, 4.5, 4.11) adds code in this module.
+      Fix: add the source-grep test over all files under `src/mcp/` (allow the
+      tool-description string and the test itself by matching call/import
+      shapes such as `reveal(`, `::reveal`, `clipboard` on a non-comment
+      line).
+      Test: the grep test must fail on a scratch copy with one added
+      `crate::reveal::…` reference, and pass on the real tree.
+
 ## Phase 4 — MCP server (`pm mcp serve`)
 
 Implement `MCP.md`. Do not use an MCP SDK: write a small, synchronous
@@ -394,6 +445,70 @@ are done. Work them in order like any other item.
       Test: unit-test `check_grant_examples` directly — prose only must return
       0; a quoted runner example without `--allow-interpreter` must fail
       (`#[should_panic]`); the real README/`--help` must still be accepted.
+
+- [ ] **R.70 (Low) The audited MCP client name is unsanitized and can change
+      mid-session.** `src/mcp/era.rs:106` stores `client_name`; `admit`
+      overwrites it from any request's `_meta.clientInfo`
+      (`src/mcp/era.rs:119-144`), and `client_info_name`
+      (`src/mcp/era.rs:374-388`) only checks 1..=`MAX_CLIENT_NAME_BYTES` (128),
+      not control/bidi characters. `MCP.md` says the name is kept for the
+      audit record (4.11), and agent text is meant to be sanitized and
+      labelled. No output uses it yet, hence Low.
+      Failure: a client initializes as one name and every later request
+      re-labels it (or carries bidi/control characters), so the record can
+      name a different client than the one that connected.
+      Fix: keep the first name (or record one per request) and sanitize it with
+      the same control/bidi rules as other agent text.
+      Test: a second `_meta` name does not replace the first, and a name with
+      control/bidi characters is rejected or stripped.
+
+- [ ] **R.71 (Low) The grant-file mode check is looser than `MCP.md` says, and
+      trailing whitespace is accepted.** `MCP.md:340-343` says "no group or
+      world permission bits (0600 or 0400 in practice)", but
+      `src/grant/file.rs:111` only requires `mode & 0o077 == 0`, so 0700/0500
+      (or 0100) are accepted, and `src/grant/file.rs:140` uses `trim_end()`, so
+      a token followed by several newlines and spaces is accepted instead of
+      exactly one trailing newline. No live exposure (the token still comes
+      from a user-owned regular file), but doc and code disagree about what is
+      refused.
+      Fix: either tighten the check to 0600/0400 and one newline, or widen the
+      wording; state the accepted set in one place.
+      Test: 0600 and 0400 are accepted, 0722 is refused, whatever set is
+      chosen is asserted, and trailing whitespace is handled as documented.
+
+- [ ] **R.72 (Low) `DECISIONS.md` overstates the audit reader's
+      control-character check.** `DECISIONS.md:856-859` says a control
+      character is "a broken chain, not a skipped line", but
+      `src/audit/read.rs:187` rejects control characters only in `ref`.
+      `command`/`args` keep them (the writer JSON-escapes them on purpose; see
+      `src/audit.rs:599`). Wording only; no behavior change is wanted.
+      Fix: name `ref` in that sentence and note that control characters in the
+      other fields are escaped, not rejected.
+
+- [ ] **R.73 (Low) The audit-writer canary test cannot fail on the check its
+      name claims.** `src/audit.rs:628`
+      `appends_chain_records_and_never_leave_a_secret` asserts the canary IS
+      present (as an argv canary) and its only negative "no secret" assertion
+      is `assert!(!text.contains("grant_token"))` (`src/audit.rs:665`), a
+      schema key that cannot appear. So it does not prove that no field other
+      than the intentional argv canary carries a secret.
+      Fix: assert the canary appears exactly in `args` and nowhere else —
+      parse the record, remove `args`, and assert the rest contains neither
+      the canary nor the other injected secrets — or rename the test if that
+      is not the intent.
+
+- [ ] **R.74 (Low) `pmd` prints an audit path with unescaped hidden
+      characters.** The new `AuditError` Display arms at `src/audit.rs:513` and
+      `src/audit.rs:516` use `path.display()`, and
+      `src/daemon/run.rs:94`/`src/daemon/run.rs:119` print the `AuditError`
+      directly, so a path derived from `XDG_STATE_HOME` with control/bidi
+      characters reaches `pmd`'s terminal unescaped. The local path is safe
+      because it wraps the text in `Error::Refused`, whose Display calls
+      `escape_hidden`. Only same-user environment control, hence Low.
+      Fix: escape the path inside `AuditError`'s Display (or format with
+      `escape_hidden`).
+      Test: a state directory containing a newline and an ESC byte yields one
+      line of `pmd` stderr with no raw control bytes.
 
 ## Phase 9 — hardening
 
