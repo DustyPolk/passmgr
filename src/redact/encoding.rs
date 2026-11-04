@@ -15,6 +15,12 @@
 //! The list is fixed and small. A tool that prints some other transform
 //! (base32, a hash, a different case, a partially quoted copy, compressed
 //! bytes) still leaks; see `SECURITY.md`. Redaction is best-effort by design.
+//!
+//! Every encoded form is as sensitive as the secret itself (each decodes to
+//! it), so every buffer here is [`Zeroizing`], the ones [`variants`] drops as
+//! duplicates included.
+
+use zeroize::Zeroizing;
 
 /// One textual encoding of a byte string.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +59,7 @@ const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
 
 impl Encoding {
     /// Encode `secret` in this form. The output is always ASCII.
-    pub fn encode(self, secret: &[u8]) -> Vec<u8> {
+    pub fn encode(self, secret: &[u8]) -> Zeroizing<Vec<u8>> {
         match self {
             Encoding::HexLower => hex(secret, HEX_LOWER),
             Encoding::HexUpper => hex(secret, HEX_UPPER),
@@ -73,11 +79,11 @@ impl Encoding {
 /// and a value made only of RFC 3986 unreserved characters percent-encodes to
 /// itself (which is why a form equal to the raw secret is not returned — the
 /// caller already covers the raw value). An empty secret yields no variants.
-pub fn variants(secret: &[u8]) -> Vec<Vec<u8>> {
-    let mut out: Vec<Vec<u8>> = Vec::with_capacity(ALL.len());
+pub fn variants(secret: &[u8]) -> Vec<Zeroizing<Vec<u8>>> {
+    let mut out: Vec<Zeroizing<Vec<u8>>> = Vec::with_capacity(ALL.len());
     for encoding in ALL {
         let encoded = encoding.encode(secret);
-        if encoded == secret || out.contains(&encoded) {
+        if encoded.as_slice() == secret || out.contains(&encoded) {
             continue;
         }
         out.push(encoded);
@@ -85,8 +91,8 @@ pub fn variants(secret: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-fn hex(secret: &[u8], digits: &[u8; 16]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(secret.len() * 2);
+fn hex(secret: &[u8], digits: &[u8; 16]) -> Zeroizing<Vec<u8>> {
+    let mut out = Zeroizing::new(Vec::with_capacity(secret.len() * 2));
     for byte in secret {
         out.push(digits[usize::from(byte >> 4)]);
         out.push(digits[usize::from(byte & 0x0f)]);
@@ -94,8 +100,8 @@ fn hex(secret: &[u8], digits: &[u8; 16]) -> Vec<u8> {
     out
 }
 
-fn base64(secret: &[u8], alphabet: &[u8; 64], pad: bool) -> Vec<u8> {
-    let mut out = Vec::with_capacity(secret.len().div_ceil(3) * 4);
+fn base64(secret: &[u8], alphabet: &[u8; 64], pad: bool) -> Zeroizing<Vec<u8>> {
+    let mut out = Zeroizing::new(Vec::with_capacity(secret.len().div_ceil(3) * 4));
     for chunk in secret.chunks(3) {
         let first = u32::from(chunk[0]);
         let second = chunk.get(1).copied().map_or(0, u32::from);
@@ -117,8 +123,10 @@ fn base64(secret: &[u8], alphabet: &[u8; 64], pad: bool) -> Vec<u8> {
     out
 }
 
-fn percent(secret: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(secret.len());
+fn percent(secret: &[u8]) -> Zeroizing<Vec<u8>> {
+    // Sized for the worst case up front: a reallocation would leave an
+    // unwiped copy of the prefix behind.
+    let mut out = Zeroizing::new(Vec::with_capacity(secret.len() * 3));
     for byte in secret {
         if is_unreserved(*byte) {
             out.push(*byte);
@@ -139,6 +147,11 @@ fn is_unreserved(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The variants as plain slices, for comparison against literals.
+    fn plain(variants: &[Zeroizing<Vec<u8>>]) -> Vec<&[u8]> {
+        variants.iter().map(|variant| variant.as_slice()).collect()
+    }
 
     fn hex_digit(byte: u8) -> u8 {
         match byte {
@@ -214,47 +227,47 @@ mod tests {
 
     #[test]
     fn hex_vectors_cover_both_digit_cases() {
-        assert_eq!(Encoding::HexLower.encode(b"abc"), b"616263");
-        assert_eq!(Encoding::HexUpper.encode(b"abc"), b"616263");
+        assert_eq!(*Encoding::HexLower.encode(b"abc"), b"616263");
+        assert_eq!(*Encoding::HexUpper.encode(b"abc"), b"616263");
         assert_eq!(
-            Encoding::HexLower.encode(&[0x0a, 0xfb, 0xff, 0x00]),
+            *Encoding::HexLower.encode(&[0x0a, 0xfb, 0xff, 0x00]),
             b"0afbff00"
         );
         assert_eq!(
-            Encoding::HexUpper.encode(&[0x0a, 0xfb, 0xff, 0x00]),
+            *Encoding::HexUpper.encode(&[0x0a, 0xfb, 0xff, 0x00]),
             b"0AFBFF00"
         );
-        assert_eq!(Encoding::HexLower.encode(b""), b"");
+        assert_eq!(*Encoding::HexLower.encode(b""), b"");
     }
 
     #[test]
     fn base64_vectors_cover_every_padding_length_and_alphabet() {
         // One, two and three bytes past a multiple of three.
-        assert_eq!(Encoding::Base64.encode(b"a"), b"YQ==");
-        assert_eq!(Encoding::Base64NoPad.encode(b"a"), b"YQ");
-        assert_eq!(Encoding::Base64.encode(b"ab"), b"YWI=");
-        assert_eq!(Encoding::Base64NoPad.encode(b"ab"), b"YWI");
-        assert_eq!(Encoding::Base64.encode(b"abc"), b"YWJj");
-        assert_eq!(Encoding::Base64NoPad.encode(b"abc"), b"YWJj");
+        assert_eq!(*Encoding::Base64.encode(b"a"), b"YQ==");
+        assert_eq!(*Encoding::Base64NoPad.encode(b"a"), b"YQ");
+        assert_eq!(*Encoding::Base64.encode(b"ab"), b"YWI=");
+        assert_eq!(*Encoding::Base64NoPad.encode(b"ab"), b"YWI");
+        assert_eq!(*Encoding::Base64.encode(b"abc"), b"YWJj");
+        assert_eq!(*Encoding::Base64NoPad.encode(b"abc"), b"YWJj");
         // 0xfb 0xff selects index 62 and 63, the only two positions where the
         // standard and URL-safe alphabets differ.
-        assert_eq!(Encoding::Base64.encode(&[0xfb, 0xff]), b"+/8=");
-        assert_eq!(Encoding::Base64Url.encode(&[0xfb, 0xff]), b"-_8=");
-        assert_eq!(Encoding::Base64UrlNoPad.encode(&[0xfb, 0xff]), b"-_8");
-        assert_eq!(Encoding::Base64.encode(b""), b"");
+        assert_eq!(*Encoding::Base64.encode(&[0xfb, 0xff]), b"+/8=");
+        assert_eq!(*Encoding::Base64Url.encode(&[0xfb, 0xff]), b"-_8=");
+        assert_eq!(*Encoding::Base64UrlNoPad.encode(&[0xfb, 0xff]), b"-_8");
+        assert_eq!(*Encoding::Base64.encode(b""), b"");
     }
 
     #[test]
     fn percent_encoding_follows_rfc3986() {
         assert_eq!(
-            Encoding::Percent.encode(b"abcXYZ019-._~"),
+            *Encoding::Percent.encode(b"abcXYZ019-._~"),
             b"abcXYZ019-._~",
             "unreserved characters stay literal"
         );
-        assert_eq!(Encoding::Percent.encode(b"a b"), b"a%20b");
-        assert_eq!(Encoding::Percent.encode(b"%"), b"%25");
-        assert_eq!(Encoding::Percent.encode(b"\xff\xfe\x00"), b"%FF%FE%00");
-        assert_eq!(Encoding::Percent.encode(b""), b"");
+        assert_eq!(*Encoding::Percent.encode(b"a b"), b"a%20b");
+        assert_eq!(*Encoding::Percent.encode(b"%"), b"%25");
+        assert_eq!(*Encoding::Percent.encode(b"\xff\xfe\x00"), b"%FF%FE%00");
+        assert_eq!(*Encoding::Percent.encode(b""), b"");
     }
 
     #[test]
@@ -262,15 +275,15 @@ mod tests {
         let secret = [0x0a, 0xfb, 0xff, 0x00];
         let variants = variants(&secret);
         assert_eq!(
-            variants,
-            vec![
-                b"0afbff00".to_vec(),
-                b"0AFBFF00".to_vec(),
-                b"Cvv/AA==".to_vec(),
-                b"Cvv/AA".to_vec(),
-                b"Cvv_AA==".to_vec(),
-                b"Cvv_AA".to_vec(),
-                b"%0A%FB%FF%00".to_vec(),
+            plain(&variants),
+            [
+                &b"0afbff00"[..],
+                b"0AFBFF00",
+                b"Cvv/AA==",
+                b"Cvv/AA",
+                b"Cvv_AA==",
+                b"Cvv_AA",
+                b"%0A%FB%FF%00",
             ]
         );
     }
@@ -281,13 +294,13 @@ mod tests {
         // and unpadded base64 are identical (the length is divisible by
         // three), and percent-encoding is the raw secret, which must not be
         // repeated.
-        assert_eq!(variants(b"abc"), vec![b"616263".to_vec(), b"YWJj".to_vec()]);
+        assert_eq!(plain(&variants(b"abc")), [&b"616263"[..], b"YWJj"]);
 
         // A hyphen is unreserved too, so the percent form again equals the
         // raw secret while the other forms differ.
         let secret = b"a-b";
         let variants = variants(secret);
-        assert!(variants.iter().all(|variant| variant != secret));
+        assert!(variants.iter().all(|variant| variant.as_slice() != secret));
         assert_eq!(variants.len(), 3, "{variants:?}");
     }
 
