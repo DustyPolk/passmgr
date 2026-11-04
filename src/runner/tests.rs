@@ -7,6 +7,10 @@ fn inherited() -> Vec<(OsString, OsString)> {
         (OsString::from("LC_ALL"), OsString::from("C")),
         (OsString::from("LD_PRELOAD"), OsString::from("/tmp/x.so")),
         (OsString::from("UNRELATED"), OsString::from("value")),
+        (
+            OsString::from("PASSMGR_RUNNER_TEST_ONLY"),
+            OsString::from("leaked-if-inherited"),
+        ),
     ])
 }
 
@@ -165,10 +169,9 @@ fn every_secret_is_injected_and_plain_env_is_not_redacted() {
 
 #[test]
 fn the_injected_variable_is_the_only_secret_and_the_env_is_not_inherited() {
-    // SECRET_FROM_TEST is set in this test process but must not reach the
-    // child; only the fixed allowlist and the injected name do.
-    // SAFETY: tests in this module do not read this variable concurrently.
-    unsafe { std::env::set_var("PASSMGR_RUNNER_TEST_ONLY", "leaked-if-inherited") };
+    // PASSMGR_RUNNER_TEST_ONLY is in the daemon-side environment `inherited()`
+    // filters, but not on the allowlist, so it must not reach the child; only
+    // the allowlist and the injected name do.
     let (frames, result) = collect(
         &[
             "/bin/sh",
