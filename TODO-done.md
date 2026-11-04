@@ -2004,3 +2004,184 @@ continuing Phase 3; each names the test that must prove the fix.
       Mutation-checked: dropping the `last_used` term from the accounting makes
       it fail (16 vs 8).
 
+## Phase 3 — grants and audit log
+
+The design for grants, approval and audit lives in `MCP.md` ("Grants and the
+approval flow", "Audit"). Follow it.
+
+- [x] **3.1 Vault write lock.** The CLI and `pmd` will both write the vault.
+      Add an exclusive `flock` on `<vault>.lock` held across every
+      read-modify-write. Test: two concurrent writers both land (no lost
+      update), and a reader never sees a torn file.
+      Done: `Vault::open_for_update`/`open_for_add` take the sidecar lock
+      before reading and hold it until drop; `save` refuses a read-only
+      `Vault`. `add`/`edit`/`delete` use it; reads stay lock-free.
+- [x] **3.2a Grant model and authorization check.** New pure module
+      `src/grant.rs` with the fields per `MCP.md`: id, SHA-256 token hash,
+      label, scope (refs, tags, optional field names), command allowlist,
+      capabilities (`list`, `run`), expires_at, max_uses, uses, created,
+      revoked_at, last_used. Validation for every field, and
+      `Grant::authorizes(&AccessRequest, now) -> Result<(), Denied>` as the
+      single decision point, plus `scope_allows` for list filtering,
+      `mark_used` and `revoke`. Add `sha2` (RustCrypto) for the token hash;
+      `hmac` moves to 3.3 where the presence proof first uses it. No store
+      change yet. Table-driven tests: expired, revoked, used up, missing
+      capability, ref out of scope, tag match, field scope, command not
+      allowed, a known SHA-256 vector, and a redacting `Debug`.
+      Done: model + pure check in `src/grant.rs`, tests in `tests/grant.rs`;
+      `hmac` deferred to 3.3 so no unused dependency lands. Grants are not
+      persisted yet.
+- [x] **3.2b Persist grants in store version 5.** Add the grant list after
+      the credentials in the payload, encode/decode with the same length
+      caps, v5 keeps credentials byte-identical to v4 and earlier versions
+      migrate to an empty grant list. `Vault` gains grant accessors used by
+      `save`. Update `FORMAT.md` and `DECISIONS.md`. Tests: v4 -> v5
+      migration, every older version decodes with no grants, a round trip,
+      duplicate grant ids and a truncated grant record are `MalformedVault`.
+      Note: optional fields are behind a flags byte (not a magic `0`
+      timestamp), and `Vault::add_grant` reports a duplicate id as
+      `InvalidInput` rather than a new error variant.
+- [x] **3.3 Human-presence proof.** Add `hmac` (RustCrypto) here, its first
+      use. Daemon `challenge` request returns a nonce. The CLI answers with
+      `HMAC-SHA256(key, "passmgr-approve-v1" || nonce || digest)`. The daemon
+      verifies in constant time, and a nonce is single-use with a 60 s
+      expiry. Tests: correct proof accepted, wrong key/reused
+      nonce/expired nonce/altered digest rejected. Done: `src/presence.rs`,
+      `challenge`/`prove` requests, `client::challenge`/`client::prove`; the
+      nonce is spent by any attempt and all failures answer `denied`. The
+      master-password prompt and the request digest arrive with 3.4.
+**3.4 `pm grant create`** needs four steps (it was too large for one
+iteration: TTY proof, canonical request, daemon write, token file). Ordered:
+- [x] **3.4a Canonical grant-create request and digest.** New pure module
+      `src/grant/request.rs`: `GrantRequest::new(GrantSpec, TokenHash)`
+      normalizes every field exactly as `Grant::create` will (label, scope,
+      commands, capabilities, expiry shape, max-uses), and `digest()` returns
+      the `presence::RequestDigest` of a length-prefixed encoding
+      (`b"passmgr-grant-create-v1"`, then label, refs, tags, optional fields,
+      commands, capability bits, expiry, optional max-uses, token hash) with a
+      domain separator and big-endian lengths. `create_grant(now)` builds the
+      `Grant` from the normalized fields. The digest covers only what the
+      request writes; id and `created` are assigned at write time and cannot
+      widen access. Tests: reordered/duplicated refs, tags, fields and
+      commands give the same digest; changing any field or the token hash
+      changes it; length-prefix boundaries cannot be shifted (`ab`+`c` vs
+      `a`+`bc`); the canonical form has a pinned hex vector; a RUN request
+      without commands, empty capabilities, `max_uses == 0`, a too-large
+      expiry and a non-UTF-8 command are refused; `create_grant` writes
+      exactly the requested fields; `Debug` redacts the token hash. Done:
+      `src/grant/request.rs`; 7 unit tests plus a public-API test in
+      `tests/grant.rs`; `GrantRequest` is re-exported from `passmgr::grant`.
+- [x] **3.4b Re-encrypt with the unlocked key (no re-salt).**
+      `Vault::save(master_password)` takes a fresh salt, which would make the
+      running daemon's derived key stale after any grant write. Add
+      `crypto::encrypt_with_key(plaintext, key, template_container)`: it first
+      authenticates the template with `key` (so a wrong key can never produce
+      an unopenable vault), then reuses the template header's salt and KDF
+      params with a fresh random nonce and the same AAD. Add
+      `Vault::save_with_key(&self, key)` (refuses a read-only vault; requires
+      the source container; writes atomically). Tests: the result decrypts
+      with the original password, keeps salt/params, uses a new nonce;
+      a wrong key returns `AuthenticationFailed` and writes nothing;
+      `save_with_key` refuses a read-only vault; a grant survives a reopen;
+      the daemon's key still decrypts the saved container.
+      Done: `crypto::encrypt_with_key` authenticates the template with the key
+      before reusing its header, then seals with a fresh nonce and the same
+      salt/params (container assembly is a shared private `seal`, so `encrypt`
+      and `encrypt_with_key` cannot drift). `Vault::save_with_key` refuses a
+      read-only vault and, with `Error::Crypto`, a vault that has no source
+      container to copy the header from. Docs updated in `FORMAT.md` and
+      `README.md`.
+- [x] **3.4c `grant_create` request and daemon handler (TODO R.15b).**
+      Protocol request `{type:"grant_create", label, refs, tags, fields?,
+      commands, capabilities, expires_at, max_uses?, token_hash}` — flat on
+      the request object like `run`, no nested `request` key; `MCP.md` ("The
+      daemon never writes a grant") holds the exact frame body — and response
+      `{type:"grant_approved"}` (no token, hash or grant id in
+      any response; the CLI assigns the id when it writes). The daemon
+      decodes and re-normalizes through `GrantRequest::new`, computes the
+      digest, and calls `presence::Approvals::take` for it. The daemon does
+      not open or write the vault: no request type in `pmd` can create a
+      grant, so an agent that reaches the socket cannot mint one even if an
+      approval were forged. A digest mismatch, an unspent approval, an
+      expired/out-of-range expiry or >30 d lifetime answers
+      `denied`/`bad_request` and writes nothing. Tests: `prove(A)` then
+      `grant_create(B)` is refused; `prove(A)` then `grant_create(A)`
+      succeeds exactly once and a replay is refused; the vault is byte-identical
+      after both; response JSON has no secret material.
+      Done: fields are flat on the request object like `run`, not nested under
+      a `request` key. `GrantRequest::check_approvable` reuses the new
+      `grant::validate_expiry`, so a request no write could accept is
+      `bad_request` and leaves the approval unspent. A hash that is not 64
+      lowercase hex, a bad ref, unknown capability bits, an empty label and
+      `max_uses: 0` are refused at the boundary.
+- [x] **3.4d `pm grant create` CLI** (TTY + master password via the proof,
+      refused in agent context with exit 5). Flags: `--label`, `--ref`/`--tag`
+      (repeatable), `--command PATH` (repeatable; resolved to a canonical
+      path at creation), `--expires 1h|30m|7d` (required, max 30 d),
+      `--max-uses N`, `--allow-interpreter`, `--out FILE`. The CLI builds a
+      `GrantRequest` with a fresh 32-byte token, derives the key once from the
+      password, proves its digest, sends `grant_create`, and only after
+      success opens the vault with that same key (`open_with_key` +
+      `lock_for_update` + `save_with_key`) and writes the grant; it then
+      writes the raw token to `--out` with `O_EXCL` and mode 0600, never to
+      stdout. Before it asks for the proof it must call
+      `Vault::check_grant_writable` on the grant it proposes, so a vault at
+      `MAX_GRANTS` fails with "too many grants" and spends no approval (closes
+      R.22b; tick that item too). Requires a running daemon (`pm unlock`
+      first); it does not auto-unlock in this item. Refuse interpreter
+      commands (a shared pure list in `grant/validate.rs`) without
+      `--allow-interpreter`. Tests: the token is absent from stdout/stderr,
+      the file mode is 0600, an existing `--out` is refused without
+      overwriting, interpreter commands are refused without the flag,
+      agent/TTY refusal exits 5, a full vault sends no `challenge`/`prove`
+      (R.22b), and the daemon is still usable after the write (its key was
+      not invalidated).
+      Done: `--expires` also accepts minutes (`30m`); interpreter refusal and
+      the TTY/agent gate happen before the password prompt; a newly created
+      `--out` is unlinked when a later step fails; `check_grant_writable` runs
+      after key derivation (needed to open the vault) but before `challenge`.
+- [x] **3.5 `pm grant list|show|revoke` (+ `--json`).** list/show print
+      metadata only, never tokens or hashes. revoke needs no password and takes
+      effect on the next request. `revoke --all` exists. Tests for each.
+      Done: revoke goes over the daemon session token (`grant_revoke` /
+      `grant_revoked`) and is one of the daemon's two vault writes (`run`
+      records a use); it refuses
+      `--db`/`PASSMGR_DB` like `run`. list/show read the vault locally with the
+      master password. Enforcement of `revoked_at` by `run` is still 3.6.
+- [x] **3.6 Daemon authorizes by grant.** `run` and every new
+      credential-touching request require a grant token. The unlock session
+      token (2.5) only authorizes `ping`, `lock`, `challenge`, `prove`,
+      `grant_create` and `grant_revoke`; `run` additionally needs a grant
+      token.
+      Record this in `DECISIONS.md`: holding the session file is not enough
+      to use secrets. Tests: session token refused for `run`, valid grant
+      accepted, uses counted, last_used updated.
+      Done: protocol v4 makes `run.grant` mandatory; `pmd` canonicalizes
+      `command[0]`, matches the token hash against an active grant, re-checks
+      scope/capability/command, and records the use in the vault before it
+      copies the secret or spawns. `pm run` reads `--grant-file` or
+      `PASSMGR_GRANT_FILE` (regular, own uid, 0600/0400, `O_NOFOLLOW`).
+- [x] **3.7 `pm run` for humans.** With `--grant-file FILE` it goes through
+      the daemon. Without it, at a TTY, it prompts for the master password and
+      runs locally (same redaction code). In agent context without a grant it
+      exits 5. Tests for all three paths.
+      Note: the local path reuses the reveal gate, so stdin **and** stdout must
+      be TTYs; a grant token (flag or env) always selects the daemon path and
+      is never a fallback to local injection. Local runs are audited by 3.8.
+- [x] **3.8 Audit log.** `$XDG_STATE_HOME/passmgr/audit.jsonl` (fallback
+      `~/.local/state`), 0600, append-only with `O_APPEND`, one JSON object
+      per line, hash-chained (`prev`). Written by the daemon for every
+      authorized or denied credential request, and by the CLI for a grant-less
+      local `run` (added by 3.7). Tests: one record per run, the
+      secret and the token are absent from the file, the chain links.
+      Note: `src/audit.rs` writes `v`, `ts`, `source`, `event`, `outcome`,
+      `grant`, `ref`, `command`, `args`, `exit`/`signal` and `prev`; appends
+      are serialized with `flock` and `fsync`ed, and an unrecordable run is
+      refused before decrypting (fail closed). MCP fields stay with 4.11.
+- [x] **3.9 `pm audit [--json] [--grant ID] [--since DUR] [--limit N]` and
+      `pm audit verify`.** verify reports the first broken link with exit 6.
+      Tests: tampering with, deleting or reordering a line is detected.
+      Note: `--since` takes an age (`1h`, `7d`), not a date; denied records
+      whose token matched no active grant carry `grant: null`, so `--grant`
+      cannot show them.
+
