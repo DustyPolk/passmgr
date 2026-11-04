@@ -18,6 +18,8 @@ hmac = "0.12"
 libc = "0.2"
 serde_json = "1"
 sha2 = "0.10"
+# Vetted constant-time comparison (already in the tree through aes-gcm); a hand-written XOR loop is not guaranteed to stay constant-time.
+subtle = "2.6"
 tempfile = "3"
 zeroize = { version = "1", features = ["derive"] }
 

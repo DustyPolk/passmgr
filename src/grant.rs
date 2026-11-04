@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use getrandom::fill;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::error::{Error, Result};
 use crate::store::{EntryId, MAX_TIMESTAMP_UNIX, normalize_tags};
@@ -182,11 +183,7 @@ impl TokenHash {
     /// Constant-time comparison, so a caller cannot learn the hash byte by
     /// byte from timing. The only comparison this type supports.
     pub fn matches(&self, other: &Self) -> bool {
-        let mut difference = 0u8;
-        for (left, right) in self.0.iter().zip(other.0.iter()) {
-            difference |= left ^ right;
-        }
-        difference == 0
+        self.0.ct_eq(&other.0).into()
     }
 
     /// Lowercase hex, the form the daemon protocol carries.

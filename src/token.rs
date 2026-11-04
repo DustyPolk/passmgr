@@ -17,6 +17,7 @@
 
 use std::fmt;
 
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 /// Number of random bytes in a session token.
@@ -94,15 +95,10 @@ impl SessionToken {
 
     /// Compare two tokens without an early exit on the first differing byte.
     ///
-    /// Both sides are fixed-length, so the loop count reveals nothing. Timing
-    /// is not this token's main defense (a same-user process can read the file
-    /// anyway); this only avoids making it an obvious oracle.
+    /// Timing is not this token's main defense (a same-user process can read
+    /// the file anyway); this only avoids making it an obvious oracle.
     pub fn matches(&self, other: &SessionToken) -> bool {
-        let mut difference = 0u8;
-        for (left, right) in self.bytes.iter().zip(other.bytes.iter()) {
-            difference |= left ^ right;
-        }
-        difference == 0
+        self.bytes[..].ct_eq(&other.bytes[..]).into()
     }
 }
 

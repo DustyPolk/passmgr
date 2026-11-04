@@ -39,6 +39,7 @@ use std::time::{Duration, Instant};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 /// Domain separation string, part of the MAC message.
@@ -451,11 +452,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     if left.len() != right.len() {
         return false;
     }
-    let mut difference = 0u8;
-    for (a, b) in left.iter().zip(right.iter()) {
-        difference |= a ^ b;
-    }
-    difference == 0
+    left.ct_eq(right).into()
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
