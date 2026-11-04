@@ -257,19 +257,18 @@ fn an_unknown_ref_is_refused_before_the_summary() {
 /// bidi override or escape must never reach the terminal raw (R.41/R.48).
 #[test]
 fn credential_names_are_escaped_in_the_summary() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut vault = empty_vault(&directory);
-    vault
-        .add(credential(
-            "bank\u{202e}moc.test",
-            "al\u{202e}ice",
-            &["prod"],
-        ))
-        .expect("add");
-    let id = vault.list()[0].id();
-    let scope = Scope::new(vec![id], vec!["prod".to_owned()], None).expect("scope");
-
-    let preview = preview_scope(&scope, &vault).expect("preview");
+    // A legacy vault can hold such a name (the reader tolerates what an
+    // earlier build wrote, TODO R.48), so the preview is built directly:
+    // `Credential::new` refuses it now. What is under test is the rendering.
+    let entry = || ScopeEntry {
+        reference: "pm://00112233445566778899aabbccddeeff".into(),
+        service: "bank\u{202e}moc.test".into(),
+        username: "al\u{202e}ice".into(),
+    };
+    let preview = ScopePreview {
+        refs: vec![entry()],
+        tags: vec![("prod".into(), vec![entry()])],
+    };
     let mut text = String::new();
     write_scope(&mut text, &preview, None);
     assert!(!text.contains('\u{202e}'), "{text}");

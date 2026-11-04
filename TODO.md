@@ -1054,8 +1054,11 @@ Rules that apply to every item:
       the child; the test proves both. The child's status is unknowable once
       relaying failed, so 141 rather than a guess.
 
-- [ ] **R.48 Service names and usernames accept bidi and zero-width
-      characters and are printed raw.**
+- [x] **R.48 Service names and usernames accept bidi and zero-width
+      characters and are printed raw.** (Done: new names refuse the whole
+      hidden table; the reader stays control-only so a pre-R.48 vault still
+      opens, and every human-facing line escapes a stored name. `--json`
+      keeps the stored bytes.)
       `src/store.rs:377-394` (`validate_service`, `validate_username`) refuse
       only `char::is_control`, not the shared hidden/reordering table in
       `src/text.rs`. The values are printed unescaped in the add prompt

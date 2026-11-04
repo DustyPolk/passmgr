@@ -126,9 +126,12 @@ code does not implement yet.
   `null`; maximum 253402300799 (9999-12-31T23:59:59Z). `created` never
   changes; `last_rotated` moves only when the password changes. Do not reject
   `created > last_rotated` (backwards clocks are legitimate).
-- Field rules: service and password non-empty; no Unicode control characters
-  in service/username; each field <= 4096 bytes; <= 10000 credentials; decoded
-  payload <= 10 MiB; vault file <= 16 MiB.
+- Field rules: service and password non-empty; a *new* service/username must
+  not contain control, bidi, zero-width/format, line-separator or
+  variation-selector characters (same table as a grant label, TODO R.48),
+  while the reader keeps the older control-only rule so a vault written before
+  that change still opens; each field <= 4096 bytes; <= 10000 credentials;
+  decoded payload <= 10 MiB; vault file <= 16 MiB.
 - The 10 MiB payload limit bounds **content**, not the bytes a grant gains
   after creation. `revoked_at` and `last_used` add 8 bytes each, up to 16 KiB
   over all 1,024 grants; `store::encode` subtracts those present-fields bytes
@@ -687,6 +690,16 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   terminal. `tests/cli_args_escape.rs` drives the real binary with an OSC 52
   payload in `--env` name/reference, `--ref`, `--expires`, `--length`, an
   unknown flag and `--db`, and fails on any raw ESC/BEL in either stream.
+- The strict identity rule lives at the boundary, the tolerant one at the
+  reader (TODO R.48). `store::validate_service`/`validate_username` refuse the
+  whole hidden table and the value they reject is not echoed (the error names
+  the class); `Credential::from_decoded` is the payload reader's constructor
+  and refuses only C0/C1 controls, so an existing vault written before the
+  rule keeps opening. `--json` keeps the stored bytes on purpose: it is a data
+  channel, not a terminal, and a consumer that renders it must escape it. Every
+  human-facing line (`add`/`edit` success, the password prompt, `list`, `get`,
+  `show`) runs the stored name through `escape_hidden`, and the grant approval
+  summary already did.
 - `pm grant create` mints a `GrantToken` of 32 random bytes, held in
   `Zeroizing`, with a redacting `Debug`. Its lowercase hex is written only to
   `--out` (opened `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600, then `fsync`); an

@@ -504,8 +504,11 @@ pub fn decode(data: &[u8]) -> Result<Payload> {
         } else {
             Vec::new()
         };
-        let credential = Credential::with_id(id, timestamps, service, username, password, tags)
-            .map_err(|err| Error::MalformedVault(err.to_string()))?;
+        // The reader accepts what an earlier build could have written (TODO
+        // R.48); the stricter rule applies to new values only.
+        let credential =
+            Credential::from_decoded(id, timestamps, service, username, password, tags)
+                .map_err(|err| Error::MalformedVault(err.to_string()))?;
         credentials.push(credential);
     }
     let grants = if has_grants {

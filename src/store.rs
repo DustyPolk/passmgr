@@ -39,7 +39,7 @@ use getrandom::fill;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
-use crate::text::escape_quoted;
+use crate::text::{HIDDEN_FORBIDDEN_CLASSES, escape_quoted, is_hidden_or_reordering};
 
 mod payload;
 pub use payload::{GRANT_GROWTH_BYTES, Payload, decode, encode};
@@ -255,7 +255,56 @@ impl Credential {
         password: Zeroizing<String>,
         tags: Vec<String>,
     ) -> Result<Self> {
-        validate_identity(&service, &username)?;
+        Self::build(
+            id,
+            timestamps,
+            service,
+            username,
+            password,
+            tags,
+            validate_identity,
+        )
+    }
+
+    /// Build a credential from the decrypted payload.
+    ///
+    /// The payload is authenticated, so a service name or username in it was
+    /// written by a passmgr build, not by an attacker. Builds before TODO
+    /// R.48 accepted hidden and reordering characters there, so refusing the
+    /// whole class on read would make an existing vault unopenable and cost
+    /// the human every credential in it. The reader therefore keeps the old
+    /// rule (no C0/C1 controls) and the CLI escapes hidden characters
+    /// whenever it prints a stored name. Every *new* value goes through
+    /// [`Credential::new`] and its stricter rule.
+    fn from_decoded(
+        id: EntryId,
+        timestamps: Timestamps,
+        service: String,
+        username: String,
+        password: Zeroizing<String>,
+        tags: Vec<String>,
+    ) -> Result<Self> {
+        Self::build(
+            id,
+            timestamps,
+            service,
+            username,
+            password,
+            tags,
+            validate_decoded_identity,
+        )
+    }
+
+    fn build(
+        id: EntryId,
+        timestamps: Timestamps,
+        service: String,
+        username: String,
+        password: Zeroizing<String>,
+        tags: Vec<String>,
+        identity: fn(&str, &str) -> Result<()>,
+    ) -> Result<Self> {
+        identity(&service, &username)?;
         validate_password(&password)?;
         let tags = normalize_tags(tags)?;
         Ok(Self {
@@ -374,22 +423,51 @@ pub fn validate_identity(service: &str, username: &str) -> Result<()> {
     validate_username(username)
 }
 
+/// The rule a *new* service name or username must satisfy (TODO R.48).
+///
+/// A name is stored and later printed by `list`, `get` and `show`, and a grant
+/// scope can select it by tag, so it is held to the same character table as a
+/// grant label: a bidi override can reverse the rest of the terminal line
+/// (including the `pm://` reference a human is about to copy into a grant) and
+/// a zero-width or variation-selector character renders a name that is not the
+/// one stored. The whole class is refused and the value is not echoed: the
+/// error names the class only, so it cannot carry the problem into the
+/// terminal. Ordinary visible text -- accents, other scripts, emoji without a
+/// selector -- stays allowed.
 pub fn validate_service(service: &str) -> Result<()> {
     validate_field("service", service, true)?;
-    if service.chars().any(char::is_control) {
-        return Err(Error::InvalidInput(
-            "service name must not contain control characters".into(),
-        ));
-    }
-    Ok(())
+    reject_hidden_identity("service name", service)
 }
 
 pub fn validate_username(username: &str) -> Result<()> {
     validate_field("username", username, false)?;
-    if username.chars().any(char::is_control) {
-        return Err(Error::InvalidInput(
-            "username must not contain control characters".into(),
-        ));
+    reject_hidden_identity("username", username)
+}
+
+fn reject_hidden_identity(what: &str, value: &str) -> Result<()> {
+    if value.chars().any(is_hidden_or_reordering) {
+        return Err(Error::InvalidInput(format!(
+            "{what} must not contain {HIDDEN_FORBIDDEN_CLASSES} characters"
+        )));
+    }
+    Ok(())
+}
+
+/// The identity rule the payload reader applies to a stored credential.
+///
+/// Deliberately looser than [`validate_service`]/[`validate_username`]: an
+/// existing vault may hold a name an earlier build accepted, and refusing it
+/// here would refuse the whole vault. Only C0/C1 controls are rejected, which
+/// is exactly what every released build refused (see [`Credential::from_decoded`]).
+fn validate_decoded_identity(service: &str, username: &str) -> Result<()> {
+    validate_field("service", service, true)?;
+    validate_field("username", username, false)?;
+    for (what, value) in [("service name", service), ("username", username)] {
+        if value.chars().any(char::is_control) {
+            return Err(Error::InvalidInput(format!(
+                "{what} must not contain control characters"
+            )));
+        }
     }
     Ok(())
 }

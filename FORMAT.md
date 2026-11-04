@@ -180,9 +180,19 @@ passwords containing `:`, newlines, NUL, and other Unicode text. This
 implementation applies additional validation when reading and writing:
 
 - service and password must not be empty;
-- service and username must not contain Unicode control characters (so
-  newlines and NUL are allowed in passwords, but not in service names or
-  usernames);
+- a *new* service name or username (one typed into `add`, or set with
+  `--rename`/`--username`) must not contain a control, bidi,
+  zero-width/format, line-separator or variation-selector character. A name is
+  printed by `list`, `get` and `show`, and a grant can select it, so it is held
+  to the same character table as a grant label: a bidi override can reorder the
+  rest of a terminal line (the `pm://` reference included) and an invisible
+  character makes the printed name differ from the stored one. The old rule --
+  no Unicode control characters in service/username -- is the one the *reader*
+  keeps, because a vault written by an earlier build may already hold such a
+  name and refusing it on read would lock the human out of every credential in
+  the vault. `store::encode` does not re-validate stored text, so such a vault
+  can still be saved; the CLI escapes hidden characters (rendering `\u{202e}`)
+  wherever it prints a stored name (TODO R.48);
 - each service/username/password field is at most 4096 bytes;
 - at most 10,000 credentials and at most 1,024 grants;
 - the payload's *content* is at most 10 MiB, credentials and grants together.

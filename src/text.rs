@@ -42,6 +42,13 @@ use std::path::Path;
 /// general-category crate for one check would be a new tree to vet, and a
 /// `Cf` character this list misses is rejected by the next review, not by a
 /// silent pass.
+/// The classes of character [`is_hidden_or_reordering`] refuses, spelled the
+/// same way in every rejection message, `FORMAT.md` and `DECISIONS.md` (TODO
+/// R.18, R.48). One string, so the credential and grant validators cannot
+/// drift apart in what they claim to refuse.
+pub const HIDDEN_FORBIDDEN_CLASSES: &str =
+    "control, bidi, zero-width/format, line-separator or variation-selector";
+
 pub fn is_hidden_or_reordering(character: char) -> bool {
     if character.is_control() {
         return true;

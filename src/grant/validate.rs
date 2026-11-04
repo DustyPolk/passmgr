@@ -21,8 +21,7 @@ use crate::text::{escape_quoted, is_hidden_or_reordering};
 /// point (or the label), because the label is untrusted text that later gets
 /// printed to a terminal. A bad command is echoed back, but escaped (see
 /// [`escape_quoted`]) so its own characters cannot forge the error line.
-pub const LABEL_FORBIDDEN_CLASSES: &str =
-    "control, bidi, zero-width/format, line-separator or variation-selector";
+pub const LABEL_FORBIDDEN_CLASSES: &str = crate::text::HIDDEN_FORBIDDEN_CLASSES;
 
 pub(super) fn validate_label(label: &str) -> Result<()> {
     if label.trim().is_empty() {

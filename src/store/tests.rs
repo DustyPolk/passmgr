@@ -254,6 +254,96 @@ fn rejection_messages_escape_control_characters() {
     assert!(!error.contains('\u{7}'), "{error}");
 }
 
+/// A service name or username is printed by `list`, `get` and `show`, and a
+/// grant scope can name it, so it is held to the same character table as a
+/// grant label: no bidi overrides, zero-width or variation-selector
+/// characters that make the printed name differ from the stored one (TODO
+/// R.48). The rejection names the class and does not echo the value.
+#[test]
+fn new_identities_refuse_hidden_and_reordering_characters() {
+    let hidden = [
+        "git\u{202e}moc.buh",
+        "github.com\u{202c}",
+        "ali\u{200b}ce",
+        "heart\u{fe0f}",
+        "sep\u{2028}arator",
+        "nul\0",
+        "bell\u{7}",
+    ];
+    for bad in hidden {
+        let errors = [
+            validate_service(bad).unwrap_err(),
+            validate_username(bad).unwrap_err(),
+            Credential::new(
+                bad.to_owned(),
+                "alice".to_owned(),
+                Zeroizing::new("p".to_owned()),
+            )
+            .unwrap_err(),
+            Credential::new(
+                "svc".to_owned(),
+                bad.to_owned(),
+                Zeroizing::new("p".to_owned()),
+            )
+            .unwrap_err(),
+        ];
+        for error in errors {
+            assert!(matches!(error, Error::InvalidInput(_)), "{bad:?}: {error}");
+            let message = error.to_string();
+            assert!(
+                message.contains(HIDDEN_FORBIDDEN_CLASSES),
+                "{bad:?}: {message}"
+            );
+            assert!(!message.contains('\u{202e}'), "{bad:?}: {message}");
+            assert!(!message.contains('\u{200b}'), "{bad:?}: {message}");
+        }
+    }
+
+    // Visible text stays allowed: other scripts, accents, combining marks and
+    // emoji without a variation selector.
+    for good in ["пример.рф", "café", "e\u{301}mail", "🔐.example", "a b"] {
+        validate_identity(good, good).unwrap_or_else(|err| panic!("{good:?} rejected: {err}"));
+        credential(good, good, "p");
+    }
+}
+
+/// A vault written before TODO R.48 may hold a service name or username with
+/// a hidden character, because the old validators only refused C0/C1
+/// controls. The reader must still open it -- refusing would cost the human
+/// every credential in the vault -- and the value must survive a re-save
+/// unchanged.
+#[test]
+fn a_legacy_payload_keeps_a_hidden_name_and_can_be_saved_again() {
+    let service = "git\u{202e}moc.buh";
+    let username = "ali\u{200b}ce";
+    let payload = encode_v4(
+        &[(service, username, "secret", &["prod"])],
+        1_700_000_000,
+        1_700_000_100,
+    );
+    let decoded = decode_credentials(&payload).expect("a pre-R.48 vault must still open");
+    assert_eq!(decoded[0].service(), service);
+    assert_eq!(decoded[0].username(), username);
+
+    let upgraded = encode_credentials(&decoded).unwrap();
+    assert_eq!(upgraded[0], STORE_VERSION);
+    let reopened = decode_credentials(&upgraded).unwrap();
+    assert_eq!(reopened[0].service(), service);
+    assert_eq!(reopened[0].username(), username);
+}
+
+/// The reader keeps the boundary every released build had: C0/C1 controls are
+/// still refused, because no passmgr build ever wrote one there and a payload
+/// holding one did not come from this program.
+#[test]
+fn a_legacy_payload_still_refuses_control_characters_in_identity() {
+    for bad in ["svc\u{1b}[2J", "svc\u{9b}31m"] {
+        let payload = encode_v4(&[(bad, "alice", "secret", &[])], 0, 0);
+        let error = decode_credentials(&payload).unwrap_err();
+        assert!(matches!(error, Error::MalformedVault(_)), "{error}");
+    }
+}
+
 #[test]
 fn tag_validation_rejects_ambiguous_names() {
     for bad in [

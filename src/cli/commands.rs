@@ -7,7 +7,7 @@ use passmgr::agent;
 use passmgr::password;
 use passmgr::store::{self, Credential};
 use passmgr::terminal;
-use passmgr::text::escape_path;
+use passmgr::text::{escape_hidden, escape_path};
 use passmgr::timestamp;
 use passmgr::vault::{self, Vault};
 use zeroize::Zeroizing;
@@ -63,7 +63,10 @@ pub(crate) fn command_add(options: AddOptions, path: &Path) -> Result<(), Error>
     if options.generate {
         // Never print the generated password: the only way to read it back is
         // the TTY-gated `get --reveal`. Only metadata goes to the terminal.
-        eprintln!("Credential '{service}' added successfully with a generated password.");
+        eprintln!(
+            "Credential '{}' added successfully with a generated password.",
+            escape_hidden(&service)
+        );
     } else {
         eprintln!("Credential added successfully.");
     }
@@ -86,8 +89,11 @@ pub(crate) fn command_get(
     let credential = vault
         .get(service)
         .ok_or_else(|| Error::ServiceNotFound(service.to_owned()))?;
-    let name = credential.service();
-    let username = credential.username();
+    // A legacy vault can still hold a hidden or reordering character in
+    // service/username (the reader tolerates what an earlier build wrote), so
+    // every human-facing line escapes them. `--json` keeps the stored bytes.
+    let name = escape_hidden(credential.service());
+    let username = escape_hidden(credential.username());
     let reference = credential.reference();
     // The reference is metadata (an id, not a secret) and is safe to print in
     // both modes: agents need it to name the entry. Tags are metadata too.
@@ -190,9 +196,12 @@ pub(crate) fn command_edit(options: EditOptions, path: &Path) -> Result<(), Erro
     if options.generate {
         // Never print the generated password; read it back with the
         // TTY-gated `get --reveal`.
-        eprintln!("Credential '{service}' updated with a generated password.");
+        eprintln!(
+            "Credential '{}' updated with a generated password.",
+            escape_hidden(service)
+        );
     } else {
-        eprintln!("Credential '{service}' updated.");
+        eprintln!("Credential '{}' updated.", escape_hidden(service));
     }
     Ok(())
 }
@@ -229,14 +238,18 @@ pub(crate) fn command_list(json: bool, tags: &[String], path: &Path) -> Result<(
         writeln!(
             output,
             "- {} ({}) [{}]",
-            credential.service(),
-            credential.username(),
+            escape_hidden(credential.service()),
+            escape_hidden(credential.username()),
             credential.reference()
         )
         .expect("writing to a String cannot fail");
         if !credential.tags().is_empty() {
-            writeln!(output, "  tags: {}", credential.tags().join(", "))
-                .expect("writing to a String cannot fail");
+            writeln!(
+                output,
+                "  tags: {}",
+                escape_hidden(&credential.tags().join(", "))
+            )
+            .expect("writing to a String cannot fail");
         }
     }
     stdout_write(format_args!("{}", output))
@@ -278,8 +291,8 @@ pub(crate) fn command_show(reference: &str, json: bool, path: &Path) -> Result<(
         stdout_write(format_args!(
             "Ref: {}\nService: {}\nUsername: {}\n{}",
             credential.reference(),
-            credential.service(),
-            credential.username(),
+            escape_hidden(credential.service()),
+            escape_hidden(credential.username()),
             tags_line(credential.tags())
         ))
     }
@@ -319,7 +332,8 @@ pub(crate) fn prompt_master(confirm: bool) -> Result<Zeroizing<String>, Error> {
 }
 
 pub(crate) fn prompt_credential_password(service: &str) -> Result<Zeroizing<String>, Error> {
-    let password = terminal::prompt_password(&format!("Enter password for {service}: "))?;
+    let password =
+        terminal::prompt_password(&format!("Enter password for {}: ", escape_hidden(service)))?;
     if password.is_empty() {
         return Err(Error::InvalidInput(
             "credential password cannot be empty".to_owned(),

@@ -1,3 +1,44 @@
+## 2026-11-03 — Refuse hidden characters in new service names and usernames, escape stored ones (TODO R.48)
+
+- `src/store.rs`: `validate_service`/`validate_username` now refuse the whole
+  table in `src/text.rs` (`is_hidden_or_reordering`: controls, bidi,
+  zero-width/format, line separators, VS). The error names the classes and
+  does not echo the value. `Credential::new`/`--rename`/`--username` go
+  through it, so `pm add $'git\u{202e}moc.buh' alice` exits 2 before any
+  password prompt or vault access.
+- `Credential::from_decoded` is the reader's constructor and keeps the old
+  control-only rule, because the payload is authenticated: a name in it was
+  written by a passmgr build, and a vault written before this change may hold
+  a bidi name. Refusing it on read would lock the human out of every
+  credential. `encode` does not re-validate stored text, so such a vault can
+  still be saved.
+- Every human-facing line escapes a stored name: `list`, `get`, `show`, the
+  add/edit success lines and the password prompt (`src/cli/commands.rs`), via
+  `escape_hidden`. `--json` keeps the stored bytes (data channel, not a
+  terminal); the grant approval summary already escaped (`ScopeEntry::describe`).
+- `HIDDEN_FORBIDDEN_CLASSES` moved to `src/text.rs`; `grant::LABEL_FORBIDDEN_CLASSES`
+  is now an alias, so the two validators cannot drift (TODO R.18 docs pin
+  still passes).
+- Tests: store unit tests reject U+202E/U+200B/U+FE0F/U+2028/NUL/BEL in both
+  fields and in `Credential::new` (and assert the error does not echo the
+  value), accept other scripts/accents/combining marks/emoji; a hand-built v4
+  payload with a bidi service and a zero-width username decodes, re-encodes as
+  v5 and round-trips unchanged; a v4 payload with C0/C1 is still malformed;
+  `tests/cli_args_escape.rs` proves `add` exits 2 with no prompt/no vault and
+  that `list`/`get`/`show` on a legacy v4 container print `\u{202e}`/`\u{200b}`
+  with no raw hidden character.
+- Fixed one existing test rather than weakening it: `cli::grant::tests::
+  credential_names_are_escaped_in_the_summary` used `Credential::new` to build
+  a bidi name, which is now a hard error. It now builds the `ScopePreview`
+  literals directly; the rendering under test is unchanged, and the
+  "such a name can exist" premise moved to the legacy-payload tests.
+- Gate: fmt, clippy `-D warnings`, full `cargo test` all pass.
+- **Next iteration must know:** TODO R.55's text (and the bullet at
+  `TODO.md:1189`) still describes R.48 as open; fix it when doing R.55.
+  `SECURITY.md`'s terminal-safety claim should say *stored* names are escaped
+  and new ones are refused. MCP tool output (when built) must escape stored
+  names too -- MCP is not a terminal, but a host may render it as one.
+
 ## 2026-11-03 — Review of f4c7796..c83c9b3 (4 findings: R.60–R.63)
 
 - Findings by category: secrets/exposure 0, authorization 0, unsafe input 0,
