@@ -96,19 +96,6 @@ pub fn load(paths: &RuntimePaths) -> Result<SessionToken, SessionError> {
     read_token(file, &path)
 }
 
-/// Remove the session file, if it exists.
-///
-/// Used when starting a new session (to clear a stale file) and when a client
-/// has confirmed the daemon wiped its key.
-pub fn remove(paths: &RuntimePaths) -> Result<bool, SessionError> {
-    let path = paths.session();
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(true),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(SessionError::Io { path, source }),
-    }
-}
-
 /// Remove the session file only if it still holds `token`.
 ///
 /// A daemon that shuts down calls this so it can never delete a *newer*
@@ -324,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_and_remove_if_matches_are_scoped() {
+    fn remove_if_matches_removes_only_its_own_token() {
         let (_directory, paths) = runtime_paths();
         let token = SessionToken::generate().expect("generate");
         store(&paths, &token).expect("store");
@@ -335,9 +322,6 @@ mod tests {
 
         assert!(remove_if_matches(&paths, &token));
         assert!(!paths.session().exists());
-
-        // Removing an absent file is not an error.
-        assert!(!remove(&paths).expect("remove"));
     }
 
     #[test]
