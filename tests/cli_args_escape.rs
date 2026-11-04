@@ -2,7 +2,7 @@
 //! name its control characters instead of writing them to the terminal.
 //!
 //! The values below are the argument slots a person or an agent fills in:
-//! an `--env` name and reference, a `--ref`, an `--expires` duration, a
+//! an `--env` name, a `--ref`, an `--expires` duration, a
 //! `--length`, an unknown flag and the `--db` path. An OSC 52 sequence in any
 //! of them must reach stderr as `\u{1b}` / `\u{7}`, never as raw bytes that a
 //! terminal would execute.
@@ -64,7 +64,6 @@ fn argument_errors_never_write_control_characters_to_the_terminal() {
     // No '=' in this one: `--env` splits the spec at the first '=', so an
     // `=` inside the name would move the tail into the reference.
     let env_name = format!("API{ESC}[2K{BEL}");
-    let env_reference = format!("API=pm://{attack}");
     let bad_flag = format!("--{attack}");
     let bad_expires = format!("10{attack}");
     let bad_length = format!("x{attack}");
@@ -77,17 +76,6 @@ fn argument_errors_never_write_control_characters_to_the_terminal() {
                 "run".into(),
                 "--env".into(),
                 format!("{env_name}={REFERENCE}"),
-                "--".into(),
-                "/bin/true".into(),
-            ],
-            "",
-        ),
-        (
-            "--env reference",
-            vec![
-                "run".into(),
-                "--env".into(),
-                env_reference,
                 "--".into(),
                 "/bin/true".into(),
             ],
@@ -121,6 +109,25 @@ fn argument_errors_never_write_control_characters_to_the_terminal() {
         let output = run(&arguments, input);
         assert!(!output.status.success(), "{label}: expected a failure");
         assert_escaped(label, &output);
+    }
+}
+
+/// A mistaken `--env` value may be the secret itself (`GH_TOKEN=ghp_...`), so
+/// the refusal names the flag and never repeats the value, escaped or not.
+#[test]
+fn a_literal_env_value_is_never_echoed() {
+    let _guard = cli_support::serial();
+    let canary = "ghp_canaryEnvLiteral7d41";
+    for value in [canary.to_owned(), format!("pm://{}", attack())] {
+        let spec = format!("GH_TOKEN={value}");
+        let output = run(&["run", "--env", &spec, "--", "/bin/true"], "");
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let (stdout, stderr) = (stdout(&output), stderr(&output));
+        assert!(stderr.contains("is not a pm:// reference"), "{stderr:?}");
+        for text in [&stdout, &stderr] {
+            assert!(!text.contains(canary), "the value was echoed: {text:?}");
+            assert!(!text.contains(ESC) && !text.contains(r"\u{1b}"), "{text:?}");
+        }
     }
 }
 

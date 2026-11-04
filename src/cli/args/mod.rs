@@ -366,9 +366,10 @@ pub(crate) fn parse_run(args: Vec<OsString>) -> Result<Command, String> {
             passmgr::protocol::MAX_REFERENCE_BYTES
         ));
     }
+    // The value is not repeated: a mistaken one may be the secret itself.
     if passmgr::store::EntryId::parse_ref(reference).is_err() {
         return Err(format!(
-            "--env reference '{reference}' is not a pm:// reference (see 'passmgr list')"
+            "--env {env}=... is not a pm:// reference (see 'passmgr list')"
         ));
     }
 
