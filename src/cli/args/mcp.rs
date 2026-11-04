@@ -8,7 +8,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use super::{Command, flag_value};
+use super::{Command, flag_value, set_grant_file};
 
 #[derive(Debug)]
 pub(crate) enum McpCommand {
@@ -43,12 +43,12 @@ fn parse_serve(args: Vec<OsString>, usage: &str) -> Result<McpCommand, String> {
             .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
         if text == "--grant-file" {
             let value = flag_value(&args, index, "--grant-file")?;
-            set_grant_file(&mut grant_file, value)?;
+            set_grant_file(&mut grant_file, value, "mcp serve")?;
             index += 2;
             continue;
         }
         if let Some(value) = text.strip_prefix("--grant-file=") {
-            set_grant_file(&mut grant_file, value.to_owned())?;
+            set_grant_file(&mut grant_file, value.to_owned(), "mcp serve")?;
             index += 1;
             continue;
         }
@@ -59,16 +59,6 @@ fn parse_serve(args: Vec<OsString>, usage: &str) -> Result<McpCommand, String> {
     Ok(McpCommand::Serve {
         grant_file: grant_file.map(PathBuf::from),
     })
-}
-
-fn set_grant_file(slot: &mut Option<String>, value: String) -> Result<(), String> {
-    if value.is_empty() {
-        return Err("--grant-file must not be empty".to_owned());
-    }
-    if slot.replace(value).is_some() {
-        return Err("'mcp serve' accepts exactly one --grant-file".to_owned());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

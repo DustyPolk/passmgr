@@ -279,6 +279,9 @@ pub(crate) fn parse_command(command: OsString, rest: Vec<OsString>) -> Result<Co
 
 pub(crate) fn parse_single_argument(command: &str, args: Vec<OsString>) -> Result<String, String> {
     let mut args = args;
+    if args.first().is_some_and(|first| first == "--") {
+        args.remove(0);
+    }
     if args.len() != 1 {
         return Err(format!(
             "'{command}' requires exactly one <service> argument"
@@ -334,12 +337,12 @@ pub(crate) fn parse_run(args: Vec<OsString>) -> Result<Command, String> {
         }
         if text == "--grant-file" {
             let value = flag_value(&args, index, "--grant-file")?;
-            set_run_grant_file(&mut grant_file, value)?;
+            set_grant_file(&mut grant_file, value, "run")?;
             index += 2;
             continue;
         }
         if let Some(value) = text.strip_prefix("--grant-file=") {
-            set_run_grant_file(&mut grant_file, value.to_owned())?;
+            set_grant_file(&mut grant_file, value.to_owned(), "run")?;
             index += 1;
             continue;
         }
@@ -411,12 +414,16 @@ pub(crate) fn parse_run(args: Vec<OsString>) -> Result<Command, String> {
     }))
 }
 
-fn set_run_grant_file(slot: &mut Option<String>, value: String) -> Result<(), String> {
+pub(crate) fn set_grant_file(
+    slot: &mut Option<String>,
+    value: String,
+    command: &str,
+) -> Result<(), String> {
     if value.is_empty() {
         return Err("--grant-file must not be empty".to_owned());
     }
     if slot.replace(value).is_some() {
-        return Err("'run' accepts exactly one --grant-file".to_owned());
+        return Err(format!("'{command}' accepts exactly one --grant-file"));
     }
     Ok(())
 }
@@ -576,8 +583,7 @@ pub(crate) fn parse_get(args: Vec<OsString>) -> Result<Command, String> {
 
 pub(crate) fn parse_add(args: Vec<OsString>) -> Result<Command, String> {
     let mut generate = false;
-    let mut preset = Preset::Strong;
-    let mut length = None;
+    let mut password = PasswordFlags::default();
     let mut tags = Vec::new();
     let mut positional = Vec::new();
     let mut only_positional = false;
@@ -589,6 +595,10 @@ pub(crate) fn parse_add(args: Vec<OsString>) -> Result<Command, String> {
             .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
 
         if !only_positional && text.starts_with('-') && text != "-" {
+            if let Some(used) = password.take(&args, index, text)? {
+                index += used;
+                continue;
+            }
             match text {
                 "--" => {
                     only_positional = true;
@@ -597,27 +607,10 @@ pub(crate) fn parse_add(args: Vec<OsString>) -> Result<Command, String> {
                 }
                 "-h" | "--help" => return Ok(Command::Help),
                 "--generate" => generate = true,
-                "--strong" => preset = Preset::Strong,
-                "--simple" => preset = Preset::Simple,
-                "--pin" => preset = Preset::Pin,
                 "--tag" => {
                     tags.push(flag_value(&args, index, "--tag")?);
                     index += 2;
                     continue;
-                }
-                "--length" => {
-                    let value = args
-                        .get(index + 1)
-                        .ok_or_else(|| "--length requires a number".to_owned())?;
-                    let value = value
-                        .to_str()
-                        .ok_or_else(|| "--length value must be valid UTF-8".to_owned())?;
-                    length = Some(parse_length(value)?);
-                    index += 2;
-                    continue;
-                }
-                other if other.starts_with("--length=") => {
-                    length = Some(parse_length(&other["--length=".len()..])?);
                 }
                 other if other.starts_with("--tag=") => {
                     tags.push(other["--tag=".len()..].to_owned());
@@ -641,13 +634,14 @@ pub(crate) fn parse_add(args: Vec<OsString>) -> Result<Command, String> {
     }
     let username = positional.pop().expect("length was checked");
     let service = positional.pop().expect("length was checked");
+    let (preset, length) = password.resolve(generate)?;
 
     Ok(Command::Add(AddOptions {
         service,
         username,
         generate,
         preset,
-        length: length.unwrap_or_else(|| preset.default_length()),
+        length,
         tags: store::normalize_tags(tags).map_err(|err| err.to_string())?,
     }))
 }
@@ -664,8 +658,7 @@ pub(crate) fn flag_value(args: &[OsString], index: usize, name: &str) -> Result<
 
 pub(crate) fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
     let mut generate = false;
-    let mut preset = Preset::Strong;
-    let mut length = None;
+    let mut password = PasswordFlags::default();
     let mut username = None;
     let mut rename = None;
     let mut tags = Vec::new();
@@ -680,6 +673,10 @@ pub(crate) fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
             .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
 
         if !only_positional && text.starts_with('-') && text != "-" {
+            if let Some(used) = password.take(&args, index, text)? {
+                index += used;
+                continue;
+            }
             match text {
                 "--" => {
                     only_positional = true;
@@ -688,18 +685,9 @@ pub(crate) fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
                 }
                 "-h" | "--help" => return Ok(Command::Help),
                 "--generate" => generate = true,
-                "--strong" => preset = Preset::Strong,
-                "--simple" => preset = Preset::Simple,
-                "--pin" => preset = Preset::Pin,
                 "--clear-tags" => clear_tags = true,
                 "--tag" => {
                     tags.push(flag_value(&args, index, "--tag")?);
-                    index += 2;
-                    continue;
-                }
-                "--length" => {
-                    let value = flag_value(&args, index, "--length")?;
-                    length = Some(parse_length(&value)?);
                     index += 2;
                     continue;
                 }
@@ -712,9 +700,6 @@ pub(crate) fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
                     rename = Some(flag_value(&args, index, "--rename")?);
                     index += 2;
                     continue;
-                }
-                other if other.starts_with("--length=") => {
-                    length = Some(parse_length(&other["--length=".len()..])?);
                 }
                 other if other.starts_with("--tag=") => {
                     tags.push(other["--tag=".len()..].to_owned());
@@ -751,21 +736,21 @@ pub(crate) fn parse_edit(args: Vec<OsString>) -> Result<Command, String> {
     } else {
         Some(store::normalize_tags(tags).map_err(|err| err.to_string())?)
     };
+    let (preset, length) = password.resolve(generate)?;
     Ok(Command::Edit(EditOptions {
         service,
         username,
         rename,
         generate,
         preset,
-        length: length.unwrap_or_else(|| preset.default_length()),
+        length,
         tags,
         clear_tags,
     }))
 }
 
 pub(crate) fn parse_generate(args: Vec<OsString>) -> Result<Command, String> {
-    let mut preset = Preset::Strong;
-    let mut length = None;
+    let mut password = PasswordFlags::default();
     let mut only_positional = false;
     let mut index = 0;
 
@@ -775,6 +760,10 @@ pub(crate) fn parse_generate(args: Vec<OsString>) -> Result<Command, String> {
             .ok_or_else(|| "arguments must be valid UTF-8".to_owned())?;
 
         if !only_positional && text.starts_with('-') && text != "-" {
+            if let Some(used) = password.take(&args, index, text)? {
+                index += used;
+                continue;
+            }
             match text {
                 "--" => {
                     only_positional = true;
@@ -782,27 +771,8 @@ pub(crate) fn parse_generate(args: Vec<OsString>) -> Result<Command, String> {
                     continue;
                 }
                 "-h" | "--help" => return Ok(Command::Help),
-                "--strong" => preset = Preset::Strong,
-                "--simple" => preset = Preset::Simple,
-                "--pin" => preset = Preset::Pin,
-                "--length" => {
-                    let value = args
-                        .get(index + 1)
-                        .ok_or_else(|| "--length requires a number".to_owned())?;
-                    let value = value
-                        .to_str()
-                        .ok_or_else(|| "--length value must be valid UTF-8".to_owned())?;
-                    length = Some(parse_length(value)?);
-                    index += 2;
-                    continue;
-                }
-                other if other.starts_with("--length=") => {
-                    length = Some(parse_length(&other["--length=".len()..])?);
-                }
                 other => return Err(format!("unknown flag '{other}'")),
             }
-            index += 1;
-            continue;
         }
 
         return Err(format!(
@@ -810,10 +780,57 @@ pub(crate) fn parse_generate(args: Vec<OsString>) -> Result<Command, String> {
         ));
     }
 
-    Ok(Command::Generate(GenerateOptions {
-        preset,
-        length: length.unwrap_or_else(|| preset.default_length()),
-    }))
+    let (preset, length) = password.resolve(true)?;
+    Ok(Command::Generate(GenerateOptions { preset, length }))
+}
+
+/// `--strong`, `--simple`, `--pin` and `--length`, shared by every command
+/// that generates a password. The last preset given wins.
+#[derive(Default)]
+struct PasswordFlags {
+    preset: Option<Preset>,
+    length: Option<usize>,
+}
+
+impl PasswordFlags {
+    /// Consume `text` when it is one of these flags and return how many
+    /// arguments it used, or `None` when it is some other argument.
+    fn take(
+        &mut self,
+        args: &[OsString],
+        index: usize,
+        text: &str,
+    ) -> Result<Option<usize>, String> {
+        match text {
+            "--strong" => self.preset = Some(Preset::Strong),
+            "--simple" => self.preset = Some(Preset::Simple),
+            "--pin" => self.preset = Some(Preset::Pin),
+            "--length" => {
+                self.length = Some(parse_length(&flag_value(args, index, "--length")?)?);
+                return Ok(Some(2));
+            }
+            other => match other.strip_prefix("--length=") {
+                Some(value) => self.length = Some(parse_length(value)?),
+                None => return Ok(None),
+            },
+        }
+        Ok(Some(1))
+    }
+
+    /// The preset and length to generate with. Given without `--generate`
+    /// they would be ignored while a password is prompted for instead.
+    fn resolve(self, generate: bool) -> Result<(Preset, usize), String> {
+        if !generate && (self.preset.is_some() || self.length.is_some()) {
+            return Err(
+                "--strong, --simple, --pin and --length only apply with --generate".to_owned(),
+            );
+        }
+        let preset = self.preset.unwrap_or_default();
+        Ok((
+            preset,
+            self.length.unwrap_or_else(|| preset.default_length()),
+        ))
+    }
 }
 
 pub(crate) fn parse_length(value: &str) -> Result<usize, String> {

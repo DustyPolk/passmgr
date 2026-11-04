@@ -480,12 +480,35 @@ mod tests {
     }
 
     #[test]
+    fn generation_flags_without_generate_are_refused() {
+        for args in [
+            &["edit", "--length", "30", "svc"][..],
+            &["edit", "--pin", "svc"],
+            &["edit", "--simple", "--username", "bob", "svc"],
+            &["add", "--length=30", "svc", "user"],
+            &["add", "--strong", "svc", "user"],
+        ] {
+            let error = parse(args).expect_err("must be refused");
+            assert!(error.contains("--generate"), "{args:?}: {error}");
+        }
+    }
+
+    #[test]
     fn rm_is_an_alias_for_delete() {
         assert!(
             matches!(parse(&["rm", "svc"]).unwrap(), Command::Delete(service) if service == "svc")
         );
         assert!(parse(&["rm"]).is_err());
         assert!(parse(&["rm", "a", "b"]).is_err());
+        // `--` lets a service whose name looks like a flag be deleted.
+        for name in ["--help", "-svc", "--"] {
+            assert!(
+                matches!(parse(&["delete", "--", name]).unwrap(), Command::Delete(service) if service == name),
+                "{name}"
+            );
+        }
+        assert!(parse(&["rm", "--"]).is_err());
+        assert!(parse(&["rm", "--", "a", "b"]).is_err());
         assert!(HELP.contains("rm <service>"));
         assert!(HELP.contains("edit [options]"));
     }
