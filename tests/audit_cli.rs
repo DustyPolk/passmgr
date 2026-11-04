@@ -147,8 +147,8 @@ fn audit_lists_records_as_metadata_including_arguments() {
         "{text}"
     );
     assert!(text.contains(&format!("grant={GRANT_ONE}")), "{text}");
-    assert!(text.contains(&format!("ref={REFERENCE}")), "{text}");
-    assert!(text.contains("command=/usr/bin/true"), "{text}");
+    assert!(text.contains(&format!("ref='{REFERENCE}'")), "{text}");
+    assert!(text.contains("command='/usr/bin/true'"), "{text}");
     assert!(
         text.contains(&format!("args=['--note={CANARY}']")),
         "{text}"

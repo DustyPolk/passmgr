@@ -91,20 +91,17 @@ fn describe(record: &Record) -> String {
     if let Some(grant) = record.grant {
         push_field(&mut line, "grant", &grant.to_hex());
     }
+    // The reference, command and arguments can come from an agent's refused
+    // request, so they are quoted: `  name=` or `, ` inside one cannot read as
+    // a field or an argument boundary of its own.
     if let Some(reference) = &record.reference {
-        push_field(&mut line, "ref", reference);
+        write!(line, "  ref={}", quoted(reference)).expect("writing to a String cannot fail");
     }
     if let Some(command) = &record.command {
-        push_field(&mut line, "command", command);
+        write!(line, "  command={}", quoted(command)).expect("writing to a String cannot fail");
     }
     if !record.args.is_empty() {
-        // Each argument is quoted, so `, ` or `  name=` inside one cannot
-        // read as an argument boundary or a field of its own.
-        let args: Vec<String> = record
-            .args
-            .iter()
-            .map(|arg| format!("'{}'", escape_quoted(arg)))
-            .collect();
+        let args: Vec<String> = record.args.iter().map(|arg| quoted(arg)).collect();
         write!(line, "  args=[{}]", args.join(", ")).expect("writing to a String cannot fail");
     }
     match record.termination {
@@ -113,6 +110,10 @@ fn describe(record: &Record) -> String {
         None => {}
     }
     line
+}
+
+fn quoted(value: &str) -> String {
+    format!("'{}'", escape_quoted(value))
 }
 
 fn push_field(line: &mut String, name: &str, value: &str) {
@@ -153,10 +154,10 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("ref=pm://0123456789abcdef0123456789abcdef"),
+            text.contains("ref='pm://0123456789abcdef0123456789abcdef'"),
             "{text}"
         );
-        assert!(text.contains("command=/usr/bin/true"), "{text}");
+        assert!(text.contains("command='/usr/bin/true'"), "{text}");
         assert!(text.contains("args=['--flag', 'two words']"), "{text}");
         assert!(text.contains("exit=0"), "{text}");
         assert!(
@@ -197,6 +198,18 @@ mod tests {
         record.args = vec!["it's".into()];
         let quoted = describe(&record);
         assert!(quoted.ends_with(r"args=['it\'s']"), "{quoted}");
+    }
+
+    #[test]
+    fn an_agent_supplied_command_or_ref_cannot_forge_a_field() {
+        let mut record = record(None);
+        record.termination = None;
+        record.args.clear();
+        record.reference = Some("pm://x  exit=0".into());
+        record.command = Some("/x  exit=0".into());
+        let line = describe(&record);
+        assert!(line.contains("ref='pm://x  exit=0'"), "{line}");
+        assert!(line.ends_with("command='/x  exit=0'"), "{line}");
     }
 
     #[test]
