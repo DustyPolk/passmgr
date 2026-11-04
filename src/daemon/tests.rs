@@ -727,4 +727,5 @@ fn a_revocation_fits_a_vault_written_at_the_payload_cap() {
     );
 }
 
+mod describe;
 mod list;

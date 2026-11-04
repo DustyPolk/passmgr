@@ -8,7 +8,7 @@ use std::fmt;
 
 use serde_json::{Map, Value, json};
 
-use super::entry::{Entry, decode_entries, entries_json};
+use super::entry::{Entry, decode_entries, decode_entry, entries_json};
 use super::{
     LENGTH_PREFIX_BYTES, MAX_CHUNK_BYTES, MAX_MESSAGE_BYTES, MAX_SIGNAL, MAX_TYPE_CHARS,
     PROTOCOL_VERSION, ProtocolError, split_frame,
@@ -50,6 +50,10 @@ pub enum Response {
         entries: Vec<Entry>,
         truncated: bool,
     },
+    /// The metadata of one credential a `describe` grant covers. The
+    /// password is never read, and a reference outside the grant is reported
+    /// as `not_found`, exactly like one that does not exist.
+    Entry(Entry),
     /// The request was rejected. The error is a fixed code, never echo of the
     /// request or of vault data.
     Error(ResponseError),
@@ -217,6 +221,10 @@ pub fn encode_response(response: &Response) -> Result<Vec<u8>, ProtocolError> {
             "entries": entries_json(entries),
             "truncated": truncated,
         }),
+        Response::Entry(entry) => json!({
+            "type": "entry",
+            "entry": entry.to_json(),
+        }),
         Response::Error(error) => json!({ "type": "error", "code": error.code() }),
     };
     encode_value(&json!({ "version": PROTOCOL_VERSION, "response": response }))
@@ -244,6 +252,7 @@ pub fn decode_response(frame: &[u8]) -> Result<Response, ProtocolError> {
         }
         "entries" => decode_entries(response)
             .map(|(entries, truncated)| Response::Entries { entries, truncated }),
+        "entry" => decode_entry(response).map(Response::Entry),
         "error" => decode_error_code(response).map(Response::Error),
         other => Err(ProtocolError::UnknownResponse(truncate_type(other))),
     }

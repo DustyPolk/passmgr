@@ -1,3 +1,37 @@
+## 2026-11-04 — Daemon `describe` request: one entry, same collapsing as `list` (TODO 4.4c)
+
+- `Request::Describe(DescribeRequest { reference, grant })` and
+  `Response::Entry(Entry)`; wire `{"type":"describe","ref":...,"grant":...}`
+  and `{"type":"entry","entry":{...}}`. The reference is bounded (≤128 bytes)
+  and canonicalized through `EntryId::parse_ref` on encode, on decode and
+  again in `pmd`; `validate_reference` also replaced the inline `run.ref`
+  check.
+- `pmd::describe_entry` reuses a new `metadata_grant` helper with `list`:
+  grant token -> `Grant::check_grant_for_metadata` (active + `List`) ->
+  watermark -> per-candidate `AccessRequest::list(target, None)`. A missing
+  reference and an out-of-scope one both answer the same `not_found`; every
+  other denial is `denied`. The grant is checked *before* the lookup, so a
+  dead token cannot probe which refs exist.
+- Decision (also in `DECISIONS.md`): `describe` joins protocol version 4, no
+  vault change, no migration. Like `list`, it returns metadata only; a
+  `field`-scoped grant does not cover `None`, so it cannot describe a
+  credential (conservative, deliberate).
+- Tests: 6 daemon tests (in-scope metadata, canary and out-of-scope name
+  absent from the socket bytes, byte-identical missing/out-of-scope answer,
+  tag scope per candidate, upper-case ref canonicalized, no/revoked/expired/
+  run-only grant denied, revoked grant refused before lookup) and 4 protocol
+  tests (wire shape, bounded refs, decoder refusal, missing grant token).
+  New tests live in `src/daemon/tests/describe.rs` and
+  `src/protocol/tests/describe.rs` to stay under the layout limit.
+- `SECURITY.md` current status lists `describe`; `src/client.rs` maps the new
+  response to `"entry"`.
+- Gate: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  `cargo test` all pass (`cargo audit` skipped: not installed). No dependency.
+- **Next iteration must know:** 4.4d wires `list_credentials` in
+  `src/mcp/tools.rs`; it can then share the `"entries"`/`"entry"` mapping with
+  4.4e. `src/daemon.rs` is 991 lines — split it (e.g. `list`/`describe` into
+  `src/daemon/metadata.rs`) before it crosses 1,000.
+
 ## 2026-11-04 — Daemon `list` request: metadata only, per-candidate grants (TODO 4.4b)
 
 - New `src/protocol/entry.rs` (500 lines): `Entry` (`ref`, `service`,

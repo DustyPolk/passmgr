@@ -59,11 +59,13 @@ keeps the dependency tree small and stdout hygiene under our control.
       checked up front (`Grant::check_grant_for_list`), so an inactive grant is
       denied on an empty vault. Entries that would not fit one 64 KiB frame are
       dropped and `truncated` is set; `Entry` lives in `src/protocol/entry.rs`.
-- [ ] **4.4c Daemon `describe` request**: one `Request::Describe { reference,
+- [x] **4.4c Daemon `describe` request**: one `Request::Describe { reference,
       grant }`, same per-candidate authorization and not-found collapsing as
       4.4b; output has service, username, tags, created/last-rotated only
       (`fields` is `[]` and `url` is `null` until 6.1). Tests: in-scope entry,
       out-of-scope == missing with identical error bytes, no value anywhere.
+      (No wire-type or vault change; `field`-scoped grants do not cover
+      `None`, so `describe` is out of scope for them — same as `list`.)
 - [ ] **4.4d MCP `list_credentials`**: validate `tags`/`query` against the
       hand-written schema (bounded, advisory filters only), call 4.4b, map the
       daemon's answer to `{"entries": [...]}`. No grant → `isError` with the

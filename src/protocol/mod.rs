@@ -12,8 +12,8 @@
 //! The `token` is the unlock session token (see [`crate::token`]) and is
 //! required on every request; the daemon rejects a missing or mismatched one
 //! with `unauthorized`. The `request` object always has a `"type"` field; the
-//! types this version knows are `ping`, `lock`, `run`, `list`, `challenge`,
-//! `prove`, `grant_create` and `grant_revoke`:
+//! types this version knows are `ping`, `lock`, `run`, `list`, `describe`,
+//! `challenge`, `prove`, `grant_create` and `grant_revoke`:
 //!
 //! ```json
 //! {"version":4,"token":"...","request":{"type":"ping"}}
@@ -25,6 +25,9 @@
 //!                         "cwd":"/home/alice/project"}}
 //! {"version":4,"token":"...","request":{"type":"list","tags":["prod"],
 //!                         "query":"gh","grant":"<64 lowercase hex>"}}
+//! {"version":4,"token":"...","request":{"type":"describe",
+//!                         "ref":"pm://00112233445566778899aabbccddeeff",
+//!                         "grant":"<64 lowercase hex>"}}
 //! {"version":4,"token":"...","request":{"type":"challenge"}}
 //! {"version":4,"token":"...","request":{"type":"prove","nonce":"<64 hex>",
 //!                         "digest":"<64 hex>","proof":"<64 hex>"}}
@@ -71,6 +74,13 @@
 //! it with `unknown request type`, which is a refusal, not a silently widened
 //! grant. Like `run`, it presents a grant token in addition to the session
 //! token and answers only with metadata the grant covers.
+//!
+//! `describe` was added the same way. It names one `pm://` reference and
+//! presents a grant token; the daemon applies the same per-candidate
+//! authorization as `list` and answers one [`Entry`](crate::protocol::Entry).
+//! A reference outside the grant and a reference that does not exist are
+//! answered with the identical `not_found` error, so one token cannot probe
+//! the vault for entries it was not granted.
 //!
 //! # There is no plaintext request type
 //!
@@ -218,6 +228,15 @@ pub enum Request {
     /// value. Tags and `query` only narrow the result; they cannot widen the
     /// grant's scope.
     List(ListRequest),
+    /// Describe one credential the grant covers.
+    ///
+    /// Like [`Request::List`], the caller must present a grant with the `list`
+    /// capability and the credential must be in its scope. A reference the
+    /// grant does not cover and a reference that does not exist are answered
+    /// identically with `not_found`, so `describe` is not an existence oracle
+    /// either. The answer is a [`Response::Entry`](crate::protocol::Response::Entry)
+    /// of metadata only; the password is never read.
+    Describe(DescribeRequest),
     /// Issue a single-use nonce for a human-presence proof. Answer: [`Response::Challenge`](crate::protocol::Response::Challenge).
     Challenge,
     /// Present a proof of vault-key knowledge for a challenge.
@@ -259,6 +278,7 @@ pub const REQUEST_WIRE_NAMES: &[&str] = &[
     "lock",
     "run",
     "list",
+    "describe",
     "challenge",
     "prove",
     "grant_create",
@@ -273,6 +293,7 @@ impl Request {
             Self::Lock => "lock",
             Self::Run(_) => "run",
             Self::List(_) => "list",
+            Self::Describe(_) => "describe",
             Self::Challenge => "challenge",
             Self::Prove(_) => "prove",
             Self::GrantCreate(_) => "grant_create",
@@ -377,6 +398,30 @@ impl PartialEq for ListRequest {
 }
 
 impl Eq for ListRequest {}
+
+/// The `describe` payload: one reference and the grant that allows reading it.
+///
+/// The reference is canonicalized at the boundary, so an upper-case or
+/// non-canonical spelling cannot name a different entry. Scope comes from the
+/// grant alone; the reference only selects one candidate, exactly as `list`
+/// selects its candidates.
+#[derive(Debug, Clone)]
+pub struct DescribeRequest {
+    /// `pm://<32 hex chars>` reference of the credential to describe.
+    pub reference: String,
+    /// The grant token this describe presents. Never rendered; see [`GrantToken`].
+    pub grant: GrantToken,
+}
+
+// A manual implementation for the same reason as [`RunRequest`]: compare the
+// grant hashes, which is what authorization does anyway.
+impl PartialEq for DescribeRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.reference == other.reference && self.grant.hash().matches(&other.grant.hash())
+    }
+}
+
+impl Eq for DescribeRequest {}
 
 /// The `grant_create` payload: the exact grant a human approved.
 ///
@@ -591,27 +636,14 @@ fn validate_request(request: &Request) -> Result<(), ProtocolError> {
     if let Request::List(list) = request {
         return validate_list(list);
     }
+    if let Request::Describe(describe) = request {
+        return validate_reference("describe.ref", &describe.reference);
+    }
     let Request::Run(run) = request else {
         return Ok(());
     };
     validate_env_name(&run.env)?;
-    if run.reference.is_empty() {
-        return Err(ProtocolError::InvalidRequest(
-            "run.ref must not be empty".into(),
-        ));
-    }
-    if run.reference.len() > MAX_REFERENCE_BYTES {
-        return Err(ProtocolError::InvalidRequest(format!(
-            "run.ref exceeds {MAX_REFERENCE_BYTES} bytes"
-        )));
-    }
-    // Reuse the canonical parser instead of duplicating the reference syntax.
-    // The daemon still has to check that the entry exists and is in scope.
-    if EntryId::parse_ref(&run.reference).is_err() {
-        return Err(ProtocolError::InvalidRequest(
-            "run.ref is not a valid pm:// reference".into(),
-        ));
-    }
+    validate_reference("run.ref", &run.reference)?;
     validate_absolute_path("run.cwd", &run.cwd)?;
     if run.command.is_empty() {
         return Err(ProtocolError::InvalidRequest(
@@ -635,6 +667,30 @@ fn validate_request(request: &Request) -> Result<(), ProtocolError> {
             // caller that named the command.
             validate_absolute_path("run.command[0]", argument)?;
         }
+    }
+    Ok(())
+}
+
+/// Require a bounded, canonical `pm://` reference.
+///
+/// The daemon still has to check that the entry exists and is in scope; this
+/// only rejects input no `EntryId` could have produced.
+fn validate_reference(field: &str, reference: &str) -> Result<(), ProtocolError> {
+    if reference.is_empty() {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if reference.len() > MAX_REFERENCE_BYTES {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{field} exceeds {MAX_REFERENCE_BYTES} bytes"
+        )));
+    }
+    // Reuse the canonical parser instead of duplicating the reference syntax.
+    if EntryId::parse_ref(reference).is_err() {
+        return Err(ProtocolError::InvalidRequest(format!(
+            "{field} is not a valid pm:// reference"
+        )));
     }
     Ok(())
 }

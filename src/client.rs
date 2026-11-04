@@ -276,6 +276,7 @@ fn response_kind(response: &Response) -> &'static str {
         Response::GrantApproved => "grant_approved",
         Response::GrantRevoked { .. } => "grant_revoked",
         Response::Entries { .. } => "entries",
+        Response::Entry(_) => "entry",
         Response::Error(error) => error.code(),
     }
 }

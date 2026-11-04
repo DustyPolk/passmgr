@@ -30,6 +30,12 @@ fn grant_token() -> GrantToken {
     GrantToken::from_hex(&"11".repeat(32)).expect("fixed token")
 }
 
+fn describe_request() -> Request {
+    Request::Describe(DescribeRequest {
+        reference: REF.into(),
+        grant: grant_token(),
+    })
+}
 fn run_request() -> Request {
     Request::Run(RunRequest {
         env: "API_KEY".into(),
@@ -111,6 +117,7 @@ fn round_trips_every_request() {
         prove_request(),
         run_request(),
         list_request(),
+        describe_request(),
         grant_create(),
         Request::GrantRevoke(GrantRevokeRequest::Id(grant_id())),
         Request::GrantRevoke(GrantRevokeRequest::All),
@@ -133,6 +140,7 @@ fn request_wire_names_match_the_encoder_for_every_variant() {
         prove_request(),
         run_request(),
         list_request(),
+        describe_request(),
         grant_create(),
         Request::GrantRevoke(GrantRevokeRequest::Id(grant_id())),
         Request::GrantRevoke(GrantRevokeRequest::All),
@@ -915,4 +923,5 @@ fn taking_a_frame_zeroes_the_stale_tail_behind_the_next_one() {
     );
 }
 
+mod describe;
 mod list;

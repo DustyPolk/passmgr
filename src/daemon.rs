@@ -17,9 +17,9 @@
 //! Every request is untrusted and any same-user process can connect. The
 //! daemon therefore has no request type that returns a secret; see
 //! [`crate::protocol`]. It answers `ping`, `lock`, `challenge`, `prove`,
-//! `grant_create`, `grant_revoke` and the metadata-only `list`, and `run`
-//! streams the child's already-redacted output plus an exit status (TODO
-//! 2.6c). There is no request that returns a value.
+//! `grant_create`, `grant_revoke` and the metadata-only `list` and `describe`,
+//! and `run` streams the child's already-redacted output plus an exit status
+//! (TODO 2.6c). There is no request that returns a value.
 //!
 //! `challenge`/`prove` implement the human-presence proof (TODO 3.3, see
 //! [`crate::presence`]): the daemon issues a single-use 60-second nonce and
@@ -93,14 +93,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 use crate::crypto::KEY_LEN;
-use crate::grant::{AccessRequest, Denied, GrantId, Target};
+use crate::grant::{AccessRequest, Denied, Grant, GrantId, GrantToken, Target};
 use crate::presence;
 use crate::protocol::{
-    self, GrantRevokeRequest, ListRequest, Request, Response, ResponseError, RunFrame,
+    self, DescribeRequest, GrantRevokeRequest, ListRequest, Request, Response, ResponseError,
+    RunFrame,
 };
 use crate::session;
 use crate::socket::{DaemonSocket, RuntimePaths, SocketError};
-use crate::store::MAX_TIMESTAMP_UNIX;
+use crate::store::{EntryId, MAX_TIMESTAMP_UNIX};
 use crate::token::{SessionToken, TOKEN_BYTES};
 use crate::vault::Vault;
 
@@ -754,6 +755,19 @@ fn handle_connection(
                 Handled::Rejected
             }
         }
+        Request::Describe(describe) => {
+            // Same per-candidate authorization and the same collapsed answer
+            // as `list`: an out-of-scope reference and a missing one both get
+            // `not_found` (TODO 4.4c).
+            let response = describe_entry(vault_path, key, watermarks, &describe);
+            let answered = !matches!(response, Response::Error(_));
+            let _ = write_response(&mut stream, &response);
+            if answered {
+                Handled::Served
+            } else {
+                Handled::Rejected
+            }
+        }
     }
 }
 
@@ -790,20 +804,10 @@ fn list_entries(
         Ok(vault) => vault,
         Err(_) => return Response::Error(ResponseError::Internal),
     };
-    let token_hash = request.grant.hash();
-    let Some(grant) = vault
-        .grants()
-        .iter()
-        .find(|grant| grant.matches_token(&token_hash))
-    else {
-        return Response::Error(ResponseError::Denied);
+    let grant = match metadata_grant(&vault, &request.grant, watermarks, now) {
+        Ok(grant) => grant,
+        Err(error) => return Response::Error(error),
     };
-    if grant.check_grant_for_list(now).is_err() {
-        return Response::Error(ResponseError::Denied);
-    }
-    if watermarks.check(vault.grants()).is_err() {
-        return Response::Error(ResponseError::Denied);
-    }
     let mut entries = Vec::new();
     for credential in vault.list() {
         let target = Target::new(credential.id(), credential.tags());
@@ -821,6 +825,77 @@ fn list_entries(
     }
     let (entries, truncated) = protocol::entry::fit_entries(entries);
     Response::Entries { entries, truncated }
+}
+
+/// Answer a `describe` request with the metadata of one entry its grant covers.
+///
+/// The order is the same as [`list_entries`]: grant state and `list`
+/// capability, then the rollback watermark, then the per-candidate scope check.
+/// A reference outside the grant is answered exactly like one that does not
+/// exist (`not_found`), so the response is not an existence oracle. Only
+/// [`protocol::Entry::from_credential`] is used to build the answer, and it
+/// never reads the password.
+fn describe_entry(
+    vault_path: &Path,
+    key: &LockedKey,
+    watermarks: &GrantWatermarks,
+    request: &DescribeRequest,
+) -> Response {
+    let Some(now) = unix_now() else {
+        return Response::Error(ResponseError::Internal);
+    };
+    let vault = match Vault::open_with_key(vault_path, key.as_slice()) {
+        Ok(vault) => vault,
+        Err(_) => return Response::Error(ResponseError::Internal),
+    };
+    let grant = match metadata_grant(&vault, &request.grant, watermarks, now) {
+        Ok(grant) => grant,
+        Err(error) => return Response::Error(error),
+    };
+    // The protocol validates this already; treating a malformed reference as
+    // missing keeps the answer free of any parse detail.
+    let Ok(id) = EntryId::parse_ref(&request.reference) else {
+        return Response::Error(ResponseError::NotFound);
+    };
+    let Some(credential) = vault.get_by_ref(id) else {
+        return Response::Error(ResponseError::NotFound);
+    };
+    let target = Target::new(credential.id(), credential.tags());
+    match grant.authorizes(&AccessRequest::list(target, None), now) {
+        Ok(()) => Response::Entry(protocol::Entry::from_credential(credential)),
+        // Deliberately identical to the two `not_found` answers above.
+        Err(Denied::OutOfScope) => Response::Error(ResponseError::NotFound),
+        // The grant-level checks already passed; any other denial means the
+        // state changed underneath us. Fail closed.
+        Err(_) => Response::Error(ResponseError::Denied),
+    }
+}
+
+/// The grant-level half of a metadata read (`list`/`describe`).
+///
+/// Finds the grant by the token's hash, requires it to be active with the
+/// `list` capability, and refuses a vault whose grant state went backwards
+/// (TODO R.44). No credential is looked at here, so the answer does not depend
+/// on which entries exist.
+fn metadata_grant<'v>(
+    vault: &'v Vault,
+    token: &GrantToken,
+    watermarks: &GrantWatermarks,
+    now: u64,
+) -> Result<&'v Grant, ResponseError> {
+    let token_hash = token.hash();
+    let grant = vault
+        .grants()
+        .iter()
+        .find(|grant| grant.matches_token(&token_hash))
+        .ok_or(ResponseError::Denied)?;
+    grant
+        .check_grant_for_metadata(now)
+        .map_err(|_| ResponseError::Denied)?;
+    watermarks
+        .check(vault.grants())
+        .map_err(|_| ResponseError::Denied)?;
+    Ok(grant)
 }
 
 /// Revoke one grant or every active grant, returning how many were newly

@@ -162,6 +162,18 @@ pub(super) fn decode_entries(
     Ok((entries, truncated))
 }
 
+/// Decode the single entry carried by a `describe` response.
+///
+/// The same strict parser as a list item is used, so a response can never
+/// carry anything an `Entry` could not have been built from. Extra members
+/// are ignored, but the object must still be the metadata shape.
+pub(super) fn decode_entry(response: &Map<String, Value>) -> Result<Entry, ProtocolError> {
+    let value = response
+        .get("entry")
+        .ok_or_else(|| malformed("missing 'response.entry'"))?;
+    Entry::from_json(value)
+}
+
 /// Whether a credential passes the `list` filters.
 ///
 /// `tags` requires all of them (intersection); `query` is a case-insensitive

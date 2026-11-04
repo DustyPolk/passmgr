@@ -32,7 +32,7 @@ Any process running as the same user can read the 0600 session file, so:
   *accidental* exposure: the value never crosses the socket, and relayed child
   output is redacted before it leaves `pmd`.
 - `run` requires a human-created grant token in addition to the session
-  token. The session token authorizes only `ping`, `lock`, `list`,
+  token. The session token authorizes only `ping`, `lock`, `list`, `describe`,
   `challenge`, `prove`, `grant_create` and `grant_revoke`; it can never inject
   a secret by itself, and `grant_create` still requires the human-presence
   proof. A same-user process that can read the session file still needs a
@@ -44,6 +44,12 @@ Any process running as the same user can read the 0600 session file, so:
   nonexistent one), and its tag/query filters can only narrow that set. The
   grant is checked before the vault is enumerated, so a revoked, expired,
   exhausted or run-only grant is refused even when nothing would match.
+- `describe` (TODO 4.4c) reads one entry's metadata by `pm://` reference, under
+  the same grant token, per-candidate authorization and grant-first checks as
+  `list`. A reference outside the grant's scope and a reference that does not
+  exist get byte-identical `not_found` errors, so a token cannot probe for
+  entries it was not granted. The answer is one `Entry` (ref, service,
+  username, tags, field names, URL and timestamps) and never a value.
 
 The MCP server (`pm mcp serve`, `MCP.md`) is partially implemented: it speaks
 the handshake and publishes the tool catalogue, and `tools/call` refuses every

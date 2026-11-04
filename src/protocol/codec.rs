@@ -22,9 +22,9 @@ use serde_json::{Map, Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{
-    AuthenticatedRequest, GrantCreateRequest, GrantRevokeRequest, LENGTH_PREFIX_BYTES, ListRequest,
-    MAX_BUFFERED_BYTES, MAX_MESSAGE_BYTES, MAX_TYPE_CHARS, PROTOCOL_VERSION, ProtocolError,
-    ProveRequest, Request, RunRequest, validate_request,
+    AuthenticatedRequest, DescribeRequest, GrantCreateRequest, GrantRevokeRequest,
+    LENGTH_PREFIX_BYTES, ListRequest, MAX_BUFFERED_BYTES, MAX_MESSAGE_BYTES, MAX_TYPE_CHARS,
+    PROTOCOL_VERSION, ProtocolError, ProveRequest, Request, RunRequest, validate_request,
 };
 use crate::grant::{
     Capabilities, GRANT_ID_BYTES, GrantId, GrantToken, TOKEN_HASH_BYTES, TokenHash,
@@ -291,6 +291,11 @@ fn encode_body(
             "query": list.query,
             "grant": list.grant.to_hex().as_str(),
         }),
+        Request::Describe(describe) => json!({
+            "type": "describe",
+            "ref": describe.reference,
+            "grant": describe.grant.to_hex().as_str(),
+        }),
         Request::Challenge => json!({ "type": "challenge" }),
         Request::Prove(prove) => json!({
             "type": "prove",
@@ -485,6 +490,15 @@ fn decode_body(body: &[u8]) -> Result<AuthenticatedRequest, ProtocolError> {
                     None | Some(Value::Null) => None,
                     Some(_) => Some(required_string(request, "query")?),
                 },
+                grant: GrantToken::from_hex(&grant).map_err(|_| invalid_grant_field())?,
+            })
+        }
+        "describe" => {
+            // The grant-token hex is a bearer credential even in its encoded
+            // form: keep it zeroizing rather than in a plain `String`.
+            let grant = Zeroizing::new(required_string(request, "grant")?);
+            Request::Describe(DescribeRequest {
+                reference: required_string(request, "ref")?,
                 grant: GrantToken::from_hex(&grant).map_err(|_| invalid_grant_field())?,
             })
         }

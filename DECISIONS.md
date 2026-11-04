@@ -484,10 +484,10 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
 
 - A new request type may join the current protocol version when the only
   possible old-daemon answer is a refusal: an unknown `type` decodes to
-  `unknown request type …` (`bad_request`), so `list` shipped inside version 4
-  instead of bumping to 5. Bump the version only when an old daemon would
-  answer a new request in a way *less strict* than the new contract (as v4
-  did for `run.grant`: a v3 daemon authorized a run with the session token
+  `unknown request type …` (`bad_request`), so `list` and then `describe`
+  shipped inside version 4 instead of bumping to 5. Bump the version only
+  when an old daemon would answer a new request in a way *less strict* than
+  the new contract (as v4 did for `run.grant`: a v3 daemon authorized a run with the session token
   alone). A new response type is additive for the same reason: an old client
   fails the decode closed.
 - `list` returns at most one 64 KiB frame of entries and sets `truncated` when
