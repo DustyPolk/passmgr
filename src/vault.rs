@@ -5,13 +5,20 @@ mod lock;
 mod tests;
 
 use std::fs::{self, File};
-use std::io::{self, Read};
+#[cfg(not(unix))]
+use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::crypto::{self, KdfParams};
 use crate::error::{Error, Result};
+#[cfg(unix)]
+use crate::fs_secure::{
+    self, FsError, InsecureKind, ModePolicy, OpenMode, OpenRegularOptions, OwnerPolicy,
+};
 use crate::grant::{Grant, GrantId, prune_dead};
 use crate::store::{self, Credential, EntryId};
+use crate::text::escape_path;
 
 use self::lock::{acquire_write_lock, with_path, write_container};
 
@@ -402,36 +409,58 @@ impl Vault {
 /// let two writers hold different locks and the first save would replace the
 /// link with a copy.
 pub fn read_container(path: &Path) -> Result<Vec<u8>> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        // O_NONBLOCK so that opening a FIFO returns at once; the regular-file
-        // check below then refuses it.
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-    }
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            return Err(Error::VaultNotFound(path.to_path_buf()));
-        }
-        #[cfg(unix)]
-        Err(err) if err.raw_os_error() == Some(libc::ELOOP) => {
-            return Err(Error::Refused(format!(
+    let file = {
+        let (file, _) = fs_secure::open_regular_file(
+            path,
+            OpenRegularOptions {
+                access: OpenMode::ReadOnly,
+                owner: OwnerPolicy::Any,
+                mode: ModePolicy::Any,
+            },
+        )
+        .map_err(|err| match err {
+            FsError::NotFound { path, .. } => Error::VaultNotFound(path),
+            FsError::Insecure {
+                path,
+                kind: InsecureKind::Symlink,
+            } => Error::Refused(format!(
                 "vault path '{}' is a symbolic link; pass the real file with --db",
-                path.display()
+                escape_path(&path)
+            )),
+            FsError::Insecure {
+                path,
+                kind: InsecureKind::NotRegularFile,
+            } => Error::MalformedVault(format!("'{}' is not a regular file", escape_path(&path))),
+            FsError::Insecure { path, kind } => Error::Refused(format!(
+                "refusing vault path '{}': {kind}",
+                escape_path(&path)
+            )),
+            FsError::Io { path, source } => with_path(&path, source),
+            FsError::Busy { path } => Error::VaultBusy(path),
+        })?;
+        file
+    };
+
+    #[cfg(not(unix))]
+    let file = {
+        let file = match fs::OpenOptions::new().read(true).open(path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Err(Error::VaultNotFound(path.to_path_buf()));
+            }
+            Err(err) => return Err(with_path(path, err)),
+        };
+        let metadata = file.metadata().map_err(|err| with_path(path, err))?;
+        if !metadata.is_file() {
+            return Err(Error::MalformedVault(format!(
+                "'{}' is not a regular file",
+                escape_path(path)
             )));
         }
-        Err(err) => return Err(with_path(path, err)),
+        file
     };
-    let metadata = file.metadata().map_err(|err| with_path(path, err))?;
-    if !metadata.is_file() {
-        return Err(Error::MalformedVault(format!(
-            "'{}' is not a regular file",
-            path.display()
-        )));
-    }
+
     let mut data = Vec::new();
     file.take(crypto::MAX_VAULT_BYTES as u64 + 1)
         .read_to_end(&mut data)
@@ -439,7 +468,7 @@ pub fn read_container(path: &Path) -> Result<Vec<u8>> {
     if data.len() > crypto::MAX_VAULT_BYTES {
         return Err(Error::MalformedVault(format!(
             "'{}' is too large",
-            path.display()
+            escape_path(path)
         )));
     }
     Ok(data)

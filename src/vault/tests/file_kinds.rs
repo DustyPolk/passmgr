@@ -63,3 +63,28 @@ fn a_fifo_vault_is_refused_without_waiting_for_a_writer() {
         "{result:?}"
     );
 }
+
+#[test]
+fn vault_errors_escape_hidden_characters_in_paths() {
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("real.dat");
+    saved_vault(&real);
+
+    let hostile_link = directory.path().join("evil\u{1b}[2K'link.dat");
+    std::os::unix::fs::symlink(&real, &hostile_link).unwrap();
+    let Err(Error::Refused(detail)) = read_container(&hostile_link) else {
+        panic!("expected Refused for symlink");
+    };
+    assert!(detail.contains(r"\u{1b}"), "{detail:?}");
+    assert!(detail.contains(r"\'link.dat"), "{detail:?}");
+    assert!(!detail.contains('\u{1b}'), "{detail:?}");
+
+    let hostile_dir = directory.path().join("dir\u{1b}[2K'vault");
+    fs::create_dir(&hostile_dir).unwrap();
+    let Err(Error::MalformedVault(detail)) = read_container(&hostile_dir) else {
+        panic!("expected MalformedVault for directory");
+    };
+    assert!(detail.contains(r"\u{1b}"), "{detail:?}");
+    assert!(detail.contains(r"\'vault"), "{detail:?}");
+    assert!(!detail.contains('\u{1b}'), "{detail:?}");
+}
