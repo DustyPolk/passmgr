@@ -22,17 +22,19 @@
 //! and validates the file and its directory with the same rules as the
 //! writer.
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read};
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
 use super::{
-    AuditError, EVENT_RUN, GENESIS_PREV, MAX_ARG_CHARS, MAX_ARGS, MAX_COMMAND_CHARS,
-    MAX_RECORD_BYTES, MAX_REFERENCE_CHARS, Outcome, Source, Termination, chain_hash, lock,
-    validate_directory, validate_file,
+    AUDIT_FILE_MODE, AuditError, EVENT_RUN, GENESIS_PREV, LOCK_RETRY, LOCK_TIMEOUT, MAX_ARG_CHARS,
+    MAX_ARGS, MAX_COMMAND_CHARS, MAX_RECORD_BYTES, MAX_REFERENCE_CHARS, Outcome, Source,
+    Termination, chain_hash, map_fs_error,
+};
+use crate::fs_secure::{
+    self, FlockKind, FsError, ModePolicy, OpenMode, OpenRegularOptions, OwnerPolicy,
 };
 use crate::grant::GrantId;
 use crate::timestamp;
@@ -474,29 +476,25 @@ fn open_read_only(path: &Path) -> Result<Option<File>, AuditError> {
     let directory = path
         .parent()
         .ok_or_else(|| AuditError::Malformed("the audit path has no parent directory".into()))?;
-    if !validate_directory(directory)? {
+    if !fs_secure::validate_private_dir(directory, ModePolicy::NoGroupWorld)
+        .map_err(map_fs_error)?
+    {
         return Ok(None);
     }
-    let file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(source) => {
-            return Err(AuditError::Io {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+    let (file, _metadata) = match fs_secure::open_regular_file(
+        path,
+        OpenRegularOptions {
+            access: OpenMode::ReadOnly,
+            owner: OwnerPolicy::CurrentUser,
+            mode: ModePolicy::Exact(AUDIT_FILE_MODE),
+        },
+    ) {
+        Ok(opened) => opened,
+        Err(FsError::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(map_fs_error(error)),
     };
-    let metadata = file.metadata().map_err(|source| AuditError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    validate_file(&metadata, path)?;
-    lock(&file, path, libc::LOCK_SH)?;
+    fs_secure::lock_file_with_timeout(&file, path, FlockKind::Shared, LOCK_TIMEOUT, LOCK_RETRY)
+        .map_err(map_fs_error)?;
     Ok(Some(file))
 }
 
@@ -826,5 +824,48 @@ mod tests {
             since: Some(START + 30),
         };
         assert_eq!(select(&records, &none, 10).1, 0);
+    }
+
+    #[test]
+    fn load_refuses_a_fifo_without_blocking() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = log_path(directory.path());
+        let state = directory.path().join(STATE_DIR_NAME);
+        fs::create_dir_all(&state).expect("state dir");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("chmod dir");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo_path = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(load(&fifo_path));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("reading a FIFO at the audit path must not block");
+        let error = result.expect_err("FIFO must be refused");
+        assert!(matches!(error, AuditError::Insecure { .. }), "{error:?}");
+        assert!(path.exists(), "FIFO must not be removed");
+    }
+
+    #[test]
+    fn load_refuses_a_symlink_as_insecure() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = log_path(directory.path());
+        let state = directory.path().join(STATE_DIR_NAME);
+        fs::create_dir_all(&state).expect("state dir");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("chmod dir");
+
+        let target = directory.path().join("target.jsonl");
+        fs::write(&target, b"").expect("write target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("chmod target");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink");
+
+        let error = load(&path).expect_err("symlink load");
+        assert!(matches!(error, AuditError::Insecure { .. }), "{error:?}");
     }
 }
