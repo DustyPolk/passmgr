@@ -16,12 +16,15 @@
 //! names the path and the reason, never the token.
 
 use std::fmt;
-use std::fs::OpenOptions;
 use std::io::{self, Read};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
+
+use crate::fs_secure::{
+    self, FsError, InsecureKind, ModePolicy, OpenMode, OpenRegularOptions, OwnerPolicy,
+};
+use crate::text::escape_path;
 
 use super::token::{GRANT_TOKEN_HEX_CHARS, GrantToken};
 
@@ -56,24 +59,27 @@ impl fmt::Display for GrantFileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io { path, source } => {
-                write!(f, "cannot read grant token file {}: {source}", shown(path))
+                write!(
+                    f,
+                    "cannot read grant token file '{}': {source}",
+                    escape_path(path)
+                )
             }
             Self::Insecure { path, detail } => {
-                write!(f, "refusing grant token file {}: {detail}", shown(path))
+                write!(
+                    f,
+                    "refusing grant token file '{}': {detail}",
+                    escape_path(path)
+                )
             }
             Self::Token { path } => write!(
                 f,
-                "grant token file {} does not contain one {GRANT_TOKEN_HEX_CHARS}-character \
+                "grant token file '{}' does not contain one {GRANT_TOKEN_HEX_CHARS}-character \
                  lowercase hex token",
-                shown(path)
+                escape_path(path)
             ),
         }
     }
-}
-
-/// A path is untrusted argv input; never let it drive the terminal.
-fn shown(path: &Path) -> String {
-    super::escape_hidden(&path.to_string_lossy())
 }
 
 impl std::error::Error for GrantFileError {
@@ -87,43 +93,15 @@ impl std::error::Error for GrantFileError {
 
 /// Read and validate a grant token file.
 pub fn read_grant_token(path: &Path) -> Result<GrantToken, GrantFileError> {
-    let file = OpenOptions::new()
-        .read(true)
-        // O_NONBLOCK so that opening a FIFO returns at once; the regular-file
-        // check below then refuses it.
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|source| GrantFileError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    // Check the descriptor we actually opened. `symlink_metadata` before an
-    // open is a time-of-check/time-of-use gap; `fstat` on the open file is not.
-    let metadata = file.metadata().map_err(|source| GrantFileError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    if !metadata.is_file() {
-        return Err(GrantFileError::Insecure {
-            path: path.to_path_buf(),
-            detail: "not a regular file".into(),
-        });
-    }
-    let mode = metadata.mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(GrantFileError::Insecure {
-            path: path.to_path_buf(),
-            detail: format!("permissions {mode:04o} let another user read it; use 0600"),
-        });
-    }
-    // SAFETY: `geteuid` takes no arguments and cannot fail.
-    let own_uid = unsafe { libc::geteuid() };
-    if metadata.uid() != own_uid {
-        return Err(GrantFileError::Insecure {
-            path: path.to_path_buf(),
-            detail: "not owned by the current user".into(),
-        });
-    }
+    let (file, _) = fs_secure::open_regular_file(
+        path,
+        OpenRegularOptions {
+            access: OpenMode::ReadOnly,
+            owner: OwnerPolicy::CurrentUser,
+            mode: ModePolicy::NoGroupWorld,
+        },
+    )
+    .map_err(map_fs_error)?;
 
     // The hex text is the bearer secret; wipe it when it goes out of scope.
     let mut text = Zeroizing::new(String::new());
@@ -144,6 +122,30 @@ pub fn read_grant_token(path: &Path) -> Result<GrantToken, GrantFileError> {
     })
 }
 
+fn map_fs_error(error: FsError) -> GrantFileError {
+    match error {
+        FsError::NotFound { path, source } | FsError::Io { path, source } => {
+            GrantFileError::Io { path, source }
+        }
+        FsError::Insecure { path, kind } => GrantFileError::Insecure {
+            path,
+            detail: match kind {
+                InsecureKind::Permissions { mode, .. } => {
+                    format!("permissions {mode:04o} let another user read it; use 0600")
+                }
+                other => other.to_string(),
+            },
+        },
+        FsError::Busy { path } => GrantFileError::Io {
+            path,
+            source: io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "file is locked by another process",
+            ),
+        },
+    }
+}
+
 /// Create a private token file for tests and for `grant create --out`.
 ///
 /// Kept here so the writer and the reader agree on the mode and the trailing
@@ -151,8 +153,9 @@ pub fn read_grant_token(path: &Path) -> Result<GrantToken, GrantFileError> {
 /// this helper exists only under `cfg(test)`.
 #[cfg(test)]
 fn write_for_test(path: &Path, token: &GrantToken, mode: u32) -> io::Result<()> {
+    use std::fs::OpenOptions;
     use std::io::Write as _;
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
     let mut file = OpenOptions::new()
         .write(true)
@@ -217,6 +220,10 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&path, &link).expect("symlink");
         let error = read_grant_token(&link).expect_err("must refuse a symlink");
+        assert!(
+            matches!(error, GrantFileError::Insecure { .. }),
+            "a symlink must be refused as Insecure, got {error:?}"
+        );
         let text = error.to_string();
         assert!(
             !text.contains(&*token.to_hex()),
