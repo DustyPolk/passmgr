@@ -13,7 +13,6 @@ pub mod crypto;
 pub mod daemon;
 pub mod error;
 #[cfg(unix)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod fs_secure;
 pub mod grant;
 pub mod hex;
