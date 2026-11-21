@@ -55,48 +55,36 @@ fn polite_run(fixture: &Fixture, marker: &Path) -> Request {
 
 /// Poll until `pid_file` holds at least `count` distinct pids.
 fn wait_for_pids(path: &Path, count: usize) -> HashSet<libc::pid_t> {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let mut pids = HashSet::new();
-        if let Ok(text) = fs::read_to_string(path) {
-            for line in text.lines() {
-                if let Ok(pid) = line.trim().parse::<libc::pid_t>() {
-                    pids.insert(pid);
-                }
-            }
-        }
-        if pids.len() >= count {
-            return pids;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "only {} of {count} runs reported a pid",
-            pids.len()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let read = || -> HashSet<libc::pid_t> {
+        fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect()
+    };
+    poll_until(WAIT, || Some(read()).filter(|pids| pids.len() >= count))
+        .unwrap_or_else(|| panic!("only {} of {count} runs reported a pid", read().len()))
 }
 
 /// Poll until `pid` no longer exists (the daemon reaped it).
 fn wait_for_process_exit(pid: libc::pid_t) {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        // SAFETY: signal 0 only checks for existence; the pid came from a
-        // child of this test's daemon.
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH),
-                "unexpected error probing for the child"
-            );
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the daemon did not kill and reap an injected child"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(
+        WAIT,
+        "the daemon did not kill and reap an injected child",
+        || {
+            // SAFETY: signal 0 only checks for existence; the pid came from a
+            // child of this test's daemon.
+            let gone = unsafe { libc::kill(pid, 0) } != 0;
+            if gone {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH),
+                    "unexpected error probing for the child"
+                );
+            }
+            gone
+        },
+    );
 }
 
 fn spawn_runs(

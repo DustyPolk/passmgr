@@ -19,11 +19,12 @@ down for the next iteration as if it were a stranger, because it is.
 
 # Each iteration: do exactly this
 
-1. **Orient (keep it short).** Read `DECISIONS.md` (if it exists), the
-   **top ~150 lines** of `PROGRESS.md` (newest entry first), `TODO.md`, and
-   `git log --oneline -15`. Read `MCP.md` when the item touches the MCP
-   server, grants or audit. Only read `PROGRESS-archive.md` or `TODO-done.md`
-   when you need a specific old detail; search them with `grep`.
+1. **Orient (keep it short).** Read `DECISIONS.md` (if it exists),
+   `CODING_STANDARDS.md`, the **top ~150 lines** of `PROGRESS.md` (newest
+   entry first), `TODO.md`, and `git log --oneline -15`. Read `MCP.md` when
+   the item touches the MCP server, grants or audit. Only read
+   `PROGRESS-archive.md` or `TODO-done.md` when you need a specific old
+   detail; search them with `grep`.
 2. **Pick the work.** Take the **first** item marked `- [ ]` in `TODO.md`.
    Skip items marked `- [!]` (blocked). Items under a `Phase R` (review
    findings) section count like any other; they sit at the top on purpose.
@@ -37,17 +38,11 @@ down for the next iteration as if it were a stranger, because it is.
      `PROGRESS.md`), read why before you start, and do something different:
      a smaller piece, a different approach, or a split.
 3. **Design briefly, then build.** Before writing code, decide on the types
-   and the module that owns the change. Make illegal states unrepresentable,
-   parse untrusted input at the boundary, and keep the core logic in pure
-   functions that unit tests can reach. Follow the existing code's style and
-   error types.
-4. **Test.** Every behavior change has a test that fails without the change.
-   Every security property has a test that proves it, usually with a
-   **canary secret** (a random, unique value per test) that must not appear
-   in stdout, stderr, logs, socket bytes, the audit log or MCP output. Test
-   behavior through public interfaces. Tests must be deterministic: no fixed
-   sleeps as synchronization (poll with a deadline instead), no dependency on
-   test order, no real credentials, no network, and temp dirs per test.
+   and the module that owns the change, following the **Design** rules in
+   `CODING_STANDARDS.md`.
+4. **Test.** Write the tests the **Tests** rules in `CODING_STANDARDS.md`
+   require: a test that fails without each behavior change, and a canary
+   secret for each security property.
 5. **Run the gate** (below). Fix failures. If you cannot make it pass in this
    iteration, run `git checkout . && git clean -fd`, write a `PROGRESS.md`
    entry that explains what failed, what you tried and what the next attempt
@@ -83,11 +78,10 @@ Never add work from the **Do not build** list.
 # Gate (all must pass before any commit)
 
 ```
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo audit        # not installed on this machine; skip it, do not install it
+scripts/gate.sh    # cargo fmt --check, clippy -D warnings, cargo test
 ```
+
+`cargo audit` is not installed on this machine; skip it, do not install it.
 
 The loop re-runs the gate after you finish, and rolls back your commits if it
 fails. The full suite already takes several minutes because the CLI tests are

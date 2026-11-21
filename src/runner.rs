@@ -501,6 +501,10 @@ where
                             abort(&mut child, receiver, readers, &readers_stop);
                             return Err(RunError::Cancelled);
                         }
+                        #[expect(
+                            clippy::disallowed_methods,
+                            reason = "relay poll loop: the child's exit, the deadline and the stop flags have no shared wait primitive"
+                        )]
                         std::thread::sleep(CANCEL_POLL);
                     }
                     Err(err) => {
@@ -692,6 +696,10 @@ fn terminate(child: &mut Child) -> Option<ExitStatus> {
     // the leader a zombie, so the group id stays valid for the SIGKILL below.
     let grace_end = Instant::now() + TERM_GRACE;
     while Instant::now() < grace_end && !matches!(leader_exited(pgid), Ok(true) | Err(_)) {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "waitid with WNOWAIT has no timeout; poll the leader through the SIGTERM grace period"
+        )]
         std::thread::sleep(CANCEL_POLL);
     }
     signal_group(pgid, libc::SIGKILL);

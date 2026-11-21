@@ -525,9 +525,11 @@ fn revoke_all_leaves_expired_and_exhausted_grants_alone() {
 /// an agent was busy. The daemon now opens the vault *under* the lock, so the
 /// revocation sees the newest state and only ever refuses a real failure.
 #[test]
+#[cfg(target_os = "linux")]
 fn revocation_does_not_lose_to_a_concurrent_vault_write() {
     use crate::grant::{Capabilities, Grant, GrantSpec, Scope, TokenHash};
     use crate::store::EntryId;
+    use crate::test_poll::{current_tid, wait_for_thread_to_sleep};
 
     let directory = tempfile::tempdir().expect("tempdir");
     let path = directory.path().join("vault.dat");
@@ -573,8 +575,10 @@ fn revocation_does_not_lose_to_a_concurrent_vault_write() {
     // revocation can read, then replaces the container.
     let mut writer = Vault::open_with_key_for_update(&path, key.as_slice()).expect("lock vault");
     let watermarks = GrantWatermarks::new();
+    let (tid_tx, tid_rx) = std::sync::mpsc::channel();
     let outcome = std::thread::scope(|scope| {
         let revocation = scope.spawn(|| {
+            tid_tx.send(current_tid()).expect("send revocation tid");
             revoke_grants(
                 &path,
                 &key,
@@ -583,10 +587,15 @@ fn revocation_does_not_lose_to_a_concurrent_vault_write() {
                 now,
             )
         });
-        // Long enough for the revocation thread to start and reach the lock.
-        // If it had read before locking, the change below would be invisible
-        // to it and its byte comparison would fail.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // The pause between write-lock retries is the revocation's only
+        // sleep, so seeing it there proves it reached the lock. If it had read
+        // before locking, the change below would be invisible to it and its
+        // byte comparison would fail.
+        wait_for_thread_to_sleep(
+            tid_rx.recv().expect("revocation tid"),
+            std::time::Duration::from_secs(10),
+            "the revocation never waited for the vault write lock",
+        );
         writer.add_grant(concurrent).expect("add concurrent grant");
         writer
             .save_with_key(key.as_slice())

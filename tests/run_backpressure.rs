@@ -110,6 +110,10 @@ fn wait_until_the_reader_is_the_bottleneck(stream: &UnixStream) {
             Instant::now() < deadline,
             "the daemon never blocked on the stalled reader (last {queued} bytes queued)"
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the queue counts as stable only across samples 100 ms apart; the interval is part of the condition"
+        )]
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -121,7 +125,13 @@ fn a_paused_reader_gets_every_byte_and_the_exit_frame() {
     let stream = run_stream(&fixture);
 
     // Refuse to read while the child fills its pipe, the frame channel and
-    // both socket buffers. The old write timeout killed the run here.
+    // both socket buffers. Once the daemon is blocked writing to us, keep
+    // refusing past the old write timeout, which killed the run here.
+    wait_until_the_reader_is_the_bottleneck(&stream);
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the regression is a 5 s socket write timeout; only a stall longer than that exercises it"
+    )]
     std::thread::sleep(READER_PAUSE);
 
     let frames = read_until_eof(stream);
@@ -180,20 +190,9 @@ fn lock_is_not_delayed_by_a_stalled_run_client() {
 
 /// Poll until the child has written its pid to `path`.
 fn wait_for_pid(path: &Path) -> libc::pid_t {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        if let Some(pid) = fs::read_to_string(path)
-            .ok()
-            .and_then(|text| text.trim().parse::<libc::pid_t>().ok())
-        {
-            return pid;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the child did not report its pid"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(WAIT, "the child did not report its pid", || {
+        fs::read_to_string(path).ok()?.trim().parse().ok()
+    })
 }
 
 fn process_is_gone(pid: libc::pid_t) -> bool {
@@ -222,14 +221,11 @@ fn the_run_deadline_kills_the_child_while_the_client_is_not_reading() {
         .expect("write request");
     let pid = wait_for_pid(&pid_file);
 
-    let deadline = Instant::now() + Duration::from_secs(4);
-    while !process_is_gone(pid) {
-        assert!(
-            Instant::now() < deadline,
-            "the child outlived its run deadline while the client was not reading"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(
+        Duration::from_secs(4),
+        "the child outlived its run deadline while the client was not reading",
+        || process_is_gone(pid),
+    );
 
     let frames = read_until_eof(stream);
     let finished = exit_frame(&frames);

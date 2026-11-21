@@ -362,6 +362,10 @@ fn a_missing_grant_file_is_refused_rather_than_starting_grantless() {
 // `tools/call` for `list_credentials` (TODO 4.4d)
 // ---------------------------------------------------------------------------
 
+#[expect(
+    clippy::duplicate_mod,
+    reason = "`support` and `cli_support` each include `src/test_poll.rs`; this is the one binary that loads both"
+)]
 mod support;
 
 use passmgr::grant::Capabilities;

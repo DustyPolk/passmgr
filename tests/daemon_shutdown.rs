@@ -32,19 +32,9 @@ fn detached_output_run(fixture: &Fixture, pid_file: &Path) -> Request {
 
 /// Poll until the child has written its pid to `path`.
 fn wait_for_pid(path: &Path) -> libc::pid_t {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        if let Ok(text) = fs::read_to_string(path) {
-            if let Ok(pid) = text.trim().parse::<libc::pid_t>() {
-                return pid;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the child did not report its pid"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(WAIT, "the child did not report its pid", || {
+        fs::read_to_string(path).ok()?.trim().parse().ok()
+    })
 }
 
 /// Poll until `pid` no longer exists, proving the daemon reaped the child.
@@ -54,24 +44,23 @@ fn wait_for_process_exit(pid: libc::pid_t) {
 
 /// As [`wait_for_process_exit`], but with a caller-chosen deadline.
 fn wait_for_process_exit_within(pid: libc::pid_t, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        // SAFETY: signal 0 only checks for the process's existence; the pid
-        // came from a child of this test's daemon.
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH),
-                "unexpected error probing for the child"
-            );
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the daemon did not kill and reap the injected child"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(
+        timeout,
+        "the daemon did not kill and reap the injected child",
+        || {
+            // SAFETY: signal 0 only checks for the process's existence; the
+            // pid came from a child of this test's daemon.
+            let gone = unsafe { libc::kill(pid, 0) } != 0;
+            if gone {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH),
+                    "unexpected error probing for the child"
+                );
+            }
+            gone
+        },
+    );
 }
 
 #[test]
@@ -242,6 +231,10 @@ fn a_run_in_flight_is_not_killed_by_the_idle_timeout() {
 
     // Let the idle deadline get close before starting a command that outlives
     // it by seconds.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "positions the run just before the 3 s idle deadline; pmd exposes no earlier signal, and a shorter wait still starts a run that outlives the deadline"
+    )]
     std::thread::sleep(Duration::from_millis(2_500));
     let ask = fixture.run_request("API_KEY", &["/bin/sh", "-c", "sleep 5; printf done"]);
     let (frames, _) = read_run(&socket, &fixture.token, &ask);

@@ -12,36 +12,14 @@ The commit range to review is given at the end of this prompt
 
 # What to read
 
-`PROMPT.md` (the design invariants and rules; you are held to them too),
-`MCP.md`, `DECISIONS.md`, the top of `PROGRESS.md`, `TODO.md`, and the diff.
+`CODING_STANDARDS.md` (what to look for), `PROMPT.md` (the design
+invariants and rules; you are held to them too), `MCP.md`, `DECISIONS.md`,
+the top of `PROGRESS.md`, `TODO.md`, and the diff.
 Open the full surrounding code wherever the diff alone is not enough to judge.
 
-# What to look for, in priority order
+# What to look for
 
-1. **Secret exposure.** Any path where a secret value or grant token could
-   reach stdout, stderr, a log, the audit log, an error message, `Debug`
-   output, the socket, the MCP stream, argv, or a file with loose permissions.
-   Check every new `println!`/`eprintln!`/`format!`/`{:?}` and every new
-   serialize call.
-2. **Authorization holes.** A check done only on the client side; scope,
-   expiry or allowlist not enforced in `pmd`; an agent able to mint, widen or
-   approve a grant; TTY gates that can be bypassed; reveal code reachable from
-   agent context.
-3. **Unsafe input handling.** Unbounded reads or allocations, panics on
-   malformed input (`unwrap`/`expect`/indexing on untrusted data), path
-   traversal, symlink following, TOCTOU on files, integer overflow in length
-   math, environment-variable injection.
-4. **Tests that don't prove what they claim.** Assertions that cannot fail,
-   canaries that are never actually injected, tests that pass for the wrong
-   reason, fixed sleeps, order dependence. A security property in a TODO item
-   or doc without a test that would catch its regression.
-5. **Crypto misuse.** Nonce reuse, non-constant-time comparisons, missing
-   zeroize, parameters changed without migration.
-6. **Drift.** A TODO item checked off but not fully done; docs (`README.md`,
-   `FORMAT.md`, `MCP.md`, `SECURITY.md`, `AGENTS.md`, `--help`) that no longer
-   match the code; decisions made in code but not recorded in `DECISIONS.md`.
-7. **Maintainability.** Files over ~1,000 lines, duplicated logic that
-   should be one function, dead code, workaround code that hides a root cause.
+Apply every rule in `CODING_STANDARDS.md` to the diff, in its priority order.
 
 Verify each suspicion before you report it. Run a command, write a scratch
 test in `/tmp`, or read the exact code path. A finding you could not confirm

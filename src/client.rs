@@ -413,6 +413,10 @@ pub fn spawn_daemon(
             // A daemon started earlier could answer before our child discovers
             // it cannot take the instance lock. Let pmd reach that decision,
             // then require that our own child is still alive.
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "pmd gives no signal for losing the instance lock; one poll slice lets it decide before we check the child"
+            )]
             std::thread::sleep(POLL_INTERVAL);
             match child.try_wait() {
                 Ok(None) => return Ok(pid),
@@ -439,6 +443,10 @@ pub fn spawn_daemon(
                 ),
             ));
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "startup poll loop: the child gives no readiness signal besides answering a ping"
+        )]
         std::thread::sleep(POLL_INTERVAL);
     }
 }

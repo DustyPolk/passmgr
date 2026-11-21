@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_poll::{wait_for, wait_until};
 
 fn inherited() -> Vec<(OsString, OsString)> {
     inherited_env([
@@ -406,14 +407,11 @@ fn a_vanished_client_stops_a_child_that_keeps_its_pipes_open() {
     );
 
     let pid = wait_for_pid_file(&pid_file);
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !process_is_gone(pid) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the child survived the vanished client"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(
+        Duration::from_secs(2),
+        "the child survived the vanished client",
+        || process_is_gone(pid),
+    );
 }
 
 #[test]
@@ -459,14 +457,11 @@ fn a_vanished_client_stops_a_child_that_closed_its_pipes() {
     );
 
     let pid = wait_for_pid_file(&pid_file);
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !process_is_gone(pid) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the child survived the vanished client"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(
+        Duration::from_secs(2),
+        "the child survived the vanished client",
+        || process_is_gone(pid),
+    );
 }
 
 #[test]
@@ -496,19 +491,15 @@ fn a_client_that_is_already_gone_starts_no_child() {
 }
 
 fn wait_for_pid_file(path: &Path) -> libc::pid_t {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            if let Ok(pid) = text.trim().parse::<libc::pid_t>() {
-                return pid;
-            }
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the child did not report the grandchild's pid"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(
+        Duration::from_secs(10),
+        "the child did not report the grandchild's pid",
+        || {
+            std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| text.trim().parse::<libc::pid_t>().ok())
+        },
+    )
 }
 
 /// A zombie has been killed but waits for init to reap it; that counts as
@@ -567,14 +558,11 @@ fn cancellation_kills_a_grandchild_that_holds_the_pipes() {
         started.elapsed()
     );
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !process_is_gone(grandchild) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the grandchild holding the pipes survived the cancel"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(
+        Duration::from_secs(10),
+        "the grandchild holding the pipes survived the cancel",
+        || process_is_gone(grandchild),
+    );
 }
 
 #[test]
@@ -616,21 +604,21 @@ fn a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes() {
 
     // Wait for the leader to exit. If it disappears instead of turning
     // into a zombie, something reaped it while the group is still alive.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        match process_state(leader) {
-            Some('Z') => break,
-            Some(_) => {}
+    wait_for(
+        Duration::from_secs(5),
+        "the leader never became a zombie",
+        || match process_state(leader) {
+            Some('Z') => true,
+            Some(_) => false,
             None => panic!("the leader was reaped while its group was still in use"),
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the leader never became a zombie"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+        },
+    );
 
     // Give a relay that polls `try_wait` three poll slices to reap it.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "asserts the relay does NOT reap the leader within a window; a short wait can only miss a bug, never fail a correct relay"
+    )]
     std::thread::sleep(CANCEL_POLL * 3);
     assert_eq!(
         process_state(leader),
@@ -643,14 +631,11 @@ fn a_finished_leader_is_not_reaped_while_a_grandchild_holds_the_pipes() {
     assert!(matches!(result, Err(RunError::Cancelled)));
 
     for pid in [leader, grandchild] {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !process_is_gone(pid) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "process {pid} survived the cancel"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        wait_for(
+            Duration::from_secs(10),
+            &format!("process {pid} survived the cancel"),
+            || process_is_gone(pid),
+        );
     }
 }
 
@@ -673,14 +658,11 @@ fn a_background_process_does_not_outlive_a_completed_run() {
     assert!(stdout_bytes(&frames).is_empty());
 
     let grandchild = wait_for_pid_file(&pid_file);
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while !process_is_gone(grandchild) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "a background process outlived the completed run with the secret in its environment"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(
+        Duration::from_secs(2),
+        "a background process outlived the completed run with the secret in its environment",
+        || process_is_gone(grandchild),
+    );
 }
 
 #[test]
@@ -729,14 +711,11 @@ fn a_timeout_kills_the_whole_process_group() {
     assert!(result.expect("run").timed_out);
 
     let grandchild = wait_for_pid_file(&pid_file);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !process_is_gone(grandchild) {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "grandchild {grandchild} survived the run timeout"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(
+        Duration::from_secs(5),
+        &format!("grandchild {grandchild} survived the run timeout"),
+        || process_is_gone(grandchild),
+    );
 }
 
 #[test]

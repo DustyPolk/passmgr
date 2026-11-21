@@ -15,7 +15,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use passmgr::crypto::{self, KdfParams};
 use passmgr::grant::{Capabilities, Grant, GrantSpec, Scope, TokenHash};
@@ -143,20 +143,17 @@ impl Fixture {
     }
 
     pub fn wait_ready(&self) {
-        let deadline = Instant::now() + WAIT;
-        loop {
-            let ready = passmgr::session::load(&self.daemon_paths())
-                .ok()
-                .is_some_and(|token| passmgr::client::ping(&self.daemon_paths(), &token).is_ok());
-            if ready {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the daemon did not become ready within {WAIT:?}"
-            );
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        wait_for(
+            WAIT,
+            &format!("the daemon did not become ready within {WAIT:?}"),
+            || {
+                passmgr::session::load(&self.daemon_paths())
+                    .ok()
+                    .is_some_and(|token| {
+                        passmgr::client::ping(&self.daemon_paths(), &token).is_ok()
+                    })
+            },
+        );
     }
 }
 
