@@ -990,6 +990,23 @@ Defined in `src/error.rs`; this is a contract, never renumber. Use the
   check in all three, so a malformed request is diagnosed before a grant is
   demanded.
 
+## Unix filesystem security
+
+- `src/fs_secure.rs` is the single Unix-only internal module owning private
+  regular-file open (`O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC` + descriptor `fstat`
+  checks for regular file, owner and mode), private `0700` directory
+  validation/creation, timed non-blocking shared/exclusive `flock`, and atomic
+  `0600` temp-file write with durability sync. Callers (`session`, `grant/file`,
+  `audit`, `vault`, `vault/lock`, `socket`) route through it while preserving
+  their own module-local error enums at each boundary.
+- Lock files (`pmd.lock`, `<vault>.lock`) open with
+  `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, verify regular-file and current-user
+  ownership, narrow permissions to `0600` on the verified descriptor rather
+  than chmodding a path, and are never unlinked while held; runtime directory,
+  session token, grant token and audit paths refuse loose modes without repair.
+  `<vault>.lock` symlink refusal intentionally preserves `Error::Io` (exit 1)
+  for CLI exit-code stability.
+
 ## Dependencies
 
 - Allowed: `aes`, `aes-gcm`, `argon2`, `getrandom`, `libc`, `serde_json`,

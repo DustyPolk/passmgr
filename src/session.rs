@@ -15,11 +15,13 @@
 //! instead of a silent token leak.
 
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::fs::{self, File};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
+use crate::fs_secure::{
+    self, FsError, ModePolicy, OpenMode, OpenRegularOptions, OwnerPolicy, PRIVATE_FILE_MODE,
+};
 use crate::socket::{RuntimePaths, SocketError};
 use crate::text::escape_path;
 use crate::token::{SessionToken, TokenError};
@@ -27,8 +29,6 @@ use zeroize::Zeroizing;
 
 /// A session file larger than this is not one we wrote.
 const MAX_SESSION_FILE_BYTES: usize = 512;
-/// The only mode a session file may have.
-const SESSION_FILE_MODE: u32 = 0o600;
 
 /// Write `token` to the session file atomically, creating the 0700 runtime
 /// directory if needed.
@@ -39,35 +39,11 @@ const SESSION_FILE_MODE: u32 = 0o600;
 pub fn store(paths: &RuntimePaths, token: &SessionToken) -> Result<(), SessionError> {
     paths.ensure_dir().map_err(SessionError::Socket)?;
     let path = paths.session();
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".session-")
-        .permissions(fs::Permissions::from_mode(SESSION_FILE_MODE))
-        .tempfile_in(paths.dir())
-        .map_err(|source| SessionError::Io {
-            path: paths.dir().to_path_buf(),
-            source,
-        })?;
-
     let hex = token.to_hex();
-    temporary
-        .write_all(hex.as_bytes())
-        .and_then(|()| temporary.write_all(b"\n"))
-        .and_then(|()| temporary.as_file().sync_all())
-        .map_err(|source| SessionError::Io {
-            path: path.clone(),
-            source,
-        })?;
-    temporary.persist(&path).map_err(|err| SessionError::Io {
-        path: path.clone(),
-        source: err.error,
-    })?;
-
-    // Make the rename durable. Failure here is not fatal for a runtime file:
-    // the token is already readable.
-    if let Ok(directory) = File::open(paths.dir()) {
-        let _ = directory.sync_all();
-    }
-    Ok(())
+    let mut contents = Zeroizing::new(Vec::with_capacity(hex.len() + 1));
+    contents.extend_from_slice(hex.as_bytes());
+    contents.push(b'\n');
+    fs_secure::atomic_write_private(&path, &contents, ".session-", "").map_err(map_fs_error)
 }
 
 /// Read and validate the session token.
@@ -77,22 +53,15 @@ pub fn store(paths: &RuntimePaths, token: &SessionToken) -> Result<(), SessionEr
 /// at 0600.
 pub fn load(paths: &RuntimePaths) -> Result<SessionToken, SessionError> {
     let path = paths.session();
-    let (file, metadata) = open_regular(&path)?;
-    let mode = metadata.mode() & 0o777;
-    if mode != SESSION_FILE_MODE {
-        return Err(SessionError::Insecure {
-            path,
-            detail: format!("permissions {mode:04o}, expected 0600"),
-        });
-    }
-    // SAFETY: `geteuid` takes no arguments and cannot fail.
-    let own_uid = unsafe { libc::geteuid() };
-    if metadata.uid() != own_uid {
-        return Err(SessionError::Insecure {
-            path,
-            detail: "not owned by the current user".into(),
-        });
-    }
+    let (file, _) = fs_secure::open_regular_file(
+        &path,
+        OpenRegularOptions {
+            access: OpenMode::ReadOnly,
+            owner: OwnerPolicy::CurrentUser,
+            mode: ModePolicy::Exact(PRIVATE_FILE_MODE),
+        },
+    )
+    .map_err(map_fs_error)?;
     read_token(file, &path)
 }
 
@@ -105,7 +74,14 @@ pub fn load(paths: &RuntimePaths) -> Result<SessionToken, SessionError> {
 /// symlink and never removes a foreign file.
 pub fn remove_if_matches(paths: &RuntimePaths, token: &SessionToken) -> bool {
     let path = paths.session();
-    let Ok((file, _)) = open_regular(&path) else {
+    let Ok((file, _)) = fs_secure::open_regular_file(
+        &path,
+        OpenRegularOptions {
+            access: OpenMode::ReadOnly,
+            owner: OwnerPolicy::CurrentUser,
+            mode: ModePolicy::Any,
+        },
+    ) else {
         return false;
     };
     let Ok(found) = read_token(file, &path) else {
@@ -114,36 +90,23 @@ pub fn remove_if_matches(paths: &RuntimePaths, token: &SessionToken) -> bool {
     found.matches(token) && fs::remove_file(&path).is_ok()
 }
 
-/// Open `path` and refuse anything but a regular file.
-///
-/// The checks use the descriptor that was opened, so the file cannot be
-/// swapped between the check and the read. A symlink planted at the path is an
-/// attack, not a convenience, and `O_NONBLOCK` keeps a FIFO from blocking the
-/// open until the regular-file check refuses it.
-fn open_regular(path: &Path) -> Result<(File, fs::Metadata), SessionError> {
-    let io_error = |source| SessionError::Io {
-        path: path.to_path_buf(),
-        source,
-    };
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|source| match source.raw_os_error() {
-            Some(libc::ELOOP) => SessionError::Insecure {
-                path: path.to_path_buf(),
-                detail: "not a regular file".into(),
-            },
-            _ => io_error(source),
-        })?;
-    let metadata = file.metadata().map_err(io_error)?;
-    if !metadata.is_file() {
-        return Err(SessionError::Insecure {
-            path: path.to_path_buf(),
-            detail: "not a regular file".into(),
-        });
+fn map_fs_error(error: FsError) -> SessionError {
+    match error {
+        FsError::NotFound { path, source } | FsError::Io { path, source } => {
+            SessionError::Io { path, source }
+        }
+        FsError::Insecure { path, kind } => SessionError::Insecure {
+            path,
+            detail: kind.to_string(),
+        },
+        FsError::Busy { path } => SessionError::Io {
+            path,
+            source: io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "file is locked by another process",
+            ),
+        },
     }
-    Ok((file, metadata))
 }
 
 fn read_token(file: File, path: &Path) -> Result<SessionToken, SessionError> {
@@ -212,7 +175,7 @@ impl std::error::Error for SessionError {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::DirBuilderExt;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     use super::*;
     use tempfile::TempDir;
@@ -278,15 +241,23 @@ mod tests {
         assert!(matches!(error, SessionError::Insecure { .. }), "{error:?}");
         assert!(error.to_string().contains("0644"), "{error}");
 
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).expect("chmod");
+        let error = load(&paths).expect_err("non-0600 mode");
+        assert!(matches!(error, SessionError::Insecure { .. }), "{error:?}");
+        assert!(error.to_string().contains("0400"), "{error}");
+
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
         assert!(load(&paths).is_ok());
 
-        // A symlink pointing at a valid token file is still refused.
+        // A symlink pointing at a valid token file is still refused and never removed.
         let target = paths.dir().join("elsewhere");
         fs::rename(&path, &target).expect("move token");
         std::os::unix::fs::symlink(&target, &path).expect("symlink");
         let error = load(&paths).expect_err("symlink");
         assert!(matches!(error, SessionError::Insecure { .. }), "{error:?}");
+        assert!(!remove_if_matches(&paths, &token));
+        assert!(fs::symlink_metadata(&path).expect("lstat").is_symlink());
+        assert!(target.exists(), "symlink target must remain untouched");
 
         fs::remove_file(&path).expect("unlink symlink");
         fs::create_dir(&path).expect("directory at the token path");

@@ -21,8 +21,9 @@
 //! # File handling
 //!
 //! The file is created 0600 inside a 0700 `passmgr` state directory, opened
-//! with `O_NOFOLLOW`, and refused if it is a symlink, is not a regular file,
-//! is not owned by the current user, or has any group/world permission bit.
+//! with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, and refused if it is a symlink,
+//! is not a regular file, is not owned by the current user, or has permissions
+//! other than 0600.
 //! Writes use `O_APPEND` under the lock and are `fsync`ed before the caller
 //! continues, so a recorded use is durable.
 //!
@@ -34,18 +35,19 @@
 use std::env;
 use std::ffi::OsStr;
 use std::fmt;
-use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::fs_secure::{
+    self, FlockKind, FsError, ModePolicy, OpenMode, OpenRegularOptions, OwnerPolicy,
+};
 use crate::grant::GrantId;
+use crate::text::escape_path;
 use crate::timestamp;
 
 mod read;
@@ -71,8 +73,7 @@ const MAX_REFERENCE_CHARS: usize = 256;
 const MAX_COMMAND_CHARS: usize = 256;
 const MAX_ARG_CHARS: usize = 128;
 const MAX_ARGS: usize = 16;
-const AUDIT_FILE_MODE: u32 = 0o600;
-const STATE_DIR_MODE: u32 = 0o700;
+const AUDIT_FILE_MODE: u32 = fs_secure::PRIVATE_FILE_MODE;
 const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCK_RETRY: Duration = Duration::from_millis(10);
 
@@ -303,130 +304,32 @@ fn open_locked(path: &Path) -> Result<File, AuditError> {
     let directory = path
         .parent()
         .ok_or_else(|| AuditError::Malformed("the audit path has no parent directory".into()))?;
-    ensure_directory(directory)?;
-    let file = OpenOptions::new()
-        .read(true)
-        .append(true)
-        .create(true)
-        .truncate(false)
-        .mode(AUDIT_FILE_MODE)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(path)
-        .map_err(|source| AuditError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    let metadata = file.metadata().map_err(|source| AuditError::Io {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    validate_file(&metadata, path)?;
-    lock(&file, path, libc::LOCK_EX)?;
+    fs_secure::ensure_private_dir(directory, true, ModePolicy::NoGroupWorld)
+        .map_err(map_fs_error)?;
+    let (file, _metadata) = fs_secure::open_regular_file(
+        path,
+        OpenRegularOptions {
+            access: OpenMode::CreateReadAppend,
+            owner: OwnerPolicy::CurrentUser,
+            mode: ModePolicy::Exact(AUDIT_FILE_MODE),
+        },
+    )
+    .map_err(map_fs_error)?;
+    fs_secure::lock_file_with_timeout(&file, path, FlockKind::Exclusive, LOCK_TIMEOUT, LOCK_RETRY)
+        .map_err(map_fs_error)?;
     Ok(file)
 }
 
-/// Check that an already-open descriptor is the private regular file we wrote.
-fn validate_file(metadata: &fs::Metadata, path: &Path) -> Result<(), AuditError> {
-    if !metadata.is_file() {
-        return Err(AuditError::Insecure {
-            path: path.to_path_buf(),
-            detail: "not a regular file".into(),
-        });
-    }
-    let mode = metadata.mode() & 0o777;
-    if mode != AUDIT_FILE_MODE {
-        return Err(AuditError::Insecure {
-            path: path.to_path_buf(),
-            detail: format!("permissions {mode:04o}, expected 0600"),
-        });
-    }
-    // SAFETY: `geteuid` takes no arguments and cannot fail.
-    if metadata.uid() != unsafe { libc::geteuid() } {
-        return Err(AuditError::Insecure {
-            path: path.to_path_buf(),
-            detail: "not owned by the current user".into(),
-        });
-    }
-    Ok(())
-}
-
-/// Validate a directory without creating it. `Ok(false)` means it does not
-/// exist yet; a reader treats that as an empty log, a writer creates it.
-fn validate_directory(directory: &Path) -> Result<bool, AuditError> {
-    match fs::symlink_metadata(directory) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(AuditError::Insecure {
-                    path: directory.to_path_buf(),
-                    detail: "not a real directory".into(),
-                });
-            }
-            let mode = metadata.mode() & 0o777;
-            if mode & 0o077 != 0 {
-                return Err(AuditError::Insecure {
-                    path: directory.to_path_buf(),
-                    detail: format!("permissions {mode:04o}, expected no group/world bits"),
-                });
-            }
-            // SAFETY: `geteuid` takes no arguments and cannot fail.
-            if metadata.uid() != unsafe { libc::geteuid() } {
-                return Err(AuditError::Insecure {
-                    path: directory.to_path_buf(),
-                    detail: "not owned by the current user".into(),
-                });
-            }
-            Ok(true)
+fn map_fs_error(error: FsError) -> AuditError {
+    match error {
+        FsError::NotFound { path, source } | FsError::Io { path, source } => {
+            AuditError::Io { path, source }
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(source) => Err(AuditError::Io {
-            path: directory.to_path_buf(),
-            source,
-        }),
-    }
-}
-
-fn ensure_directory(directory: &Path) -> Result<(), AuditError> {
-    if validate_directory(directory)? {
-        return Ok(());
-    }
-    DirBuilder::new()
-        .recursive(true)
-        .mode(STATE_DIR_MODE)
-        .create(directory)
-        .map_err(|source| AuditError::Io {
-            path: directory.to_path_buf(),
-            source,
-        })?;
-    // Re-check rather than trusting the umask or a racing creator.
-    if !validate_directory(directory)? {
-        return Err(AuditError::Io {
-            path: directory.to_path_buf(),
-            source: io::Error::new(io::ErrorKind::NotFound, "the directory disappeared"),
-        });
-    }
-    Ok(())
-}
-
-fn lock(file: &File, path: &Path, operation: i32) -> Result<(), AuditError> {
-    let deadline = Instant::now() + LOCK_TIMEOUT;
-    loop {
-        // SAFETY: `as_raw_fd` returns a descriptor owned by `file`, which
-        // outlives this call.
-        let rc = unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) };
-        if rc == 0 {
-            return Ok(());
-        }
-        let err = io::Error::last_os_error();
-        if err.kind() != io::ErrorKind::WouldBlock {
-            return Err(AuditError::Io {
-                path: path.to_path_buf(),
-                source: err,
-            });
-        }
-        if Instant::now() >= deadline {
-            return Err(AuditError::Busy(path.to_path_buf()));
-        }
-        thread::sleep(LOCK_RETRY);
+        FsError::Insecure { path, kind } => AuditError::Insecure {
+            path,
+            detail: kind.to_string(),
+        },
+        FsError::Busy { path } => AuditError::Busy(path),
     }
 }
 
@@ -509,15 +412,19 @@ impl fmt::Display for AuditError {
                 f.write_str("neither XDG_STATE_HOME nor HOME names an absolute state directory")
             }
             Self::Io { path, source } => {
-                write!(f, "cannot access '{}': {source}", path.display())
+                write!(f, "cannot access '{}': {source}", escape_path(path))
             }
             Self::Insecure { path, detail } => {
-                write!(f, "refusing the audit path '{}': {detail}", path.display())
+                write!(
+                    f,
+                    "refusing the audit path '{}': {detail}",
+                    escape_path(path)
+                )
             }
             Self::Busy(path) => write!(
                 f,
                 "the audit log '{}' is locked by another process; nothing was recorded",
-                path.display()
+                escape_path(path)
             ),
             Self::Malformed(detail) => write!(f, "malformed audit log: {detail}"),
             Self::Clock => f.write_str("the system clock is before the Unix epoch"),
@@ -537,7 +444,7 @@ impl std::error::Error for AuditError {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     use super::*;
 
@@ -732,5 +639,87 @@ mod tests {
 
         let error = append(&path, &event(&[])).expect_err("oversized last line");
         assert!(matches!(error, AuditError::Malformed(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_fifo_at_the_audit_path_fails_without_blocking() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = audit_file(directory.path());
+        let state = directory.path().join(STATE_DIR_NAME);
+        fs::create_dir_all(&state).expect("state dir");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("chmod dir");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let fifo_path = path.clone();
+        std::thread::spawn(move || {
+            let check = check_writable(&fifo_path);
+            let write = append(&fifo_path, &event(&[]));
+            let _ = tx.send((check, write));
+        });
+        let (check, write) = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("opening a FIFO at the audit path must not block");
+        assert!(
+            matches!(check, Err(AuditError::Insecure { .. })),
+            "{check:?}"
+        );
+        assert!(
+            matches!(write, Err(AuditError::Insecure { .. })),
+            "{write:?}"
+        );
+        assert!(path.exists(), "FIFO must not be removed");
+    }
+
+    #[test]
+    fn a_symlink_at_the_audit_path_is_refused_as_insecure() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = audit_file(directory.path());
+        let state = directory.path().join(STATE_DIR_NAME);
+        fs::create_dir_all(&state).expect("state dir");
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).expect("chmod dir");
+
+        let target = directory.path().join("target.jsonl");
+        fs::write(&target, b"untouched").expect("write target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("chmod target");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink");
+
+        let error = check_writable(&path).expect_err("symlink check_writable");
+        assert!(matches!(error, AuditError::Insecure { .. }), "{error:?}");
+        let error = append(&path, &event(&[])).expect_err("symlink append");
+        assert!(matches!(error, AuditError::Insecure { .. }), "{error:?}");
+        assert_eq!(fs::read(&target).expect("read target"), b"untouched");
+    }
+
+    #[test]
+    fn audit_error_display_escapes_hidden_characters_in_paths() {
+        let hostile = PathBuf::from("/tmp/evil\u{1b}[2K\u{7}\u{202e}audit.jsonl");
+        let errors = [
+            AuditError::Io {
+                path: hostile.clone(),
+                source: io::Error::other("disk error"),
+            },
+            AuditError::Insecure {
+                path: hostile.clone(),
+                detail: "not a regular file".into(),
+            },
+            AuditError::Busy(hostile),
+        ];
+        for error in &errors {
+            let rendered = error.to_string();
+            assert!(rendered.contains(r"\u{1b}"), "{rendered:?}");
+            assert!(rendered.contains(r"\u{7}"), "{rendered:?}");
+            assert!(rendered.contains(r"\u{202e}"), "{rendered:?}");
+            assert!(
+                !rendered.contains('\u{1b}')
+                    && !rendered.contains('\u{7}')
+                    && !rendered.contains('\u{202e}'),
+                "{rendered:?}"
+            );
+        }
     }
 }
