@@ -11,10 +11,13 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tempfile::TempDir;
+
+#[path = "../../src/test_poll.rs"]
+mod test_poll;
+pub use test_poll::*;
 
 /// Argon2 uses 64 MiB per unlock; run CLI tests one at a time to keep memory
 /// use predictable.
@@ -174,19 +177,16 @@ pub fn wait_for_prompt(
     needle: &str,
     timeout: Duration,
 ) -> String {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let text = fs::read_to_string(stderr_path).unwrap_or_default();
-        if text.contains(needle) {
-            return text;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("timed out after {timeout:?} waiting for {needle:?}; stderr so far:\n{text}");
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    let read = || fs::read_to_string(stderr_path).unwrap_or_default();
+    poll_until(timeout, || {
+        Some(read()).filter(|text| text.contains(needle))
+    })
+    .unwrap_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        let text = read();
+        panic!("timed out after {timeout:?} waiting for {needle:?}; stderr so far:\n{text}");
+    })
 }
 
 /// Run the CLI with a pseudo-terminal on the requested standard streams.

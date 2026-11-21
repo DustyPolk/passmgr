@@ -8,7 +8,7 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 use std::process::Child;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[test]
 fn run_propagates_the_child_exit_status() {
@@ -151,56 +151,38 @@ sleep 30"#;
 
 /// Poll for the pid a test child reported, with a deadline.
 fn wait_for_pid(path: &Path) -> libc::pid_t {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        if let Ok(text) = fs::read_to_string(path) {
-            if let Ok(pid) = text.trim().parse() {
-                return pid;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the child did not report its pid"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(WAIT, "the child did not report its pid", || {
+        fs::read_to_string(path).ok()?.trim().parse().ok()
+    })
 }
 
 /// Poll until `pid` no longer exists (the daemon killed and reaped it).
 fn wait_for_process_exit(pid: libc::pid_t) {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        // SAFETY: signal 0 only checks for existence; the pid came from a
-        // child of this test's daemon.
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH),
-                "unexpected error probing for the child"
-            );
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the daemon did not kill the child after its output pipe closed"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for(
+        WAIT,
+        "the daemon did not kill the child after its output pipe closed",
+        || {
+            // SAFETY: signal 0 only checks for existence; the pid came from a
+            // child of this test's daemon.
+            let gone = unsafe { libc::kill(pid, 0) } != 0;
+            if gone {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH),
+                    "unexpected error probing for the child"
+                );
+            }
+            gone
+        },
+    );
 }
 
 /// Wait for a spawned process to exit, polling with a deadline instead of
 /// sleeping for a fixed time.
 fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait().expect("poll the child") {
-            return status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the process did not exit within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    poll_until(timeout, || child.try_wait().expect("poll the child")).unwrap_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the process did not exit within {timeout:?}");
+    })
 }

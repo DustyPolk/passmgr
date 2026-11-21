@@ -568,6 +568,10 @@ pub fn run(
                 Err(SocketError::Io { source, .. })
                     if source.kind() == io::ErrorKind::WouldBlock =>
                 {
+                    #[expect(
+                        clippy::disallowed_methods,
+                        reason = "non-blocking accept loop that must also notice shutdown and revocation flags"
+                    )]
                     std::thread::sleep(POLL_INTERVAL);
                 }
                 // Another uid was rejected before any bytes were read. Keep

@@ -461,21 +461,10 @@ fn the_child_is_spawned_as_the_canonical_program_not_the_request_path() {
 /// authorized. The caller compares against a ctime captured before the run.
 fn wait_until_the_lock_is_open(lock: &std::path::Path, before: (i64, i64)) {
     use std::os::unix::fs::MetadataExt;
-    use std::time::{Duration, Instant};
 
-    let deadline = Instant::now() + WAIT;
-    loop {
-        if let Ok(metadata) = fs::metadata(lock) {
-            if (metadata.ctime(), metadata.ctime_nsec()) != before {
-                return;
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "pmd never opened the vault lock file"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_for(WAIT, "pmd never opened the vault lock file", || {
+        fs::metadata(lock).is_ok_and(|metadata| (metadata.ctime(), metadata.ctime_nsec()) != before)
+    });
 }
 
 /// A link swapped after the allowlist check must not redirect the exec.
@@ -608,9 +597,9 @@ fn a_run_is_denied_when_its_grant_expires_during_the_lock_wait() {
     // Wait until the grant is at least one whole second past expiry, so the
     // daemon's fresh read cannot land in the same second as `expires_at`.
     let expired = UNIX_EPOCH + Duration::from_secs(fixture.grant_expires_at + 1);
-    if let Ok(remaining) = expired.duration_since(SystemTime::now()) {
-        std::thread::sleep(remaining);
-    }
+    wait_for(WAIT, "the clock never passed the grant's expiry", || {
+        SystemTime::now() >= expired
+    });
     drop(lock);
 
     let (frames, raw) = reader.join().expect("run thread");

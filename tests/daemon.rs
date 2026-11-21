@@ -173,6 +173,10 @@ fn successful_requests_refresh_the_idle_timeout() {
             request(&socket, &fixture.token, &Request::Ping),
             Response::Pong
         );
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "paces requests across wall-clock time longer than the idle timeout under test"
+        )]
         std::thread::sleep(Duration::from_millis(250));
     }
     assert!(
@@ -215,6 +219,10 @@ fn malformed_requests_do_not_refresh_the_idle_timeout() {
             Ok(Response::Error(ResponseError::BadRequest)) => rejected += 1,
             _ => break,
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "paces requests across wall-clock time longer than the idle timeout under test"
+        )]
         std::thread::sleep(Duration::from_millis(200));
     }
     assert!(rejected >= 2, "expected repeated rejected requests");
@@ -250,6 +258,10 @@ fn unauthorized_requests_do_not_refresh_the_idle_timeout() {
             // The daemon expired between our connect and the request.
             _ => break,
         }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "paces requests across wall-clock time longer than the idle timeout under test"
+        )]
         std::thread::sleep(Duration::from_millis(200));
     }
     assert!(rejected >= 2, "expected repeated unauthorized requests");

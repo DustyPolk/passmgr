@@ -15,7 +15,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use passmgr::crypto::{self, KdfParams};
 use passmgr::socket::RuntimePaths;
@@ -23,6 +23,11 @@ use passmgr::store::{self, Credential};
 use passmgr::token::SessionToken;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
+
+#[allow(dead_code)] // this binary uses only `wait_for`
+#[path = "../src/test_poll.rs"]
+mod test_poll;
+use test_poll::wait_for;
 
 const MASTER: &str = "unlock test master password";
 const SECRET: &str = "s3cret-unlock-value-must-never-leak";
@@ -145,25 +150,19 @@ impl Fixture {
 
     /// Wait until the daemon answers a ping, or fail the test.
     fn wait_ready(&self) {
-        let deadline = Instant::now() + WAIT;
-        while !self.daemon_answers() {
-            assert!(
-                Instant::now() < deadline,
-                "the daemon did not become ready within {WAIT:?}"
-            );
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        wait_for(
+            WAIT,
+            &format!("the daemon did not become ready within {WAIT:?}"),
+            || self.daemon_answers(),
+        );
     }
 
     fn wait_socket_gone(&self) {
-        let deadline = Instant::now() + WAIT;
-        while self.socket().exists() {
-            assert!(
-                Instant::now() < deadline,
-                "the daemon socket still exists after the daemon stopped"
-            );
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        wait_for(
+            WAIT,
+            "the daemon socket still exists after the daemon stopped",
+            || !self.socket().exists(),
+        );
     }
 }
 
@@ -448,19 +447,14 @@ fn unlock_passes_the_idle_timeout_to_the_daemon() {
     fixture.wait_socket_gone();
     assert!(!fixture.daemon_paths().session().exists());
 
-    let started = Instant::now();
-    loop {
-        // SAFETY: `pid` was printed by the daemon spawned for this test.
-        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) } == 0;
-        if !alive {
-            break;
-        }
-        assert!(
-            started.elapsed() < WAIT,
-            "the daemon did not expire within {WAIT:?}"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    wait_for(
+        WAIT,
+        &format!("the daemon did not expire within {WAIT:?}"),
+        || {
+            // SAFETY: `pid` was printed by the daemon spawned for this test.
+            unsafe { libc::kill(pid as libc::pid_t, 0) != 0 }
+        },
+    );
     fixture.wait_socket_gone();
     assert!(!fixture.daemon_answers());
     assert!(!fixture.daemon_paths().session().exists());

@@ -3,7 +3,9 @@ use std::io::{Read, Write};
 use std::os::unix::fs::symlink;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Instant;
+
+#[cfg(target_os = "linux")]
+use crate::test_poll::{current_tid, wait_for_thread_to_sleep};
 
 fn paths_in(temp: &tempfile::TempDir) -> RuntimePaths {
     // The parent stands in for $XDG_RUNTIME_DIR, which must already exist.
@@ -398,30 +400,36 @@ fn lock_is_released_when_the_process_that_held_it_dies() {
 }
 
 #[test]
-fn a_lock_released_by_an_exiting_holder_is_acquired() {
+#[cfg(target_os = "linux")]
+fn a_lock_released_while_the_caller_waits_is_acquired() {
     // A daemon that has just exited may take a few milliseconds to release
     // its `flock` (the descriptor can be closed on another thread, which
     // defers the final fput). Acquiring must wait that window out rather
     // than report a daemon that is no longer there.
     let temp = tempfile::tempdir().unwrap();
     let lock_path = temp.path().join("pmd.lock");
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let holder_path = lock_path.clone();
-    let holder = thread::spawn(move || {
-        let held = acquire_lock(&holder_path).unwrap();
-        ready_tx.send(()).unwrap();
-        thread::sleep(Duration::from_millis(60));
-        drop(held);
+    let held = acquire_lock(&lock_path).unwrap();
+
+    let (tid_tx, tid_rx) = mpsc::channel();
+    let contender_path = lock_path.clone();
+    let contender = thread::spawn(move || {
+        tid_tx.send(current_tid()).unwrap();
+        acquire_lock(&contender_path)
     });
 
-    ready_rx.recv().unwrap();
-    let started = Instant::now();
-    assert!(
-        acquire_lock(&lock_path).is_ok(),
-        "a lock released shortly after the attempt must be acquired"
+    // The pause between flock retries is the contender's only sleep, so
+    // seeing it there proves its first attempt was refused and it is waiting.
+    // If it gives up before the release below, the join reports the failure.
+    wait_for_thread_to_sleep(
+        tid_rx.recv().unwrap(),
+        LOCK_ACQUIRE_TIMEOUT,
+        "the contender never waited between lock retries",
     );
-    assert!(started.elapsed() < LOCK_ACQUIRE_TIMEOUT);
-    holder.join().unwrap();
+    drop(held);
+    assert!(
+        contender.join().unwrap().is_ok(),
+        "a lock released while the caller waits must be acquired"
+    );
 }
 
 fn current_gid() -> u32 {

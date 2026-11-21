@@ -55,6 +55,7 @@ command -v pi >/dev/null      || die "pi not found on PATH"
 command -v git >/dev/null     || die "git not found"
 command -v timeout >/dev/null || die "timeout not found (macOS: brew install coreutils, then use gtimeout)"
 [ -n "$GATE_CMD" ] || command -v cargo >/dev/null || die "cargo not found"
+[ -n "$GATE_CMD" ] || [ -x scripts/gate.sh ] || die "scripts/gate.sh not found or not executable"
 [ -f "$PROMPT_FILE" ]         || die "$PROMPT_FILE not found in $(pwd)"
 if [ "$REVIEW_EVERY" -gt 0 ] && [ ! -f "$REVIEW_FILE" ]; then
   die "$REVIEW_FILE not found (set REVIEW_EVERY=0 to run without reviews)"
@@ -102,9 +103,7 @@ START_HEAD=$(git rev-parse HEAD)
 
 gate() {
   if [ -n "$GATE_CMD" ]; then bash -c "$GATE_CMD"; return; fi
-  cargo fmt --check &&
-  cargo clippy --all-targets -q -- -D warnings &&
-  cargo test -q
+  scripts/gate.sh
 }
 
 # First unchecked TODO item id, e.g. "3.4a" or "R.2" ("" if none).

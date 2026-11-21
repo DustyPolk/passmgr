@@ -13,7 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use passmgr::crypto::{self, KEY_LEN, KdfParams};
 use passmgr::grant::{Capabilities, Grant, GrantSpec, GrantToken, Scope};
@@ -25,6 +25,10 @@ use passmgr::store::{self, Credential};
 use passmgr::token::SessionToken;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
+
+#[path = "../../src/test_poll.rs"]
+mod test_poll;
+pub use test_poll::*;
 
 pub const MASTER: &str = "daemon test master password";
 pub const SECRET: &str = "s3cret-injected-value-must-never-leak";
@@ -269,18 +273,19 @@ impl Fixture {
     #[allow(clippy::zombie_processes)] // the `return child` path transfers ownership
     pub fn start_with(&self, extra: &[&str]) -> Child {
         let mut child = self.spawn_with(extra);
-        let deadline = Instant::now() + WAIT;
-        loop {
-            if let Ok(Response::Pong) = try_request(&self.socket(), &self.token, &Request::Ping) {
-                return child;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("pmd did not become ready");
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let ready = poll_until(WAIT, || {
+            matches!(
+                try_request(&self.socket(), &self.token, &Request::Ping),
+                Ok(Response::Pong)
+            )
+            .then_some(())
+        });
+        if ready.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("pmd did not become ready");
         }
+        child
     }
 }
 
@@ -323,14 +328,9 @@ pub fn raw_request(socket: &Path, bytes: &[u8]) -> Response {
 }
 
 pub fn wait_for_exit(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait().expect("try_wait") {
-            return status;
-        }
-        assert!(Instant::now() < deadline, "pmd did not exit in time");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_until(timeout, "pmd did not exit in time", || {
+        child.try_wait().expect("try_wait")
+    })
 }
 
 /// Send one `run` request and collect every frame plus the raw socket bytes.

@@ -763,7 +763,7 @@ fn grant_create_refuses_a_command_with_a_hidden_character_before_the_summary() {
 #[test]
 fn grant_create_keeps_a_concurrent_vault_write_and_still_succeeds() {
     use passmgr::grant::{Grant, GrantSpec, Scope};
-    use std::time::Duration;
+    use std::os::unix::fs::MetadataExt;
 
     let _guard = serial();
     let fixture = Fixture::new();
@@ -796,6 +796,13 @@ fn grant_create_keeps_a_concurrent_vault_write_and_still_succeeds() {
 
     let out = fixture.temp_path("raced.token");
     let out_text = out.to_str().expect("path is UTF-8");
+    let lock_path = passmgr::vault::lock_path(&fixture.vault);
+    let lock_ctime = || {
+        fs::metadata(&lock_path)
+            .map(|metadata| (metadata.ctime(), metadata.ctime_nsec()))
+            .expect("lock metadata")
+    };
+    let before = lock_ctime();
     let output = std::thread::scope(|scope| {
         let create = scope.spawn(|| {
             fixture.run_pty(
@@ -818,10 +825,15 @@ fn grant_create_keeps_a_concurrent_vault_write_and_still_succeeds() {
                 &format!("{MASTER}\ny\n"),
             )
         });
-        // Long enough for the approved CLI to be waiting at the lock. If it is
-        // still earlier, it reads the new state and the race simply did not
-        // happen; either way the creation must succeed and nothing is lost.
-        std::thread::sleep(Duration::from_millis(300));
+        // The CLI `chmod`s the lock file (changing its ctime) right before it
+        // tries the flock this test holds, and only after the approval. Once
+        // that is visible the approved CLI is at the lock, so the write below
+        // lands in exactly the window this test is about.
+        wait_for(
+            WAIT,
+            "the approved CLI never reached the vault write lock",
+            || lock_ctime() != before,
+        );
         writer
             .grant_mut(seeded_id)
             .expect("seeded grant")

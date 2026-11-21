@@ -5,7 +5,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use passmgr::client;
 use passmgr::crypto::{self, KEY_LEN, KdfParams};
@@ -15,6 +15,10 @@ use passmgr::store::{self, Credential};
 use passmgr::token::SessionToken;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
+
+#[path = "../../src/test_poll.rs"]
+mod test_poll;
+pub use test_poll::*;
 
 pub const MASTER: &str = "run test master password";
 pub const SECRET: &str = "s3cret-run-value-must-never-leak";
@@ -153,17 +157,15 @@ impl Daemon {
             .expect("send token");
         drop(stdin);
 
-        let deadline = Instant::now() + WAIT;
-        loop {
-            if client::ping(&fixture.paths(), &fixture.token).is_ok() {
-                break;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("pmd did not become ready");
-            }
-            std::thread::sleep(Duration::from_millis(20));
+        let ready = poll_until(WAIT, || {
+            client::ping(&fixture.paths(), &fixture.token)
+                .is_ok()
+                .then_some(())
+        });
+        if ready.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("pmd did not become ready");
         }
         // `unlock` writes the session file next to the socket; do the same so
         // the CLI can authenticate exactly as it would after a human unlock.

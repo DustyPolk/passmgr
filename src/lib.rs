@@ -31,6 +31,8 @@ pub mod session;
 pub mod socket;
 pub mod store;
 pub mod terminal;
+#[cfg(test)]
+pub(crate) mod test_poll;
 pub mod text;
 pub mod timestamp;
 pub mod token;

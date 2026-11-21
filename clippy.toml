@@ -1,0 +1,3 @@
+disallowed-methods = [
+  { path = "std::thread::sleep", reason = "tests: wait on a condition with `test_poll::wait_until`/`wait_for` (src/test_poll.rs); a deliberate wait or production poll loop needs #[expect(clippy::disallowed_methods, reason = \"...\")]" },
+]

@@ -365,6 +365,10 @@ pub(crate) fn lock_file_with_timeout(
         if pause.is_zero() {
             thread::yield_now();
         } else {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "flock has no timed wait; back off between non-blocking retries until the deadline"
+            )]
             thread::sleep(pause);
         }
     }
