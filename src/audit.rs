@@ -309,9 +309,7 @@ fn open_locked(path: &Path) -> Result<File, AuditError> {
     let (file, _metadata) = fs_secure::open_regular_file(
         path,
         OpenRegularOptions {
-            access: OpenMode::CreateReadAppend {
-                mode: AUDIT_FILE_MODE,
-            },
+            access: OpenMode::CreateReadAppend,
             owner: OwnerPolicy::CurrentUser,
             mode: ModePolicy::Exact(AUDIT_FILE_MODE),
         },

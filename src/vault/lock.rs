@@ -56,14 +56,45 @@ pub(super) fn acquire_write_lock_with_timeout(vault: &Path, timeout: Duration) -
     let (file, _) = fs_secure::open_regular_file(
         &path,
         OpenRegularOptions {
-            access: OpenMode::CreateReadWrite {
-                mode: PRIVATE_FILE_MODE,
-            },
+            access: OpenMode::CreateReadWrite,
             owner: OwnerPolicy::CurrentUser,
             mode: ModePolicy::Any,
         },
     )
-    .map_err(|err| match err {
+    .map_err(|err| map_fs_error(vault, err))?;
+
+    // An old lock file could carry a wider mode; narrow it before use.
+    file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+        .map_err(|err| with_path(&path, err))?;
+
+    fs_secure::lock_file_with_timeout(
+        &file,
+        &path,
+        FlockKind::Exclusive,
+        timeout,
+        WRITE_LOCK_RETRY,
+    )
+    .map_err(|err| map_fs_error(vault, err))?;
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+pub(super) fn acquire_write_lock_with_timeout(vault: &Path, _timeout: Duration) -> Result<File> {
+    let _ = vault;
+    Err(Error::UnsupportedFormat(
+        "vault write locking requires a Unix system".to_owned(),
+    ))
+}
+
+#[cfg(unix)]
+pub(super) fn write_container(path: &Path, container: &[u8]) -> Result<()> {
+    fs_secure::atomic_write_private(path, container, ".passmgr-", ".tmp")
+        .map_err(|err| map_fs_error(path, err))
+}
+
+#[cfg(unix)]
+fn map_fs_error(vault: &Path, err: FsError) -> Error {
+    match err {
         FsError::Insecure {
             path,
             kind: InsecureKind::NotRegularFile,
@@ -83,52 +114,7 @@ pub(super) fn acquire_write_lock_with_timeout(vault: &Path, timeout: Duration) -
             with_path(&path, source)
         }
         FsError::Busy { .. } => Error::VaultBusy(vault.to_path_buf()),
-    })?;
-
-    // An old lock file could carry a wider mode; narrow it before use.
-    file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))
-        .map_err(|err| with_path(&path, err))?;
-
-    fs_secure::lock_file_with_timeout(
-        &file,
-        &path,
-        FlockKind::Exclusive,
-        timeout,
-        WRITE_LOCK_RETRY,
-    )
-    .map_err(|err| match err {
-        FsError::Busy { .. } => Error::VaultBusy(vault.to_path_buf()),
-        FsError::NotFound { path, source } | FsError::Io { path, source } => {
-            with_path(&path, source)
-        }
-        FsError::Insecure { path, kind } => with_path(
-            &path,
-            io::Error::new(io::ErrorKind::PermissionDenied, kind.to_string()),
-        ),
-    })?;
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-pub(super) fn acquire_write_lock_with_timeout(vault: &Path, _timeout: Duration) -> Result<File> {
-    let _ = vault;
-    Err(Error::UnsupportedFormat(
-        "vault write locking requires a Unix system".to_owned(),
-    ))
-}
-
-#[cfg(unix)]
-pub(super) fn write_container(path: &Path, container: &[u8]) -> Result<()> {
-    fs_secure::atomic_write_private(path, container, ".passmgr-", ".tmp").map_err(|err| match err {
-        FsError::NotFound { path, source } | FsError::Io { path, source } => {
-            with_path(&path, source)
-        }
-        FsError::Busy { .. } => Error::VaultBusy(path.to_path_buf()),
-        FsError::Insecure { path, kind } => with_path(
-            &path,
-            io::Error::new(io::ErrorKind::PermissionDenied, kind.to_string()),
-        ),
-    })
+    }
 }
 
 #[cfg(not(unix))]
@@ -163,7 +149,7 @@ pub(super) fn write_container(path: &Path, container: &[u8]) -> Result<()> {
 pub(super) fn with_path(path: &Path, err: io::Error) -> Error {
     Error::Io(io::Error::new(
         err.kind(),
-        format!("{}: {err}", escape_path(path)),
+        format!("'{}': {err}", escape_path(path)),
     ))
 }
 

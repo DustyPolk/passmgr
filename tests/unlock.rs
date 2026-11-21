@@ -491,7 +491,7 @@ fn unlock_refuses_when_a_daemon_is_already_running() {
 #[test]
 fn an_unlock_that_loses_the_instance_lock_keeps_the_winners_session() {
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::os::unix::fs::DirBuilderExt;
 
     let fixture = Fixture::new();
     let paths = fixture.daemon_paths();
@@ -505,7 +505,6 @@ fn an_unlock_that_loses_the_instance_lock_keeps_the_winners_session() {
         .create(true)
         .truncate(false)
         .write(true)
-        .mode(passmgr::socket::FILE_MODE)
         .open(paths.dir().join(passmgr::socket::LOCK_FILE))
         .expect("open the instance lock");
     // SAFETY: a valid descriptor owned by `lock` for the whole test.

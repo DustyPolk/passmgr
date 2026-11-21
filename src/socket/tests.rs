@@ -221,12 +221,13 @@ fn symlinked_lock_file_is_refused_untouched() {
 }
 
 #[test]
-fn fifo_and_loose_lock_file_are_refused_without_blocking_or_repair() {
+fn lock_file_refuses_fifo_and_symlink_and_narrows_loose_regular_file() {
     let temp = tempfile::tempdir().unwrap();
     let paths = paths_in(&temp);
     fs::create_dir_all(paths.dir()).unwrap();
     fs::set_permissions(paths.dir(), fs::Permissions::from_mode(0o700)).unwrap();
 
+    // (a) A FIFO at the lock path is refused without blocking.
     let status = std::process::Command::new("mkfifo")
         .arg(paths.lock())
         .status()
@@ -248,26 +249,46 @@ fn fifo_and_loose_lock_file_are_refused_without_blocking_or_repair() {
     assert!(paths.lock().exists(), "FIFO at lock path must remain");
     assert!(!paths.socket().exists());
 
+    // (b) A symlink at the lock path is refused untouched (never chmodded).
+    fs::remove_file(paths.lock()).unwrap();
+    let target = temp.path().join("loose-target");
+    fs::write(&target, b"keep-me").unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o644)).unwrap();
+    symlink(&target, paths.lock()).unwrap();
+
+    let attempt = DaemonSocket::bind_at(paths.clone());
+    assert!(
+        matches!(attempt, Err(SocketError::InsecurePath { .. })),
+        "expected InsecurePath, got {attempt:?}"
+    );
+    assert_eq!(
+        mode_of(&target),
+        0o644,
+        "symlink target must never be chmodded"
+    );
+    assert!(
+        fs::symlink_metadata(paths.lock())
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "symlink at lock path must remain untouched"
+    );
+    assert!(!paths.socket().exists());
+
+    // (c) An existing regular lock file with loose mode (0644) is narrowed to
+    // 0600 on the verified descriptor rather than refused.
     fs::remove_file(paths.lock()).unwrap();
     fs::write(paths.lock(), b"").unwrap();
     fs::set_permissions(paths.lock(), fs::Permissions::from_mode(0o644)).unwrap();
 
-    let attempt = DaemonSocket::bind_at(paths.clone());
-    match attempt {
-        Err(SocketError::InsecurePath { detail, .. }) => {
-            assert!(
-                detail.contains("0644"),
-                "detail should name the mode: {detail}"
-            );
-        }
-        other => panic!("expected InsecurePath, got {other:?}"),
-    }
+    let daemon = DaemonSocket::bind_at(paths.clone()).expect("loose regular lock file is narrowed");
     assert_eq!(
         mode_of(&paths.lock()),
-        0o644,
-        "loose lock file permissions must never be repaired"
+        0o600,
+        "verified regular lock file permissions must be narrowed to 0600"
     );
-    assert!(!paths.socket().exists());
+    assert!(paths.socket().exists());
+    drop(daemon);
 }
 
 #[test]

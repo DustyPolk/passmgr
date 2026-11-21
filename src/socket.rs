@@ -518,19 +518,29 @@ const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Take a non-blocking exclusive `flock` on `path`.
 ///
-/// The lock is released when the returned `File` is dropped (or the process
-/// exits). A lock that stays held for [`LOCK_ACQUIRE_TIMEOUT`] maps to
-/// [`SocketError::AlreadyRunning`]. The lock file is never unlinked while held.
+/// Opens `path` with `O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`, verifies that the
+/// descriptor is a regular file owned by the current user, narrows its
+/// permissions to [`FILE_MODE`] on that verified descriptor, and acquires the
+/// exclusive lock. The lock is released when the returned `File` is dropped
+/// (or the process exits). A lock that stays held for [`LOCK_ACQUIRE_TIMEOUT`]
+/// maps to [`SocketError::AlreadyRunning`]. The lock file is never unlinked
+/// while held.
 fn acquire_lock(path: &Path) -> Result<File, SocketError> {
     let (file, _metadata) = fs_secure::open_regular_file(
         path,
         OpenRegularOptions {
-            access: OpenMode::CreateReadWrite { mode: FILE_MODE },
+            access: OpenMode::CreateReadWrite,
             owner: OwnerPolicy::CurrentUser,
-            mode: ModePolicy::Exact(FILE_MODE),
+            mode: ModePolicy::Any,
         },
     )
     .map_err(map_fs_error)?;
+
+    // Narrow permissions on the verified regular-file descriptor so an
+    // existing lock file with wider permissions is tightened to 0600 without
+    // ever chmodding a symlink or non-regular file.
+    file.set_permissions(fs::Permissions::from_mode(FILE_MODE))
+        .map_err(|err| SocketError::io(path, err))?;
 
     fs_secure::lock_file_with_timeout(
         &file,

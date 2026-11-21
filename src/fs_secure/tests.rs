@@ -62,12 +62,8 @@ fn open_regular_file_refuses_symlinks_across_all_open_modes() {
     for path in [&link, &dangling] {
         for access in [
             OpenMode::ReadOnly,
-            OpenMode::CreateReadWrite {
-                mode: PRIVATE_FILE_MODE,
-            },
-            OpenMode::CreateReadAppend {
-                mode: PRIVATE_FILE_MODE,
-            },
+            OpenMode::CreateReadWrite,
+            OpenMode::CreateReadAppend,
         ] {
             let err = open_regular_file(
                 path,
@@ -106,12 +102,8 @@ fn open_regular_file_refuses_fifo_without_blocking() {
 
     for access in [
         OpenMode::ReadOnly,
-        OpenMode::CreateReadWrite {
-            mode: PRIVATE_FILE_MODE,
-        },
-        OpenMode::CreateReadAppend {
-            mode: PRIVATE_FILE_MODE,
-        },
+        OpenMode::CreateReadWrite,
+        OpenMode::CreateReadAppend,
     ] {
         let fifo_path = fifo.clone();
         let (tx, rx) = mpsc::channel();
@@ -153,12 +145,8 @@ fn open_regular_file_refuses_directory_across_all_open_modes() {
 
     for access in [
         OpenMode::ReadOnly,
-        OpenMode::CreateReadWrite {
-            mode: PRIVATE_FILE_MODE,
-        },
-        OpenMode::CreateReadAppend {
-            mode: PRIVATE_FILE_MODE,
-        },
+        OpenMode::CreateReadWrite,
+        OpenMode::CreateReadAppend,
     ] {
         let err = open_regular_file(
             &subdir,
@@ -231,9 +219,7 @@ fn open_regular_file_enforces_mode_policies_without_repairing() {
             let err = open_regular_file(
                 &path,
                 OpenRegularOptions {
-                    access: OpenMode::CreateReadWrite {
-                        mode: PRIVATE_FILE_MODE,
-                    },
+                    access: OpenMode::CreateReadWrite,
                     owner: OwnerPolicy::CurrentUser,
                     mode: policy,
                 },
@@ -319,18 +305,8 @@ fn open_regular_file_enforces_owner_policy() {
 fn open_regular_file_creates_missing_file_with_0600_in_write_and_append_modes() {
     let dir = TempDir::new().expect("tempdir");
     for (name, access) in [
-        (
-            "rw.lock",
-            OpenMode::CreateReadWrite {
-                mode: PRIVATE_FILE_MODE,
-            },
-        ),
-        (
-            "append.jsonl",
-            OpenMode::CreateReadAppend {
-                mode: PRIVATE_FILE_MODE,
-            },
-        ),
+        ("rw.lock", OpenMode::CreateReadWrite),
+        ("append.jsonl", OpenMode::CreateReadAppend),
     ] {
         let path = dir.path().join(name);
         let (_file, meta) = open_regular_file(
@@ -345,6 +321,41 @@ fn open_regular_file_creates_missing_file_with_0600_in_write_and_append_modes() 
         assert!(meta.is_file());
         assert_eq!(meta.mode() & 0o777, PRIVATE_FILE_MODE);
         assert_eq!(meta.uid(), current_uid());
+    }
+}
+
+#[test]
+fn open_regular_file_sets_cloexec_across_all_open_modes() {
+    let dir = TempDir::new().expect("tempdir");
+    let existing = dir.path().join("existing");
+    write_with_mode(&existing, b"data", PRIVATE_FILE_MODE);
+
+    for (path, access) in [
+        (existing, OpenMode::ReadOnly),
+        (dir.path().join("rw.lock"), OpenMode::CreateReadWrite),
+        (dir.path().join("append.jsonl"), OpenMode::CreateReadAppend),
+    ] {
+        let (file, _) = open_regular_file(
+            &path,
+            OpenRegularOptions {
+                access,
+                owner: OwnerPolicy::CurrentUser,
+                mode: ModePolicy::Exact(PRIVATE_FILE_MODE),
+            },
+        )
+        .expect("open regular file");
+        // SAFETY: `file` owns a live descriptor for the duration of this call.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFD) };
+        assert!(
+            flags >= 0,
+            "fcntl(F_GETFD) failed: {}",
+            io::Error::last_os_error()
+        );
+        assert_ne!(
+            flags & libc::FD_CLOEXEC,
+            0,
+            "FD_CLOEXEC must be set for {access:?}"
+        );
     }
 }
 
@@ -490,9 +501,7 @@ fn timed_flock_enforces_shared_exclusive_contention_and_release_on_drop() {
         open_regular_file(
             &path,
             OpenRegularOptions {
-                access: OpenMode::CreateReadWrite {
-                    mode: PRIVATE_FILE_MODE,
-                },
+                access: OpenMode::CreateReadWrite,
                 owner: OwnerPolicy::CurrentUser,
                 mode: ModePolicy::Exact(PRIVATE_FILE_MODE),
             },
@@ -567,21 +576,56 @@ fn timed_flock_enforces_shared_exclusive_contention_and_release_on_drop() {
         assert!(started.elapsed() >= Duration::from_millis(35));
     }
 
-    // Releasing the exclusive lock mid-wait lets the retrying caller succeed.
-    let holder = waiter;
-    let releaser = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(25));
-        drop(holder);
-    });
-    lock_file_with_timeout(
+    // Confirm immediate Busy while held (zero timeout does not block).
+    let err = lock_file_with_timeout(
         &contender,
         &path,
         FlockKind::Exclusive,
-        Duration::from_millis(500),
+        Duration::ZERO,
         Duration::from_millis(5),
     )
-    .expect("retry must acquire lock once holder drops");
-    releaser.join().expect("join releaser");
+    .expect_err("contended lock with zero timeout must return Busy");
+    assert!(matches!(err, FsError::Busy { .. }), "{err:?}");
+
+    // Synchronize the waiter thread before releasing `holder` so contention
+    // and post-release acquisition are proven without any fixed sleep.
+    let holder = waiter;
+    let waiter_path = path.clone();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+    let acquirer = thread::spawn(move || {
+        let busy = lock_file_with_timeout(
+            &contender,
+            &waiter_path,
+            FlockKind::Exclusive,
+            Duration::ZERO,
+            Duration::from_millis(5),
+        );
+        assert!(matches!(busy, Err(FsError::Busy { .. })), "{busy:?}");
+        started_tx.send(()).expect("signal waiter ready");
+        let acquired = lock_file_with_timeout(
+            &contender,
+            &waiter_path,
+            FlockKind::Exclusive,
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+        );
+        acquired_tx.send(acquired).expect("send acquire result");
+    });
+
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("waiter thread started");
+    assert!(
+        matches!(acquired_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
+        "lock must not be acquired while holder is alive"
+    );
+    drop(holder);
+    acquired_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("waiter must finish after holder drops")
+        .expect("retry must acquire lock once holder drops");
+    acquirer.join().expect("join acquirer");
     assert!(path.exists(), "lock file must stay on disk");
 }
 

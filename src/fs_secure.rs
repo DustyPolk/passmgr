@@ -37,12 +37,12 @@ pub(crate) fn current_uid() -> u32 {
 pub(crate) enum OpenMode {
     /// Open an existing file read-only (`O_RDONLY`).
     ReadOnly,
-    /// Open for reading and writing, creating with `mode` if missing, without
-    /// truncating (`O_RDWR | O_CREAT`).
-    CreateReadWrite { mode: u32 },
-    /// Open for reading and appending, creating with `mode` if missing, without
-    /// truncating (`O_RDWR | O_APPEND | O_CREAT`).
-    CreateReadAppend { mode: u32 },
+    /// Open for reading and writing, creating with [`PRIVATE_FILE_MODE`]
+    /// (`0o600`) if missing, without truncating (`O_RDWR | O_CREAT`).
+    CreateReadWrite,
+    /// Open for reading and appending, creating with [`PRIVATE_FILE_MODE`]
+    /// (`0o600`) if missing, without truncating (`O_RDWR | O_APPEND | O_CREAT`).
+    CreateReadAppend,
 }
 
 /// Permission policy enforced on a private file or directory.
@@ -181,11 +181,17 @@ fn open_regular_file_for_uid(
     open.read(true);
     match options.access {
         OpenMode::ReadOnly => {}
-        OpenMode::CreateReadWrite { mode } => {
-            open.write(true).create(true).truncate(false).mode(mode);
+        OpenMode::CreateReadWrite => {
+            open.write(true)
+                .create(true)
+                .truncate(false)
+                .mode(PRIVATE_FILE_MODE);
         }
-        OpenMode::CreateReadAppend { mode } => {
-            open.append(true).create(true).truncate(false).mode(mode);
+        OpenMode::CreateReadAppend => {
+            open.append(true)
+                .create(true)
+                .truncate(false)
+                .mode(PRIVATE_FILE_MODE);
         }
     }
     // Never follow a symlink at the final component, never block on a FIFO
